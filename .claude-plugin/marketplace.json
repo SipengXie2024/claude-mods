@@ -1,10 +1,33 @@
 {
   "name": "sipeng-mods",
-  "owner": { "name": "sipeng" },
+  "owner": {
+    "name": "sipeng"
+  },
   "plugins": [
-    { "name": "subagent-opus", "source": "./mods/subagent-opus", "description": "Under a Fable main loop, start Agent-tool subagents on Opus." },
-    { "name": "no-bg-poll", "source": "./mods/no-bg-poll", "description": "Block sleep-and-read polling of background tasks." },
-    { "name": "workflow-opus-guard", "source": "./mods/workflow-opus-guard", "description": "Under a Fable main loop, deny Workflow scripts whose agent() calls do not pin model: 'opus'." },
-    { "name": "jev", "source": "./mods/jev", "description": "Per-step Jev effort routing for Opus (jev-opus policy.v8): task, step and follow-up effort." }
+    {
+      "name": "subagent-opus",
+      "source": "./mods/subagent-opus",
+      "description": "Under a Fable main loop, start Agent-tool subagents on Opus."
+    },
+    {
+      "name": "no-bg-poll",
+      "source": "./mods/no-bg-poll",
+      "description": "Block sleep-and-read polling of background tasks."
+    },
+    {
+      "name": "workflow-opus-guard",
+      "source": "./mods/workflow-opus-guard",
+      "description": "Under a Fable main loop, deny Workflow scripts whose agent() calls do not pin model: 'opus'."
+    },
+    {
+      "name": "jev",
+      "source": "./mods/jev",
+      "description": "Per-step Jev effort routing for Opus (jev-opus policy.v8): task, step and follow-up effort."
+    },
+    {
+      "name": "mode",
+      "source": "./mods/mode",
+      "description": "Per-repo general/academic mode: /mode writes .claude/settings.local.json; paper repos get a one-time hint."
+    }
   ]
 }

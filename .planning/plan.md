@@ -23,3 +23,12 @@ claude-opus-4-8, reported to user only).
 
 Task 7 result: released as superpower-planning v4.3.0 (e05a350), installed locally.
 Evals: design-exploration A/B 3/6 vs 3/6 on Opus 5.5; durable-plan 0.89/0.89.
+
+# Plan: general/academic modes, phase 1 (approved 2026-10-08 via html-plan response)
+Page: https://cc.bbd.sh/plan/claude-modes-2026-10-08.html · design: design-modes.md
+Decisions: general writes general values of the 4 keys; any .tex/.bib prompts; status only in academic; migrate 10 repos now.
+1. [x] Verify repo-level skillOverrides overrides the global value (headless).
+2. [x] mods/mode: profiles.ts, settings.ts, detect.ts, register.ts + tests; validate, tsc, test.
+3. [x] marketplace entry + install; live check /mode in a scratch repo.
+4. [x] Global skillOverrides academic-writing-context=off; add "on" to the 10 academic repos.
+5. [x] Delete ~/.claude/skills/academic-setup (backup first).
