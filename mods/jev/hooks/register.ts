@@ -23,6 +23,8 @@ type $ = EngineInterface
 const MAIN = 'main'
 /** The policy is calibrated for Opus 5.5; jc routed only its own Opus alias. */
 const ROUTED_MODEL = /opus/i
+/** A `jev/…` model belongs to the jev-opus gateway, which routes it itself: two routers would undo each other. */
+const GATEWAY_MODEL = /^jev\//i
 const EDIT_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit'])
 /** Prompt origins that are a person's own message (the follow-up signal asks only on these). */
 const HUMAN_ORIGINS = new Set(['composer', 'bridge', 'sdk'])
@@ -294,7 +296,7 @@ async function loopPrompt($: $, agentId: string | undefined): Promise<string> {
 }
 
 async function decideStep($: $, e: { index: number; model: string; effort?: unknown; agentId?: string; turnId: string }): Promise<Effort | undefined> {
-  if (!isEffort(e.effort) || !ROUTED_MODEL.test(e.model)) return undefined
+  if (!isEffort(e.effort) || !ROUTED_MODEL.test(e.model) || GATEWAY_MODEL.test(e.model)) return undefined
   const { cfg, client, dir } = await load($)
   const key = e.agentId ?? MAIN
   const loop = loopFor(key, cfg)

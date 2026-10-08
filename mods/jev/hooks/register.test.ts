@@ -187,6 +187,13 @@ describe('task and step routing', () => {
     expect(sent(w)).toEqual(['xhigh', 3])
   })
 
+  test('a jev/ model is left to the jev-opus gateway', async ($, on) => {
+    const w = world(on)
+    await submit($, 'fix the crash in parser.ts')
+    await step($, 0, 'xhigh', { model: 'jev/claude-opus-5-5[1m]' })
+    expect(sent(w)).toEqual(['xhigh'])
+  })
+
   test('a hook failure leaves the request as the engine made it', async ($, on) => {
     const w = world(on, { brokenSession: true })
     await step($, 0, 'xhigh')
