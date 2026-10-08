@@ -1,0 +1,8 @@
+{
+  "name": "jev",
+  "version": "0.1.0",
+  "description": "Per-step Jev effort routing for Opus (port of jev-opus policy.v8): task effort per prompt, step effort after each tool batch, follow-up fault raise.",
+  "author": {
+    "name": "sipeng"
+  }
+}
