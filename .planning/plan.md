@@ -21,5 +21,5 @@ Decisions (user, 2026-10-08):
 Not touched: herdr hook (managed by herdr), statusline, fast-jev-compaction, settings "model" (stale
 claude-opus-4-8, reported to user only).
 
-Task 7 result: committed locally as superpower-planning 706c0f2 (not pushed or released).
+Task 7 result: released as superpower-planning v4.3.0 (e05a350), installed locally.
 Evals: design-exploration A/B 3/6 vs 3/6 on Opus 5.5; durable-plan 0.89/0.89.
