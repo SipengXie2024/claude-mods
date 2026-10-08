@@ -1,0 +1,8 @@
+{
+  "name": "no-bg-poll",
+  "version": "0.1.0",
+  "description": "Block sleep-and-read polling of background tasks; they send a completion notification.",
+  "author": {
+    "name": "sipeng"
+  }
+}

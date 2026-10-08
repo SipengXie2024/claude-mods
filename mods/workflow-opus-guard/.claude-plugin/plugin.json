@@ -1,0 +1,8 @@
+{
+  "name": "workflow-opus-guard",
+  "version": "0.1.0",
+  "description": "Under a Fable main loop, deny Workflow scripts whose agent() calls do not pin model: 'opus'.",
+  "author": {
+    "name": "sipeng"
+  }
+}

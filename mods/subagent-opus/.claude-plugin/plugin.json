@@ -1,0 +1,8 @@
+{
+  "name": "subagent-opus",
+  "version": "0.1.0",
+  "description": "When the main loop runs on a Fable model, start Agent-tool subagents on Opus instead of inheriting Fable.",
+  "author": {
+    "name": "sipeng"
+  }
+}
