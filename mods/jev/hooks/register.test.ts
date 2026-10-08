@@ -140,6 +140,12 @@ describe('task and step routing', () => {
     expect(j[4]!.reasons[0]).toBe('failing check now passes → release hold')
     expect(w.status.at(-1)).toBe('Jev · medium → high → medium')
     expect(w.asks[0]!.auth).toBe('Bearer test-key')
+    // the status-line script reads the gateway-format file per session
+    const files = [...w.files.keys()].filter((k) => k.startsWith(`${DIR}/status/`))
+    expect(files.length).toBe(1)
+    const st = JSON.parse(w.files.get(files[0]!)!)
+    expect(st).toMatchObject({ effort: 'medium', trail: ['medium', 'high', 'medium'], previous: 'high', phase: 'finishing', source: 'jev' })
+    expect(typeof st.at).toBe('number')
   })
 
   test('the journal holds no prompt text and no key', async ($, on) => {

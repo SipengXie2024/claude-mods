@@ -206,6 +206,20 @@ function showTrail($: $, loop: Loop, effort: Effort): void {
   $.ui.status(`Jev · ${loop.trail.length > shown.length ? '… → ' : ''}${shown.join(' → ')}`)
 }
 
+/**
+ * The status file ~/.claude/statusline/simple.mjs reads (the gateway's format):
+ * `<config dir>/status/<session>.json` with the effort, the prompt's trail, the
+ * step phase or task kind, and where the decision came from. Best effort.
+ */
+async function writeStatus($: $, dir: string, session: string, loop: Loop, d: EffortDecision): Promise<void> {
+  if (!/^[\w-]+$/.test(session)) return
+  const status = {
+    effort: d.effort, previous: d.previous, trail: [...loop.trail],
+    phase: d.signals?.phase ?? d.profile?.taskType ?? null, source: d.source, at: await $.clock.now(),
+  }
+  await $.fs.write(`${dir}/status/${session}.json`, JSON.stringify(status)).catch(() => {})
+}
+
 /** Task decision for a prompt about to start the main loop's turn. */
 async function routePrompt($: $, text: string, origin: string): Promise<{ decision: EffortDecision; advisor: boolean }> {
   const { cfg, client, dir } = await load($)
@@ -331,6 +345,7 @@ async function decideStep($: $, e: { index: number; model: string; effort?: unkn
   const session = await $.session.id()
   if (key === MAIN) {
     showTrail($, loop, effort)
+    await writeStatus($, dir, session, loop, decision)
     // The session record is the previous prompt's outcome for the next one:
     // a prompt starts it (prompt.submit, or here when none decided the turn),
     // and every step raises its max.
