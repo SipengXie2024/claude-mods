@@ -54,10 +54,12 @@ Formal academic register and plain language are not opposites. The register stay
 - Prefer active voice. Use passive only when the agent is genuinely unknown or irrelevant.
 - Prefer concrete language. Name the mechanism, metric, artifact, number. Vague phrasing like "various aspects," "a number of factors," "different approaches" hides the claim and invites doubt.
 - Cut filler: *in order to* → *to*; *it should be noted that*, *as a matter of fact*, *in the present work* → cut or *here*.
-- Cut decorative puffery: *comprehensive, robust, seamless, leverage, extensive, novel* used as ornament. If novelty must be claimed, name the specific increment.
+- Cut decorative puffery. Question every *comprehensive, crucial, extensive, notably, pivotal, delve, leverage, seamless*. *Novel*, *significantly*, and *robust* stay only when a number or a named difference follows in the same sentence. If novelty must be claimed, name the specific increment.
 - Define each technical term once at first use; do not redefine across sections.
 - Calibrate hedging. Hedge only when evidence is genuinely partial. Stacked hedges (*may potentially perhaps*) signal weakness, not caution.
 - Prefer falsifiable judgments. "The contribution sits in X, not in Y" beats "highly novel."
+- Check absolute words against the paper's own evaluation. For each *all, always, never, without, negligible, seamless, consistently* in an abstract or conclusion, look for a counterexample in the evaluation; if there is one, state the condition or the measured range instead. A hedge does not repair it: "roughly all" is still all.
+- Open on the problem, not on a trend. The first sentence of an abstract or introduction states an observable failure, a property readers assume that does not hold, or a cost with its size; it does not say a field is growing, popular, critical, or recent. Introductions fail this more often than abstracts.
 
 ### 2.1 Writing under a hard word limit
 
@@ -156,10 +158,11 @@ For a substantial writing request, output should contain:
 
 User-specific writing preferences:
 - Be concise. If prose is redundant or defensive, recommend deletion rather than a longer rewrite.
-- Keep evaluation-section bodies interpretive. Dense numbers belong in figures, tables, captions, or supporting evidence unless they are the headline answer.
+- Dense numbers (grids, distributions, per-configuration results) belong in figures and tables. Headline comparisons stay in the evaluation prose as measured numbers, per house style §8.21.
 - Pair setup and result for each experiment when it improves readability.
-- Discussion uses a neutral-positive tone: scope, implications, future opportunities. Not apologetic.
+- Discussion uses a neutral-positive tone: scope, implications, future opportunities. Not apologetic. Each limitation names its trigger, points to where its size is measured, and states what the design still keeps.
 - Do not underclaim measured wins. A speedup can be stated as a measured systems effect even if its micro-level cause is not isolated.
+- Report losses next to wins: your number and the baseline's in the same sentence, the condition first, and the component that causes the gap. If the design has a cost, name it in the abstract.
 - Do not elevate weak representative checks when broader evidence is available.
 
 ### C. Peer review and reviewer simulation
@@ -234,6 +237,7 @@ Across sessions on the same paper:
 - When asked to be "more academic," "more assertive," or "softer," adjust register without losing courtesy.
 - When multiple phrasings are possible, prefer the version most likely to be acceptable to a reviewer over the most aggressive one.
 - **House style is the default for reviewer-facing prose.** When the `superpower-writing` plugin is available, `skills/_shared/core/house-style.md` is the standing style guide for anything a reviewer will read: punctuation (no em-dashes, no in-sentence colons), reviewer self-containment, goal-form argument, IMRAD section responsibility, term economy, the accept and reject defaults of an editing pass, one senior co-author's editing conventions, and the paper's figure pattern. Apply it without being asked. Its §8 wins over its §1 through §7.
+- **Classic moves refine the house style.** `skills/_shared/core/classic-moves.md` lists body-level moves from pre-LLM systems papers: losses next to wins, an expectation before each measurement, the obvious alternative refuted, one running example, comparison validity, absolute words checked against the evaluation. It relaxes house style §3.2, §3.4 and style-cautions Lesson 2 on three named points and yields to house style §8 everywhere.
 - **A project style file overrides it.** When the repo carries `.claude/CLAUDE.md`, `AGENTS.md`, or an equivalent rulebook with prose conventions, those are hard constraints that beat both the house style and the defaults above. Surface any default the project file contradicts rather than applying both silently.
 - **Evidence rules sit outside the hierarchy.** No style rule, project or default, may turn an unsupported claim into a supported-sounding one, drop a `[NEEDS-EVIDENCE]` marker, or invent a citation to make a sentence read cleanly.
 
