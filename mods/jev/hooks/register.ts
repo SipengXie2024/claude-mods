@@ -36,7 +36,6 @@ const ACK_MAX_CHARS = 20
 export const ADVISOR_NOTE = 'The user says the previous attempt got something wrong, and it already ran at the highest available effort. Before continuing, call the advisor tool for a second opinion on the approach.'
 const JOURNAL_CAP = 512 * 1024
 const STORE_SESSIONS = 200
-const STATUS_TRAIL = 6
 
 /** One model loop's routing state: the main conversation or one subagent run. */
 interface Loop {
@@ -202,10 +201,9 @@ function record(d: EffortDecision, extra: Record<string, unknown>): Record<strin
 
 const round = (n: number) => Math.round(n * 1000) / 1000
 
-function showTrail($: $, loop: Loop, effort: Effort): void {
+/** The trail is shown by the status-line script from the status file, not by `$.ui.status`, which would repeat it. */
+function pushTrail(loop: Loop, effort: Effort): void {
   if (loop.trail.at(-1) !== effort) loop.trail.push(effort)
-  const shown = loop.trail.slice(-STATUS_TRAIL)
-  $.ui.status(`Jev · ${loop.trail.length > shown.length ? '… → ' : ''}${shown.join(' → ')}`)
 }
 
 /**
@@ -346,7 +344,7 @@ async function decideStep($: $, e: { index: number; model: string; effort?: unkn
   loop.effort = effort
   const session = await $.session.id()
   if (key === MAIN) {
-    showTrail($, loop, effort)
+    pushTrail(loop, effort)
     await writeStatus($, dir, session, loop, decision)
     // The session record is the previous prompt's outcome for the next one:
     // a prompt starts it (prompt.submit, or here when none decided the turn),

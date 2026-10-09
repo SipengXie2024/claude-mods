@@ -1,5 +1,7 @@
 // A repo looks like a paper when a .tex or .bib file, or a paper/ directory,
-// sits at the root or up to two levels down.
+// sits at the root or up to two levels down. A subdirectory with its own .git is
+// another project (e.g. papers under ~/sipeng when the session starts in ~), so
+// the scan does not enter it.
 
 export type Entry = { name: string; kind: 'file' | 'dir' | 'other' }
 export type Lister = (path: string) => Promise<readonly Entry[]>
@@ -15,6 +17,7 @@ export async function looksLikePaper(list: Lister, root: string, depth = 0): Pro
   } catch {
     return false
   }
+  if (depth > 0 && entries.some(e => e.name === '.git')) return false
   const dirs: string[] = []
   for (const e of entries) {
     if (e.kind === 'file' && PAPER_FILE.test(e.name)) return true

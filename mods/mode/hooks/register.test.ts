@@ -45,6 +45,9 @@ const tree: Record<string, Entry[]> = {
   '/b/src/deep/x': [{ name: 'too-deep.tex', kind: 'file' }],
   '/b/node_modules': [{ name: 'a.bib', kind: 'file' }],
   '/c': [{ name: 'refs.bib', kind: 'file' }],
+  '/home': [{ name: '.git', kind: 'dir' }, { name: 'work', kind: 'dir' }],
+  '/home/work': [{ name: 'thesis', kind: 'dir' }],
+  '/home/work/thesis': [{ name: '.git', kind: 'dir' }, { name: 'main.tex', kind: 'file' }],
 }
 const list = async (p: string) => {
   const e = tree[p]
@@ -59,4 +62,9 @@ test('looksLikePaper: paper/ two levels down, .bib at root', async () => {
 
 test('looksLikePaper: ignores node_modules and files deeper than two levels', async () => {
   expect(await looksLikePaper(list, '/b')).toBe(false)
+})
+
+test('looksLikePaper: a nested git repo is another project, even from a repo root', async () => {
+  expect(await looksLikePaper(list, '/home')).toBe(false)
+  expect(await looksLikePaper(list, '/home/work/thesis')).toBe(true)
 })

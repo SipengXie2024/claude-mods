@@ -138,7 +138,7 @@ describe('task and step routing', () => {
     expect(j[2]!.signals.phase).toBe('diagnosing')
     expect(j[2]!.evidence.observed[0]).toMatchObject({ tool: 'Bash', outcome: 'failed' })
     expect(j[4]!.reasons[0]).toBe('failing check now passes → release hold')
-    expect(w.status.at(-1)).toBe('Jev · medium → high → medium')
+    expect(w.status).toEqual([])
     expect(w.asks[0]!.auth).toBe('Bearer test-key')
     // the status-line script reads the gateway-format file per session
     const files = [...w.files.keys()].filter((k) => k.startsWith(`${DIR}/status/`))
