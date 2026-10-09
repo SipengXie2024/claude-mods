@@ -1,0 +1,79 @@
+{
+  "name": "fast-jev-compaction",
+  "version": "0.3.0-local.2",
+  "description": "Verbatim Jev-guided compaction for Claude Code sessions.",
+  "license": "MIT",
+  "userConfig": {
+    "apiKey": {
+      "type": "string",
+      "title": "TypeSafe API key",
+      "description": "TypeSafe API key. Leave unset to use TYPESAFE_API_KEY, then JEV_API_KEY.",
+      "sensitive": true
+    },
+    "baseUrl": {
+      "type": "string",
+      "title": "Jev endpoint",
+      "description": "System One URL. Leave unset to use TYPESAFE_BASE_URL, then JEV_BASE_URL, then TypeSafe's hosted endpoint."
+    },
+    "keepThreshold": {
+      "type": "number",
+      "title": "Keep threshold",
+      "description": "Minimum Jev probability that a tool call or tool result is still needed; below it the item is removed.",
+      "default": 0.5
+    },
+    "preserveRecentMessages": {
+      "type": "number",
+      "title": "Recent messages to preserve",
+      "description": "Number of newest messages pinned from compaction.",
+      "default": 6
+    },
+    "compactAtPercent": {
+      "type": "number",
+      "title": "Compaction percentage",
+      "description": "Context percentage at which turn.complete requests compaction.",
+      "default": 90
+    },
+    "minReductionRatio": {
+      "type": "number",
+      "title": "Minimum reduction ratio",
+      "description": "Minimum estimated character reduction required to replace history.",
+      "default": 0.25
+    },
+    "maxStateTokens": {
+      "type": "number",
+      "title": "Maximum Jev state tokens",
+      "description": "Estimated token budget for the conversation state sent with every Jev request.",
+      "default": 25000
+    },
+    "maxRequestTokens": {
+      "type": "number",
+      "title": "Maximum Jev request tokens",
+      "description": "Estimated token budget for state plus questions in one Jev request.",
+      "default": 30000
+    },
+    "truncateHeadChars": {
+      "type": "number",
+      "title": "Truncated tool result head",
+      "description": "Characters of a tool result kept when Jev decides its full output is no longer needed; 0 keeps only the note.",
+      "default": 300
+    },
+    "model": {
+      "type": "string",
+      "title": "Jev model",
+      "description": "TypeSafe Jev model name.",
+      "default": "jev-latest"
+    },
+    "maxConcurrentRequests": {
+      "type": "number",
+      "title": "Concurrent Jev requests",
+      "description": "Jev requests in flight at once during one compaction; 0 means no limit.",
+      "default": 2
+    },
+    "maxQuestionsPerRequest": {
+      "type": "number",
+      "title": "Questions per Jev request",
+      "description": "At most this many questions (two per tool call) in one Jev request. The System One API refuses more than 64; a self-hosted Splash also refuses state x questions past 1,048,576 tokens.",
+      "default": 32
+    }
+  }
+}
