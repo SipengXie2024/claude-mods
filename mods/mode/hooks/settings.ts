@@ -16,12 +16,10 @@ export function parseLocal(text: string | undefined): Json {
 export function mergeProfile(local: Json, mode: ModeName): Json {
   const p = PROFILES[mode]
   const plugins = isObject(local.enabledPlugins) ? local.enabledPlugins : {}
-  const overrides = isObject(local.skillOverrides) ? local.skillOverrides : {}
   return {
     ...local,
     enabledPlugins: { ...plugins, ...p.enabledPlugins },
     outputStyle: p.outputStyle,
-    skillOverrides: { ...overrides, ...p.skillOverrides },
   }
 }
 

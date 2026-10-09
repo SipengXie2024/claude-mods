@@ -1,6 +1,6 @@
 {
   "name": "mode",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "description": "Per-repo general/academic mode: /mode writes .claude/settings.local.json; paper repos get a one-time hint.",
   "author": { "name": "sipeng" }
 }
