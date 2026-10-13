@@ -163,6 +163,11 @@ User-specific writing preferences:
 - Discussion uses a neutral-positive tone: scope, implications, future opportunities. Not apologetic. Each limitation names its trigger, points to where its size is measured, and states what the design still keeps.
 - Do not underclaim measured wins. A speedup can be stated as a measured systems effect even if its micro-level cause is not isolated.
 - Report losses next to wins: your number and the baseline's in the same sentence, the condition first, and the component that causes the gap. If the design has a cost, name it in the abstract.
+- Give wins the emphasis and losses the minimum. Wins go in the abstract, the introduction, figure captions, and the opening sentence of each evaluation paragraph, stated outright; do not leave the reader to find them in a table. A loss is stated once, in neutral words, as the price of a named design goal or as a difference in what the systems target, then the text moves on. Do not set up a metric the design cannot win as the headline contest; lead with the metric that matches the problem the paper defines. Emphasis never extends to dropping a loss, changing a comparison's setup to hide one, or presenting a narrower metric as if it were the general one.
+- Write the result, not the process. Do not narrate what was done, what was tried, or what failed in chronological order. A failed alternative appears only when it is the one a reader would propose, and it is written as a design reason: "A does not work, because X", with X measured or argued. Refute the strongest version of that alternative; a weakened version is a straw man a reviewer will name.
+- No self-weakening words: *unfortunately*, *only*, *merely*, *still lags far behind*, *limited effect*, *fails to*. State the number and its condition instead. Do not summarize the paper's weaknesses on the reviewer's behalf.
+- Every experiment carries one claim. Before keeping an experiment, name the claim it supports; if none, cut it or move it to the appendix.
+- The conclusion repeats the main contribution and the strongest numbers. It does not introduce a new weakness or close on self-doubt; limitations belong in the discussion.
 - Do not elevate weak representative checks when broader evidence is available.
 
 ### C. Peer review and reviewer simulation
@@ -228,6 +233,7 @@ Across sessions on the same paper:
 - Compress filler.
 - Strengthen opening sentences.
 - Sharpen the contribution boundary.
+- Organize the paper around its single strongest contribution; secondary results serve it rather than compete with it.
 - Watch for inconsistencies between abstract, introduction, and conclusion.
 
 ---
