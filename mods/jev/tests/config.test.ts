@@ -49,6 +49,10 @@ test('modConfig: the live .env keys', () => {
 test('modConfig: Jev stays off unless JEV_BASE_URL points at an allowed host', () => {
   assert.equal(modConfig({ JEV_API_KEY: 'k' }).jev, null, 'no URL no longer means TypeSafe hosted');
   assert.equal(modConfig({ JEV_API_KEY: 'k', JEV_BASE_URL: 'https://api.typesafe.ai/v1/systemone' }).jev, null);
+  assert.equal(modConfig({ JEV_API_KEY: 'k', JEV_BASE_URL: 'https://api.typesafe.ai/v1/systemone' }).jevRefusedHost, 'api.typesafe.ai');
+  assert.equal(modConfig({ JEV_API_KEY: 'k' }).jevRefusedHost, '(unset)');
+  assert.equal(modConfig({}).jevRefusedHost, null, 'no key: nothing refused');
+  assert.equal(modConfig({ JEV_API_KEY: 'k', JEV_BASE_URL: 'http://127.0.0.1:18013/v1/systemone' }).jevRefusedHost, null);
   assert.equal(modConfig({ JEV_API_KEY: 'k', JEV_BASE_URL: 'http://172.21.0.1:18014/v1/systemone' }).jev?.baseUrl, 'http://172.21.0.1:18014/v1/systemone');
   const listed = modConfig({ JEV_API_KEY: 'k', JEV_BASE_URL: 'http://100.93.153.4:8013/v1/systemone', JEV_ALLOWED_HOSTS: ' 100.93.153.4 , mac ' });
   assert.equal(listed.jev?.baseUrl, 'http://100.93.153.4:8013/v1/systemone');

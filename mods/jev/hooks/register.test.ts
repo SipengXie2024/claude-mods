@@ -176,6 +176,7 @@ describe('task and step routing', () => {
     await step($, 0)
     expect(w.asks.length).toBe(0)
     expect(journal(w)[0]!.source).toBe('heuristic')
+    expect(journal(w)[0]!.jevRefusedHost).toBe('jev.test')
   })
 
   test('Jev past its deadline: heuristics, the request is not held', async ($, on) => {

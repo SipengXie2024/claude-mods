@@ -71,6 +71,7 @@ interface SessionRecord {
 const loops = new Map<string, Loop>()
 let setup: Promise<{ cfg: ModConfig; client: JevClient | null; dir: string }> | null = null
 let journalQueue: Promise<void> = Promise.resolve()
+let refusedWarned = false
 
 async function configDir($: $): Promise<string> {
   const dir = await $.env.get('JEV_OPUS_CONFIG_DIR')
@@ -274,7 +275,11 @@ async function routePrompt($: $, text: string, origin: string): Promise<{ decisi
   })
   loop.task = decision
   const advisor = f?.advisor === true
-  await journal($, dir, record(decision, { at: await $.clock.now(), session, agent: MAIN, event: 'prompt', origin, ...(f ? { advisorAvailable: followUp?.advisorAvailable } : {}) }))
+  await journal($, dir, record(decision, { at: await $.clock.now(), session, agent: MAIN, event: 'prompt', origin, ...(f ? { advisorAvailable: followUp?.advisorAvailable } : {}), ...(cfg.jevRefusedHost ? { jevRefusedHost: cfg.jevRefusedHost } : {}) }))
+  if (cfg.jevRefusedHost && !refusedWarned) {
+    refusedWarned = true
+    $.ui.toast(`Jev off: endpoint ${cfg.jevRefusedHost} is not local or in JEV_ALLOWED_HOSTS; routing by heuristics`)
+  }
   if (f?.raisedTo) $.ui.toast(`Jev: your message says the last turn went wrong → ${f.raisedTo}`)
   if (advisor) $.ui.toast('Jev: asking the model to consult the advisor')
   return { decision, advisor }

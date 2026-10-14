@@ -11,6 +11,9 @@ import { setStepStateMax, STEP_STATE_DEFAULT, STEP_STATE_MIN } from './router';
 export interface ModConfig {
   /** null without an API key or an allowed JEV_BASE_URL: heuristics only */
   jev: JevClientOptions | null;
+  /** The refused endpoint's host when a key is set but JEV_BASE_URL is unset or not allowed, so the
+   * fallback to heuristics can be reported instead of happening silently. */
+  jevRefusedHost: string | null;
   bounds: Bounds;
   deep: { yes: number; no: number };
   followUp: { mode: 'on' | 'shadow' | null; yes: number; advisor: boolean };
@@ -73,12 +76,22 @@ export function jevEndpointAllowed(url: string | undefined, extraHosts = ''): bo
   return [...LOCAL_JEV_HOSTS, ...extra].includes(parsed.hostname.toLowerCase());
 }
 
+function endpointHost(url: string): string {
+  if (!url) return '(unset)';
+  try {
+    return new URL(url).host;
+  } catch {
+    return '(invalid)';
+  }
+}
+
 export function modConfig(env: Record<string, string>): ModConfig {
   const apiKey = env.JEV_API_KEY || env.TYPESAFE_API_KEY || '';
   const baseUrl = env.JEV_BASE_URL || '';
+  const allowed = jevEndpointAllowed(baseUrl, env.JEV_ALLOWED_HOSTS);
   const dissat = (env.JEV_OPUS_DISSATISFACTION ?? '').trim().toLowerCase();
   return {
-    jev: apiKey && jevEndpointAllowed(baseUrl, env.JEV_ALLOWED_HOSTS)
+    jev: apiKey && allowed
       ? {
         apiKey,
         baseUrl,
@@ -90,6 +103,7 @@ export function modConfig(env: Record<string, string>): ModConfig {
         confidence: (env.JEV_CONFIDENCE === 'server' ? 'server' : 'recompute') as ConfidenceMode,
       }
       : null,
+    jevRefusedHost: apiKey && !allowed ? endpointHost(baseUrl) : null,
     bounds: normalizeBounds({ min: effort(env.JEV_OPUS_MIN_EFFORT, 'low'), max: effort(env.JEV_OPUS_MAX_EFFORT, 'high') }),
     deep: { yes: unit(env.JEV_OPUS_DEEP_YES, DEEP_DEFAULTS.yes), no: unit(env.JEV_OPUS_DEEP_NO, DEEP_DEFAULTS.no) },
     followUp: {
