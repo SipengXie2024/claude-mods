@@ -9,7 +9,7 @@ import { setStepStateMax, STEP_STATE_DEFAULT, STEP_STATE_MIN } from './router';
  * reads no other environment for these keys.
  */
 export interface ModConfig {
-  /** null when no API key is configured: heuristics only */
+  /** null without an API key or an allowed JEV_BASE_URL: heuristics only */
   jev: JevClientOptions | null;
   bounds: Bounds;
   deep: { yes: number; no: number };
@@ -51,14 +51,37 @@ function effort(raw: string | undefined, fallback: Effort): Effort {
   return isEffort(raw) ? raw : fallback;
 }
 
+/** Hosts that stay on machines we run: loopback and the sub2api Docker bridge. */
+export const LOCAL_JEV_HOSTS = ['127.0.0.1', 'localhost', '[::1]', '172.21.0.1'];
+
+/**
+ * Whether `url` may receive Jev state (whole prompts and tool output): http(s)
+ * to a local host or one listed in `extraHosts` (comma-separated
+ * JEV_ALLOWED_HOSTS). Anything else, a missing URL included, keeps Jev off, so
+ * a lost or mistyped config never sends a conversation to a hosted API.
+ */
+export function jevEndpointAllowed(url: string | undefined, extraHosts = ''): boolean {
+  if (!url) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+  const extra = extraHosts.split(',').map((h) => h.trim().toLowerCase()).filter(Boolean);
+  return [...LOCAL_JEV_HOSTS, ...extra].includes(parsed.hostname.toLowerCase());
+}
+
 export function modConfig(env: Record<string, string>): ModConfig {
   const apiKey = env.JEV_API_KEY || env.TYPESAFE_API_KEY || '';
+  const baseUrl = env.JEV_BASE_URL || '';
   const dissat = (env.JEV_OPUS_DISSATISFACTION ?? '').trim().toLowerCase();
   return {
-    jev: apiKey
+    jev: apiKey && jevEndpointAllowed(baseUrl, env.JEV_ALLOWED_HOSTS)
       ? {
         apiKey,
-        baseUrl: env.JEV_BASE_URL || 'https://api.typesafe.ai/v1/systemone',
+        baseUrl,
         model: env.JEV_MODEL || 'jev-latest',
         // Jev sits in the request path, so the budget is small.
         deadlineMs: int(env.JEV_DEADLINE_MS, 2_500),

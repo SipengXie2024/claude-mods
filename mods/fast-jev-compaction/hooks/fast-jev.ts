@@ -29,7 +29,42 @@ const HOOK_DEFAULTS = {
   // Splash pairs the full state with every question and refuses a request
   // whose prepared tokens pass 1,048,576: 32 questions x a 25k-token state fits.
   maxQuestionsPerRequest: 32,
+  // Splash prefills a 25k-token state in about 12 s (~2,150 tok/s); past this
+  // a request is abandoned so a stuck backend cannot hold the session.
+  requestTimeoutMs: 30_000,
 };
+
+/** Hosts that stay on machines we run: loopback and the sub2api Docker bridge. */
+export const LOCAL_JEV_HOSTS = ['127.0.0.1', 'localhost', '[::1]', '172.21.0.1'];
+
+/**
+ * Whether `url` may receive Jev state (the whole conversation): http(s) to a
+ * local host or one listed in `extraHosts` (comma-separated). Anything else, a
+ * missing URL included, means no Jev call, so a lost or mistyped config never
+ * sends a conversation to a hosted API.
+ */
+export function jevEndpointAllowed(url: string | undefined, extraHosts = ''): boolean {
+  if (!url) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+  const extra = extraHosts.split(',').map((h) => h.trim().toLowerCase()).filter(Boolean);
+  return [...LOCAL_JEV_HOSTS, ...extra].includes(parsed.hostname.toLowerCase());
+}
+
+/** The endpoint's host for logs and messages; never its path, query or userinfo. */
+function endpointHost(url: string | undefined): string {
+  if (!url) return '(unset)';
+  try {
+    return new URL(url).host;
+  } catch {
+    return '(invalid)';
+  }
+}
 
 export type HookFetchInit = {
   method?: string;
@@ -48,11 +83,15 @@ export type HookFetch = (url: string, init?: HookFetchInit) => Promise<HookFetch
 
 export type HookConfig = CompactOptions & {
   apiKey?: string;
-  /** System One endpoint; unset means TypeSafe's hosted one. */
+  /** System One endpoint; must pass `jevEndpointAllowed`, unset means no Jev call. */
   baseUrl?: string;
+  /** Comma-separated hosts allowed besides LOCAL_JEV_HOSTS (JEV_ALLOWED_HOSTS). */
+  allowedHosts?: string;
   compactAtPercent: number;
   minReductionRatio: number;
   model: string;
+  /** Per Jev request; 0 or less waits as long as the fetch takes. */
+  requestTimeoutMs: number;
 };
 
 function optionNumber(options: PluginOptions, key: string, fallback: number): number {
@@ -89,6 +128,7 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
       HOOK_DEFAULTS.minReductionRatio,
     ),
     model: optionString(options, 'model') ?? HOOK_DEFAULTS.model,
+    requestTimeoutMs: optionNumber(options, 'requestTimeoutMs', HOOK_DEFAULTS.requestTimeoutMs),
   };
   config.maxConcurrentRequests ??= HOOK_DEFAULTS.maxConcurrentRequests;
   config.maxQuestionsPerRequest ??= HOOK_DEFAULTS.maxQuestionsPerRequest;
@@ -96,9 +136,39 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
   if (baseUrl) config.baseUrl = baseUrl;
   const apiKey = optionString(options, 'apiKey');
   if (apiKey) config.apiKey = apiKey;
+  const allowedHosts = optionString(options, 'allowedHosts');
+  if (allowedHosts) config.allowedHosts = allowedHosts;
   const goal = optionString(options, 'goal');
   if (goal) config.goal = goal;
   return config;
+}
+
+/**
+ * `fetchFn` that rejects once `ms` pass. `$.http.fetch` takes no signal, so this
+ * is a race: the losing fetch finishes on its own and its answer is unused.
+ * Claude Code 2.1.299 also aborts a fetch after 30 s by itself, but the
+ * 2.1.274 types promise no limit, so the bound is kept here.
+ */
+export function withTimeout(
+  fetchFn: HookFetch,
+  ms: number,
+  sleep: (ms: number, signal: AbortSignal) => Promise<void>,
+): HookFetch {
+  if (!(ms > 0)) return fetchFn;
+  return async (url, init) => {
+    const stop = new AbortController();
+    const fetched = fetchFn(url, init);
+    fetched.catch(() => {});
+    const expired = sleep(ms, stop.signal).then(() => {
+      throw new Error(`Jev request timed out after ${ms} ms`);
+    });
+    expired.catch(() => {});
+    try {
+      return await Promise.race([fetched, expired]);
+    } finally {
+      stop.abort();
+    }
+  };
 }
 
 /** A `JevAsker` over the engine's `$.http.fetch`. */
@@ -180,13 +250,21 @@ export type SessionCompaction = {
   messages: SessionMessage[];
 };
 
-/** Runs the library over a session transcript; throws when the key is missing or Jev fails. */
+/**
+ * Runs the library over a session transcript; throws when the key is missing,
+ * the endpoint is not allowed, or Jev fails.
+ */
 export async function compactSession(
   messages: readonly SessionMessage[],
   config: HookConfig,
   fetchFn: HookFetch,
 ): Promise<SessionCompaction> {
   if (!config.apiKey) throw new Error('TYPESAFE_API_KEY is not configured');
+  if (!jevEndpointAllowed(config.baseUrl, config.allowedHosts)) {
+    throw new Error(
+      `Jev endpoint ${endpointHost(config.baseUrl)} is not a local host or in JEV_ALLOWED_HOSTS`,
+    );
+  }
   const result = await compact(
     messages,
     jevAsker(fetchFn, config.apiKey, config.model, config.baseUrl),
@@ -253,14 +331,20 @@ type EnvReader = {
   fs: { read: (path: string) => Promise<string> };
 };
 
+/** The jev-opus config folder, which the jev mod shares. */
+async function configDir($: Pick<EnvReader, 'env'>): Promise<string> {
+  return (
+    (await $.env.get('JEV_OPUS_CONFIG_DIR')) ||
+    `${(await $.env.get('XDG_CONFIG_HOME')) || `${(await $.env.get('HOME')) ?? ''}/.config`}/jev-opus`
+  );
+}
+
 /**
  * KEY=value lines of the jev-opus gateway's .env (the same file the jev mod
  * reads), or nothing when it is missing or unreadable.
  */
 async function jevOpusEnv($: EnvReader): Promise<Record<string, string>> {
-  const dir =
-    (await $.env.get('JEV_OPUS_CONFIG_DIR')) ||
-    `${(await $.env.get('XDG_CONFIG_HOME')) || `${(await $.env.get('HOME')) ?? ''}/.config`}/jev-opus`;
+  const dir = await configDir($);
   let text: string;
   try {
     text = await $.fs.read(`${dir}/.env`);
@@ -287,10 +371,10 @@ async function settingsEnv($: EnvReader, names: readonly string[]): Promise<stri
 }
 
 /**
- * Fills the key and endpoint when the options leave them unset: TYPESAFE_*,
- * then the JEV_* names the jev-opus gateway uses, from the process
- * environment, then the settings' `env` block, then the jev-opus .env file.
- * `$.env.get` takes literal names only, so the engine can list what the
+ * Fills the key, endpoint and extra allowed hosts when the options leave them
+ * unset: TYPESAFE_*, then the JEV_* names the jev-opus gateway uses, from the
+ * process environment, then the settings' `env` block, then the jev-opus .env
+ * file. `$.env.get` takes literal names only, so the engine can list what the
  * module reads.
  */
 export async function resolveEndpoint($: EnvReader, config: HookConfig): Promise<HookConfig> {
@@ -304,13 +388,52 @@ export async function resolveEndpoint($: EnvReader, config: HookConfig): Promise
     (await $.env.get('TYPESAFE_BASE_URL')) ??
     (await $.env.get('JEV_BASE_URL')) ??
     (await settingsEnv($, ['TYPESAFE_BASE_URL', 'JEV_BASE_URL']));
-  if (apiKey && baseUrl) return { ...config, apiKey, baseUrl };
+  const allowedHosts =
+    config.allowedHosts ??
+    (await $.env.get('JEV_ALLOWED_HOSTS')) ??
+    (await settingsEnv($, ['JEV_ALLOWED_HOSTS']));
+  if (apiKey && baseUrl && allowedHosts) return { ...config, apiKey, baseUrl, allowedHosts };
   const file = await jevOpusEnv($);
   return {
     ...config,
     apiKey: apiKey || file['JEV_API_KEY'] || undefined,
     baseUrl: baseUrl || file['JEV_BASE_URL'] || undefined,
+    allowedHosts: allowedHosts || file['JEV_ALLOWED_HOSTS'] || undefined,
   };
+}
+
+const JOURNAL_CAP = 512 * 1024;
+let journalQueue: Promise<void> = Promise.resolve();
+
+/**
+ * Appends one line to `compaction-journal.jsonl` in the jev-opus folder, next
+ * to the jev mod's journal; past the cap the file moves to `.1`. Never throws.
+ */
+async function journal(
+  $: Pick<EnvReader, 'env' | 'fs'> & { fs: { write: (path: string, text: string) => Promise<void> } },
+  entry: Record<string, unknown>,
+): Promise<void> {
+  const write = async () => {
+    const path = `${await configDir($)}/compaction-journal.jsonl`;
+    const line = JSON.stringify(entry);
+    let text = '';
+    try {
+      text = await $.fs.read(path);
+    } catch {
+      /* first line */
+    }
+    if (text.length + line.length + 1 > JOURNAL_CAP) {
+      await $.fs.write(`${path}.1`, text);
+      text = '';
+    }
+    await $.fs.write(path, `${text}${line}\n`);
+  };
+  journalQueue = journalQueue.then(write).catch(() => {});
+  await journalQueue;
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function notify(
@@ -331,30 +454,63 @@ export const register: Register = (on: On, options: PluginOptions) => {
   let compacting = false;
 
   on('session.compact', async ($, event, next) => {
+    // One journal line per compaction: counts, sizes and timings, no content.
+    const started = await $.clock.now();
+    const requests: { ms: number; status: number | string }[] = [];
+    const entry: Record<string, unknown> = { at: started, messagesBefore: event.messages.length };
+    const finish = async (fields: Record<string, unknown>) => {
+      await journal($, { ...entry, ...fields, ms: (await $.clock.now()) - started, requests });
+    };
     try {
       const config = await resolveEndpoint($, configured);
+      entry.endpoint = endpointHost(config.baseUrl);
+      const timed = withTimeout(
+        async (url, init) => {
+          const response = await $.http.fetch(url, init);
+          return { status: response.status, ok: response.ok, text: response.text };
+        },
+        config.requestTimeoutMs,
+        (ms, signal) => $.clock.sleep(ms, { signal }),
+      );
       const { result, messages } = await compactSession(event.messages, config, async (url, init) => {
-        const response = await $.http.fetch(url, init);
-        return { status: response.status, ok: response.ok, text: response.text };
+        const sent = await $.clock.now();
+        try {
+          const response = await timed(url, init);
+          requests.push({ ms: (await $.clock.now()) - sent, status: response.status });
+          return response;
+        } catch (error) {
+          requests.push({ ms: (await $.clock.now()) - sent, status: errorText(error) });
+          throw error;
+        }
       });
       for (const line of decisionLogLines(result)) $.ui.log(line);
+      const { stats } = result;
+      const sizes = {
+        reduction: Math.round(reductionRatio(result) * 1000) / 1000,
+        stateTokens: stats.stateTokens,
+        stateStage: stats.stateStage,
+        kept: stats.kept,
+        resultsDropped: stats.resultsDropped,
+        callsDropped: stats.callsDropped,
+        pinned: stats.pinned,
+      };
       if (reductionRatio(result) < config.minReductionRatio) {
         notify(
           $,
           `fallback to built-in summary (below ${percent(config.minReductionRatio)} minimum: ${summarize(result)})`,
         );
+        await finish({ outcome: 'below-minimum', ...sizes });
         return next(event);
       }
       notify(
         $,
         `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)})`,
       );
+      await finish({ outcome: 'compacted', messagesAfter: messages.length, ...sizes });
       return { messages };
     } catch (error) {
-      notify(
-        $,
-        `fallback to built-in summary (${error instanceof Error ? error.message : String(error)})`,
-      );
+      notify($, `fallback to built-in summary (${errorText(error)})`);
+      await finish({ outcome: 'error', error: errorText(error) });
       return next(event);
     }
   });

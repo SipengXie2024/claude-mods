@@ -12,6 +12,7 @@ const NO_KEY = [
 ].join('\n')
 const ENV = [
   'JEV_BASE_URL=http://jev.test/v1/systemone',
+  'JEV_ALLOWED_HOSTS=jev.test',
   'JEV_API_KEY=test-key',
   'JEV_DEADLINE_MS=3500',
   'JEV_OPUS_MIN_EFFORT=medium',
@@ -166,6 +167,14 @@ describe('task and step routing', () => {
     expect(w.asks.length).toBe(0)
     // default bounds low..high: code → medium, failed check → high
     expect(sent(w)).toEqual(['medium', 'high'])
+    expect(journal(w)[0]!.source).toBe('heuristic')
+  })
+
+  test('a key with no allowed endpoint: heuristics only, nothing leaves the machine', async ($, on) => {
+    const w = world(on, { env: ENV.replace('JEV_ALLOWED_HOSTS=jev.test\n', '') })
+    await submit($, 'fix the crash in parser.ts')
+    await step($, 0)
+    expect(w.asks.length).toBe(0)
     expect(journal(w)[0]!.source).toBe('heuristic')
   })
 

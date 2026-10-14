@@ -1,5 +1,5 @@
 import assert, { test } from './assert';
-import { modConfig, parseEnvFile } from '../src/config';
+import { jevEndpointAllowed, modConfig, parseEnvFile } from '../src/config';
 import { hash20 } from '../src/hash';
 
 test('parseEnvFile: comments, export, quotes and trailing comments', () => {
@@ -44,6 +44,24 @@ test('modConfig: the live .env keys', () => {
   assert.equal(c.stepStateMax, 6000, 'below the 3000 minimum falls back to the default');
   assert.equal(modConfig({ JEV_OPUS_DISSATISFACTION: '0' }).followUp.mode, null);
   assert.deepEqual(modConfig({ JEV_OPUS_MIN_EFFORT: 'max', JEV_OPUS_MAX_EFFORT: 'low' }).bounds, { min: 'low', max: 'max' }, 'misordered bounds swap');
+});
+
+test('modConfig: Jev stays off unless JEV_BASE_URL points at an allowed host', () => {
+  assert.equal(modConfig({ JEV_API_KEY: 'k' }).jev, null, 'no URL no longer means TypeSafe hosted');
+  assert.equal(modConfig({ JEV_API_KEY: 'k', JEV_BASE_URL: 'https://api.typesafe.ai/v1/systemone' }).jev, null);
+  assert.equal(modConfig({ JEV_API_KEY: 'k', JEV_BASE_URL: 'http://172.21.0.1:18014/v1/systemone' }).jev?.baseUrl, 'http://172.21.0.1:18014/v1/systemone');
+  const listed = modConfig({ JEV_API_KEY: 'k', JEV_BASE_URL: 'http://100.93.153.4:8013/v1/systemone', JEV_ALLOWED_HOSTS: ' 100.93.153.4 , mac ' });
+  assert.equal(listed.jev?.baseUrl, 'http://100.93.153.4:8013/v1/systemone');
+});
+
+test('jevEndpointAllowed: hosts compare exactly, never by prefix or userinfo', () => {
+  assert.equal(jevEndpointAllowed('http://localhost:8013/v1/systemone'), true);
+  assert.equal(jevEndpointAllowed('http://[::1]:8013/v1/systemone'), true);
+  assert.equal(jevEndpointAllowed('http://127.0.0.1.evil.example/v1/systemone'), false);
+  assert.equal(jevEndpointAllowed('http://127.0.0.1@evil.example/v1/systemone'), false);
+  assert.equal(jevEndpointAllowed('ftp://127.0.0.1/v1/systemone'), false);
+  assert.equal(jevEndpointAllowed('not a url'), false);
+  assert.equal(jevEndpointAllowed(undefined), false);
 });
 
 test('hash20: stable 20-hex identities that differ for nearby inputs', () => {

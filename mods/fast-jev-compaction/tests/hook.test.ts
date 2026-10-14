@@ -3,10 +3,12 @@ import {
   compactSession,
   decisionLog,
   decisionLogLines,
+  jevEndpointAllowed,
   resolveEndpoint,
   resolveHookConfig,
   summarize,
   toSessionMessages,
+  withTimeout,
 } from '../hooks/fast-jev.ts';
 import { applyDecisions, collectToolCalls, decideCall, type Message } from '../src/index.js';
 
@@ -28,6 +30,7 @@ function result(id: string, text: string, isError = false): SessionMessage {
 }
 
 const fileA = 'export const a = 1;\n'.repeat(50);
+const LOCAL = 'http://127.0.0.1:18013/v1/systemone';
 
 function transcript(): SessionMessage[] {
   return [
@@ -60,6 +63,7 @@ describe('hook config', () => {
       model: 'jev-latest',
       maxConcurrentRequests: 2,
       maxQuestionsPerRequest: 32,
+      requestTimeoutMs: 30_000,
     });
     expect(
       resolveHookConfig({ apiKey: 'k', keepThreshold: 0.3, maxStateTokens: 1000, model: 'jev-x', goal: 'g', compactAtPercent: 'no' }),
@@ -73,6 +77,7 @@ describe('hook config', () => {
       minReductionRatio: 0.25,
       maxConcurrentRequests: 2,
       maxQuestionsPerRequest: 32,
+      requestTimeoutMs: 30_000,
     });
     expect(resolveHookConfig({ baseUrl: 'http://h/v1/systemone', maxConcurrentRequests: 0 })).toMatchObject({
       baseUrl: 'http://h/v1/systemone',
@@ -110,13 +115,14 @@ describe('endpoint resolution', () => {
       fs: {
         read: async (path: string) => {
           reads.push(path);
-          return '# comment\nJEV_PROVIDER=typesafe\nJEV_BASE_URL="http://file/v1/systemone"\nJEV_API_KEY=fk\n';
+          return '# comment\nJEV_PROVIDER=typesafe\nJEV_BASE_URL="http://file/v1/systemone"\nJEV_API_KEY=fk\nJEV_ALLOWED_HOSTS=file\n';
         },
       },
     });
     expect(await resolveEndpoint(withFile({ HOME: '/h' }), base)).toMatchObject({
       apiKey: 'fk',
       baseUrl: 'http://file/v1/systemone',
+      allowedHosts: 'file',
     });
     expect(reads).toEqual(['/h/.config/jev-opus/.env']);
     reads.length = 0;
@@ -131,10 +137,72 @@ describe('endpoint resolution', () => {
     const fetchFn = jevFetch(() => 0.9);
     await compactSession(
       transcript(),
-      { ...resolveHookConfig({ preserveRecentMessages: 1 }), apiKey: 'k', baseUrl: 'http://local/v1/systemone' },
+      {
+        ...resolveHookConfig({ preserveRecentMessages: 1 }),
+        apiKey: 'k',
+        baseUrl: 'http://mac/v1/systemone',
+        allowedHosts: 'gpu, mac',
+      },
       async (url, init) => (urls.push(url), fetchFn(url, init)),
     );
-    expect(urls).toEqual(['http://local/v1/systemone']);
+    expect(urls).toEqual(['http://mac/v1/systemone']);
+  });
+
+  it('refuses an unset or hosted endpoint before any request', async () => {
+    const urls: string[] = [];
+    const fetchFn = async (url: string) => (urls.push(url), { status: 200, ok: true, text: '{}' });
+    const config = { ...resolveHookConfig({ preserveRecentMessages: 1 }), apiKey: 'k' };
+    await expect(compactSession(transcript(), config, fetchFn)).rejects.toThrow(/\(unset\) is not a local host/);
+    await expect(
+      compactSession(transcript(), { ...config, baseUrl: 'https://api.typesafe.ai/v1/systemone' }, fetchFn),
+    ).rejects.toThrow(/api\.typesafe\.ai is not a local host/);
+    expect(urls).toEqual([]);
+  });
+
+  it('allows loopback and the Docker bridge; hosts compare exactly', () => {
+    expect(jevEndpointAllowed(LOCAL)).toBe(true);
+    expect(jevEndpointAllowed('http://172.21.0.1:18014/v1/systemone')).toBe(true);
+    expect(jevEndpointAllowed('http://[::1]:8013/v1/systemone')).toBe(true);
+    expect(jevEndpointAllowed('http://127.0.0.1.evil.example/v1/systemone')).toBe(false);
+    expect(jevEndpointAllowed('http://127.0.0.1@evil.example/v1/systemone')).toBe(false);
+    expect(jevEndpointAllowed('http://evil.example/v1/systemone', 'other')).toBe(false);
+    expect(jevEndpointAllowed('not a url')).toBe(false);
+  });
+});
+
+describe('request timeout', () => {
+  const ok = { status: 200, ok: true, text: '{}' };
+  // A sleep that settles only when the test says so, or rejects on abort like $.clock.sleep.
+  function manualSleep() {
+    const waits: { ms: number; fire: () => void; aborted: boolean }[] = [];
+    const sleep = (ms: number, signal: AbortSignal) =>
+      new Promise<void>((resolve, reject) => {
+        const wait = { ms, fire: resolve, aborted: false };
+        waits.push(wait);
+        signal.addEventListener('abort', () => ((wait.aborted = true), reject(new Error('aborted'))));
+      });
+    return { sleep, waits };
+  }
+
+  it('returns the answer that beats the timer and stops the timer', async () => {
+    const { sleep, waits } = manualSleep();
+    const fetchFn = withTimeout(async () => ok, 30_000, sleep);
+    await expect(fetchFn('u')).resolves.toEqual(ok);
+    expect(waits.map((w) => [w.ms, w.aborted])).toEqual([[30_000, true]]);
+  });
+
+  it('rejects when the timer fires first, so the hook falls back', async () => {
+    const { sleep, waits } = manualSleep();
+    const fetchFn = withTimeout(() => new Promise<never>(() => {}), 25_000, sleep);
+    const pending = fetchFn('u');
+    waits[0]!.fire();
+    await expect(pending).rejects.toThrow('Jev request timed out after 25000 ms');
+  });
+
+  it('a timeout of 0 leaves the fetch alone', async () => {
+    const { sleep, waits } = manualSleep();
+    await expect(withTimeout(async () => ok, 0, sleep)('u')).resolves.toEqual(ok);
+    expect(waits).toEqual([]);
   });
 });
 
@@ -182,7 +250,7 @@ describe('session message mapping', () => {
 describe('compactSession', () => {
   it('runs the library over the engine fetch and reports the outcome', async () => {
     const bodies: string[] = [];
-    const config = { ...resolveHookConfig({ preserveRecentMessages: 1 }), apiKey: 'k', model: 'jev-x' };
+    const config = { ...resolveHookConfig({ preserveRecentMessages: 1 }), apiKey: 'k', baseUrl: LOCAL, model: 'jev-x' };
     const { result: output, messages } = await compactSession(
       transcript(),
       config,
@@ -198,7 +266,7 @@ describe('compactSession', () => {
   });
 
   it('splits a long decision log into ui.log lines under the host limit', async () => {
-    const config = { ...resolveHookConfig({ preserveRecentMessages: 1 }), apiKey: 'k' };
+    const config = { ...resolveHookConfig({ preserveRecentMessages: 1 }), apiKey: 'k', baseUrl: LOCAL };
     const { result: output } = await compactSession(transcript(), config, jevFetch(() => 0.1));
     const lines = decisionLogLines(output, 60);
     expect(lines).toEqual([
@@ -210,7 +278,7 @@ describe('compactSession', () => {
   });
 
   it('throws on a missing key and on failed requests so the hook falls back', async () => {
-    const config = resolveHookConfig({ preserveRecentMessages: 1 });
+    const config = { ...resolveHookConfig({ preserveRecentMessages: 1 }), baseUrl: LOCAL };
     await expect(compactSession(transcript(), config, jevFetch(() => 0))).rejects.toThrow(/TYPESAFE_API_KEY/);
     await expect(
       compactSession(transcript(), { ...config, apiKey: 'k' }, async () => ({ status: 500, ok: false, text: 'x' })),
