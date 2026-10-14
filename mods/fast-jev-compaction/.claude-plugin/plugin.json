@@ -83,8 +83,8 @@
     "requestTimeoutMs": {
       "type": "number",
       "title": "Jev request timeout (ms)",
-      "description": "A Jev request still unanswered after this falls back to the built-in summary; 0 waits indefinitely.",
-      "default": 30000
+      "description": "A Jev request still unanswered after this falls back to the built-in summary; 0 or anything above 595000 means 595000 (the host stops a child process at ten minutes).",
+      "default": 60000
     }
   }
 }

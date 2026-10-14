@@ -31,7 +31,7 @@ const HOOK_DEFAULTS = {
   maxQuestionsPerRequest: 32,
   // Splash prefills a 25k-token state in about 12 s (~2,150 tok/s); past this
   // a request is abandoned so a stuck backend cannot hold the session.
-  requestTimeoutMs: 30_000,
+  requestTimeoutMs: 60_000,
 };
 
 /** Hosts that stay on machines we run: loopback and the sub2api Docker bridge. */
@@ -143,31 +143,39 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
   return config;
 }
 
+/** The shape of `$.process.run`, so the curl transport can be driven without an engine. */
+export type ProcessRun = (
+  argv: readonly string[],
+  init?: { env?: Record<string, string>; stdin?: string; timeoutMs?: number },
+) => Promise<{ exitCode: number; stdout: string; stderr: string }>;
+
+// `$.process.run` kills a child after ten minutes at most; curl stops earlier so it reports why.
+const CURL_LIMIT_MS = 595_000;
+
 /**
- * `fetchFn` that rejects once `ms` pass. `$.http.fetch` takes no signal, so this
- * is a race: the losing fetch finishes on its own and its answer is unused.
- * Claude Code 2.1.299 also aborts a fetch after 30 s by itself, but the
- * 2.1.274 types promise no limit, so the bound is kept here.
+ * `HookFetch` over the host's curl. Claude Code 2.1.299 aborts `$.http.fetch`
+ * after a fixed 30 s, and a 25k-token Jev batch can take longer, while
+ * `$.process.run` allows ten minutes. Header lines reach curl through the
+ * child's environment (curl 8.3+ `--variable`, `--expand-header`), so the key
+ * never appears in argv; the body goes over stdin.
  */
-export function withTimeout(
-  fetchFn: HookFetch,
-  ms: number,
-  sleep: (ms: number, signal: AbortSignal) => Promise<void>,
-): HookFetch {
-  if (!(ms > 0)) return fetchFn;
-  return async (url, init) => {
-    const stop = new AbortController();
-    const fetched = fetchFn(url, init);
-    fetched.catch(() => {});
-    const expired = sleep(ms, stop.signal).then(() => {
-      throw new Error(`Jev request timed out after ${ms} ms`);
+export function curlFetch(run: ProcessRun, timeoutMs: number): HookFetch {
+  const limit = timeoutMs > 0 ? Math.min(timeoutMs, CURL_LIMIT_MS) : CURL_LIMIT_MS;
+  return async (url, init = {}) => {
+    const argv = ['curl', '-sS', '--max-time', String(limit / 1000), '-X', init.method ?? 'GET', '-w', '\n%{http_code}'];
+    const env: Record<string, string> = {};
+    Object.entries(init.headers ?? {}).forEach(([name, value], i) => {
+      const key = `JEV_CURL_HEADER_${i}`;
+      env[key] = `${name}: ${value}`;
+      argv.push('--variable', `%${key}`, '--expand-header', `{{${key}}}`);
     });
-    expired.catch(() => {});
-    try {
-      return await Promise.race([fetched, expired]);
-    } finally {
-      stop.abort();
-    }
+    if (init.body !== undefined) argv.push('--data-binary', '@-');
+    argv.push('--url', url);
+    const { exitCode, stdout, stderr } = await run(argv, { env, stdin: init.body ?? '', timeoutMs: limit + 5_000 });
+    if (exitCode !== 0) throw new Error(`curl exit ${exitCode}: ${stderr.trim()}`);
+    const cut = stdout.lastIndexOf('\n');
+    const status = Number(stdout.slice(cut + 1));
+    return { status, ok: status >= 200 && status < 300, text: stdout.slice(0, cut) };
   };
 }
 
@@ -464,14 +472,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
     try {
       const config = await resolveEndpoint($, configured);
       entry.endpoint = endpointHost(config.baseUrl);
-      const timed = withTimeout(
-        async (url, init) => {
-          const response = await $.http.fetch(url, init);
-          return { status: response.status, ok: response.ok, text: response.text };
-        },
-        config.requestTimeoutMs,
-        (ms, signal) => $.clock.sleep(ms, { signal }),
-      );
+      const timed = curlFetch((argv, init) => $.process.run(argv, init), config.requestTimeoutMs);
       const { result, messages } = await compactSession(event.messages, config, async (url, init) => {
         const sent = await $.clock.now();
         try {

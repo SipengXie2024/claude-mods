@@ -58,7 +58,7 @@ The plugin declares these `userConfig` values in
 | `model` | `jev-latest` |
 | `maxConcurrentRequests` | `2` |
 | `maxQuestionsPerRequest` | `32` |
-| `requestTimeoutMs` | `30000` |
+| `requestTimeoutMs` | `60000` |
 | `baseUrl` | unset |
 | `allowedHosts` | unset |
 
@@ -76,7 +76,9 @@ conversation to a hosted API. To use one on purpose, list its host.
 
 Every option except `apiKey`, `baseUrl`, `allowedHosts`, `compactAtPercent`,
 `minReductionRatio`, `model` and `requestTimeoutMs` is passed straight to the
-library; see the root README for what they do. The `session.compact` hook runs the Jev requests concurrently. If Jev fails or a
+library; see the root README for what they do. The `session.compact` hook runs the Jev requests concurrently
+through the host's `curl` (8.3 or later) via `$.process.run`, because Claude Code 2.1.299 aborts `$.http.fetch`
+after a fixed 30 s; the key travels in curl's environment, not its argv. If Jev fails or a
 request passes `requestTimeoutMs`, the response is malformed, the key or an
 allowed endpoint is unavailable, the history cannot be
 fitted into the state budget, or the estimated reduction is below

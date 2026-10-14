@@ -1,3 +1,6 @@
+import { execFile } from 'node:child_process';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { describe, expect, it } from 'vitest';
 import {
   compactSession,
@@ -8,7 +11,8 @@ import {
   resolveHookConfig,
   summarize,
   toSessionMessages,
-  withTimeout,
+  curlFetch,
+  type ProcessRun,
 } from '../hooks/fast-jev.ts';
 import { applyDecisions, collectToolCalls, decideCall, type Message } from '../src/index.js';
 
@@ -63,7 +67,7 @@ describe('hook config', () => {
       model: 'jev-latest',
       maxConcurrentRequests: 2,
       maxQuestionsPerRequest: 32,
-      requestTimeoutMs: 30_000,
+      requestTimeoutMs: 60_000,
     });
     expect(
       resolveHookConfig({ apiKey: 'k', keepThreshold: 0.3, maxStateTokens: 1000, model: 'jev-x', goal: 'g', compactAtPercent: 'no' }),
@@ -77,7 +81,7 @@ describe('hook config', () => {
       minReductionRatio: 0.25,
       maxConcurrentRequests: 2,
       maxQuestionsPerRequest: 32,
-      requestTimeoutMs: 30_000,
+      requestTimeoutMs: 60_000,
     });
     expect(resolveHookConfig({ baseUrl: 'http://h/v1/systemone', maxConcurrentRequests: 0 })).toMatchObject({
       baseUrl: 'http://h/v1/systemone',
@@ -170,39 +174,71 @@ describe('endpoint resolution', () => {
   });
 });
 
-describe('request timeout', () => {
-  const ok = { status: 200, ok: true, text: '{}' };
-  // A sleep that settles only when the test says so, or rejects on abort like $.clock.sleep.
-  function manualSleep() {
-    const waits: { ms: number; fire: () => void; aborted: boolean }[] = [];
-    const sleep = (ms: number, signal: AbortSignal) =>
-      new Promise<void>((resolve, reject) => {
-        const wait = { ms, fire: resolve, aborted: false };
-        waits.push(wait);
-        signal.addEventListener('abort', () => ((wait.aborted = true), reject(new Error('aborted'))));
-      });
-    return { sleep, waits };
+describe('curl transport', () => {
+  // `$.process.run` for real: the env is set over the parent's, stdin written then closed.
+  const run: ProcessRun = (argv, init = {}) =>
+    new Promise((resolve) => {
+      const child = execFile(
+        argv[0]!,
+        argv.slice(1),
+        { env: { ...process.env, ...init.env }, timeout: init.timeoutMs },
+        (error, stdout, stderr) =>
+          resolve({ exitCode: error ? (typeof error.code === 'number' ? error.code : 1) : 0, stdout, stderr }),
+      );
+      child.stdin!.end(init.stdin ?? '');
+    });
+
+  async function server(handler: (req: IncomingMessage, body: string, res: ServerResponse) => void) {
+    const srv = createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => (body += c));
+      req.on('end', () => handler(req, body, res));
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    const { port } = srv.address() as AddressInfo;
+    return { url: `http://127.0.0.1:${port}/v1/systemone`, close: () => srv.close() };
   }
 
-  it('returns the answer that beats the timer and stops the timer', async () => {
-    const { sleep, waits } = manualSleep();
-    const fetchFn = withTimeout(async () => ok, 30_000, sleep);
-    await expect(fetchFn('u')).resolves.toEqual(ok);
-    expect(waits.map((w) => [w.ms, w.aborted])).toEqual([[30_000, true]]);
+  it('keeps header values out of argv', async () => {
+    const calls: { argv: readonly string[]; env?: Record<string, string>; stdin?: string }[] = [];
+    const fake: ProcessRun = async (argv, init) => (calls.push({ argv, ...init }), { exitCode: 0, stdout: '{}\n200', stderr: '' });
+    const res = await curlFetch(fake, 60_000)('http://127.0.0.1:1/v1/systemone', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer secret-key' },
+      body: '{"a":1}',
+    });
+    expect(res).toEqual({ status: 200, ok: true, text: '{}' });
+    expect(calls[0]!.argv.join(' ')).not.toContain('secret-key');
+    expect(Object.values(calls[0]!.env!)).toEqual(['Authorization: Bearer secret-key']);
+    expect(calls[0]!.stdin).toBe('{"a":1}');
   });
 
-  it('rejects when the timer fires first, so the hook falls back', async () => {
-    const { sleep, waits } = manualSleep();
-    const fetchFn = withTimeout(() => new Promise<never>(() => {}), 25_000, sleep);
-    const pending = fetchFn('u');
-    waits[0]!.fire();
-    await expect(pending).rejects.toThrow('Jev request timed out after 25000 ms');
+  it('sends headers and body through a real curl and returns status and text', async () => {
+    const seen: { auth?: string; type?: string; body?: string; method?: string } = {};
+    const srv = await server((req, body, res) => {
+      Object.assign(seen, { auth: req.headers.authorization, type: req.headers['content-type'], body, method: req.method });
+      res.writeHead(422).end('{"error":"no"}\nsecond line');
+    });
+    try {
+      const res = await curlFetch(run, 10_000)(srv.url, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer k', 'Content-Type': 'application/json' },
+        body: '{"q":"x\ny"}',
+      });
+      expect(res).toEqual({ status: 422, ok: false, text: '{"error":"no"}\nsecond line' });
+      expect(seen).toEqual({ auth: 'Bearer k', type: 'application/json', body: '{"q":"x\ny"}', method: 'POST' });
+    } finally {
+      srv.close();
+    }
   });
 
-  it('a timeout of 0 leaves the fetch alone', async () => {
-    const { sleep, waits } = manualSleep();
-    await expect(withTimeout(async () => ok, 0, sleep)('u')).resolves.toEqual(ok);
-    expect(waits).toEqual([]);
+  it('rejects once the timeout passes, so the hook falls back', async () => {
+    const srv = await server((_req, _body, res) => setTimeout(() => res.end('{}'), 3_000));
+    try {
+      await expect(curlFetch(run, 1_000)(srv.url, { method: 'POST', body: '{}' })).rejects.toThrow(/curl exit 28/);
+    } finally {
+      srv.close();
+    }
   });
 });
 
