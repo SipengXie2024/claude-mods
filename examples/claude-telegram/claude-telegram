@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# The only Claude session allowed to talk to Telegram.
+# Telegram allows one poller per bot token, and every new telegram plugin
+# server kills the previous one. The token lives only in telegram-live/, so
+# ordinary sessions (which use the default channels/telegram/ dir) exit at
+# startup without polling; this launcher points the plugin at telegram-live/.
+cd "$HOME" || exit 1
+export TELEGRAM_STATE_DIR="$HOME/.claude/channels/telegram-live"
+CLAUDE_MODS="${CLAUDE_MODS:-$HOME/claude-mods}"
+
+# Those ordinary sessions' failed starts mark the server in this cache, and
+# Claude Code then skips it at startup. Clear the mark so this session connects.
+cache="$HOME/.claude/mcp-needs-auth-cache.json"
+if [ -f "$cache" ] && tmp=$(mktemp) && jq 'del(.["plugin:telegram:telegram"])' "$cache" > "$tmp"; then
+  mv "$tmp" "$cache"
+fi
+
+# tg-progress loads in this session only: it is not installed from the marketplace.
+exec claude --dangerously-skip-permissions \
+  --channels plugin:telegram@claude-plugins-official \
+  --plugin-dir "$CLAUDE_MODS/mods/tg-progress" \
+  "$@"
