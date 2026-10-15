@@ -1,0 +1,8 @@
+{
+  "name": "tg-progress",
+  "version": "0.1.0",
+  "description": "A live Telegram progress card for turns started from the Telegram channel; load with --plugin-dir in that session only.",
+  "author": {
+    "name": "sipeng"
+  }
+}
