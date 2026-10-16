@@ -35,7 +35,7 @@ Flag logical issues before offering a rewrite. A rewrite that fixes prose but le
 
 When reviewing, tag each issue with severity: **fatal**, **major**, **minor**, **presentation only**. Do not flag everything as fatal.
 
-When responding to reviewers, never sound emotional, sarcastic, or defensive. Convert disagreement into clarification gaps, scope boundaries, supplementary experiments, or revision commitments.
+When responding to reviewers, never sound emotional, sarcastic, or defensive. Convert disagreement into clarification gaps, scope boundaries, or the revisions the reviewer asked for.
 
 ### 1.4 Definite judgment
 
@@ -199,7 +199,7 @@ Principles:
 - Open with thanks, then respond directly without circling.
 - Acknowledge the reasonable part of the critique.
 - Then clarify the misunderstanding or supply additional argument.
-- Close with a revision commitment or supplementary-experiment plan.
+- Close with the revision the reviewer requested. Do not volunteer new experiments or commitments the reviewer did not ask for; an idea of our own is described as promising, not promised.
 - Never write "the reviewer is wrong." Never label something "trivial" without explaining why.
 - Do not promise more than can be delivered.
 
