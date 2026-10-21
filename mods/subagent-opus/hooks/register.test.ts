@@ -13,6 +13,7 @@ const spawn = async (e: Record<string, unknown>) => {
 }
 
 const FABLE = 'claude-fable-5-1'
+const MYTHOS = 'claude-mythos-5-1'
 
 test('Fable parent: unpinned subagent goes to opus', async () => {
   expect(await spawn({ parentModel: FABLE })).toBe('opus')
@@ -29,6 +30,24 @@ test('Fable parent: explicit haiku is kept', async () => {
 test('Fable parent: fork and workflow agents are untouched', async () => {
   expect(await spawn({ parentModel: FABLE, fork: true })).toBeUndefined()
   expect(await spawn({ parentModel: FABLE, workflow: { runId: 'wf_x', agentIndex: 1 } })).toBeUndefined()
+})
+
+test('Mythos parent: unpinned subagent goes to opus', async () => {
+  expect(await spawn({ parentModel: MYTHOS })).toBe('opus')
+})
+
+test('Mythos parent: explicit mythos or fable model is replaced', async () => {
+  expect(await spawn({ parentModel: MYTHOS, model: 'mythos' })).toBe('opus')
+  expect(await spawn({ parentModel: MYTHOS, model: 'fable' })).toBe('opus')
+})
+
+test('Mythos parent: explicit haiku is kept', async () => {
+  expect(await spawn({ parentModel: MYTHOS, model: 'haiku' })).toBe('haiku')
+})
+
+test('Mythos parent: fork and workflow agents are untouched', async () => {
+  expect(await spawn({ parentModel: MYTHOS, fork: true })).toBeUndefined()
+  expect(await spawn({ parentModel: MYTHOS, workflow: { runId: 'wf_x', agentIndex: 1 } })).toBeUndefined()
 })
 
 test('Opus parent: untouched', async () => {

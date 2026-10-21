@@ -28,6 +28,17 @@ test('Fable: an unpinned agent() is denied with its line', async ($, on) => {
   expect(r.text).not.toContain('line 2')
 })
 
+test('Mythos: every agent() pinned to opus passes', async ($, on) => {
+  expect((await workflow($, on, 'claude-mythos-5-1', PINNED)).ran).toBe(true)
+})
+
+test('Mythos: an unpinned agent() is denied with its line', async ($, on) => {
+  const r = await workflow($, on, 'claude-mythos-5-1', UNPINNED)
+  expect(r.ran).toBe(false)
+  expect(r.text).toContain('line 4')
+  expect(r.text).toContain('claude-mythos-5-1')
+})
+
 test('Opus main loop: unpinned script passes', async ($, on) => {
   expect((await workflow($, on, 'claude-opus-5-5', UNPINNED)).ran).toBe(true)
 })

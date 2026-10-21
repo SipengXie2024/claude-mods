@@ -3,11 +3,12 @@ import type { Register } from 'claude-code'
 // Workflow agents inherit the main-loop model unless each agent() call pins
 // one, and agent.spawn can only deny a workflow agent (not rewrite its model),
 // which would fail the run halfway. So the whole Workflow call is checked
-// up front: under a Fable main loop, every agent() call must carry a literal
+// up front: under a Fable or Mythos main loop, every agent() call must carry a literal
 // model: 'opus' in its own argument list. A pin only in meta.phases
 // (display-only), in a shared opts variable, or in a comment does not count.
 
-const FABLE = /fable/i
+/** Main-loop models whose workflow agents must be pinned to Opus. */
+const PREMIUM = /fable|mythos/i
 const AGENT_CALL = /\bagent\s*\(/g
 const OPUS_PIN = /model\s*:\s*['"]opus['"]/
 const QUOTES = new Set(["'", '"', '`'])
@@ -75,14 +76,14 @@ export function unpinnedAgentCalls(script: string): Array<[number, string]> {
 export const register: Register = on => {
   on('tool.call', { tool: 'Workflow' }, async ($, e, next) => {
     const model = await $.session.model()
-    if (!FABLE.test(model)) return next(e)
+    if (!PREMIUM.test(model)) return next(e)
 
     let script = e.script ?? ''
     if (e.scriptPath) script = await $.fs.read(e.scriptPath).catch(() => '')
     if (!script) {
       return {
         deny:
-          `Main session model is Fable (${model}) and this Workflow call carries no readable ` +
+          `Main session model is ${model} and this Workflow call carries no readable ` +
           "script (named workflow, or scriptPath could not be read), so the opus pins cannot be " +
           "verified. Inline the script with model: 'opus' in every agent() call's opts, or ask " +
           'the user to switch the session to Opus via /model.',
@@ -94,8 +95,8 @@ export const register: Register = on => {
     const spots = violations.map(([ln, sn]) => `  - line ${ln}: ${sn}`).join('\n')
     return {
       deny:
-        `Main session model is Fable (${model}). Workflow subagents inherit the session model ` +
-        `unless each agent() call pins one, so these agent() calls would run on Fable:\n${spots}\n` +
+        `Main session model is ${model}. Workflow subagents inherit the session model ` +
+        `unless each agent() call pins one, so these agent() calls would run on ${model}:\n${spots}\n` +
         "Fix: add model: 'opus' to the opts object of EACH call listed above and re-send the " +
         "workflow. The pin must be a literal model: 'opus' inside that call's own argument list — " +
         'a pin only in meta.phases (display-only) or in a shared opts variable is not detected; ' +

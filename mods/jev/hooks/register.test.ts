@@ -45,6 +45,8 @@ interface Opts {
   store?: Record<string, unknown>
   /** session.id throws: every routing hook fails */
   brokenSession?: boolean
+  /** the session's model as $.session.model() reports it */
+  model?: string
 }
 
 /** Peaked answers, so the recomputed confidence clears every gate. */
@@ -84,6 +86,7 @@ function world(on: On, o: Opts = {}): World {
     if (o.brokenSession) throw new Error('boom')
     return { value: 'sess-1' }
   })
+  on('session.model', () => ({ value: o.model ?? 'claude-opus-5-5' }))
   on('session.messages', ($, e) => {
     if (e.agentId) return { value: (o.agentRows?.[e.agentId] ?? []).map((r) => ({ ...r, toolUses: [] })) }
     return { value: w.messages as never }
@@ -122,7 +125,7 @@ const sent = (w: World) => w.steps.map((s) => s.effort)
 const journal = (w: World) => (w.files.get(`${DIR}/mod-journal.jsonl`) ?? '').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as Record<string, any>)
 
 describe('task and step routing', () => {
-  test('a code task starts at medium, a failing check raises, a pass steps back down', async ($, on) => {
+  test('a code task starts at high, a failing check raises, a pass steps back down', async ($, on) => {
     const w = world(on)
     await submit($, 'add a unit test for add() and fix the bug')
     await step($, 0)
@@ -132,8 +135,9 @@ describe('task and step routing', () => {
     await step($, 2)
     await bash(w, $, 'npm test')
     await step($, 3)
-    expect(sent(w)).toEqual(['medium', 'high', 'high', 'medium'])
+    expect(sent(w)).toEqual(['high', 'xhigh', 'xhigh', 'high'])
     const j = journal(w)
+    expect(j[1]).toMatchObject({ model: 'claude-opus-5-5', sessionEffort: 'xhigh' })
     expect(j.map((r) => r.event)).toEqual(['prompt', 'step', 'step', 'step', 'step'])
     expect(j[2]!.source).toBe('jev')
     expect(j[2]!.signals.phase).toBe('diagnosing')
@@ -145,7 +149,7 @@ describe('task and step routing', () => {
     const files = [...w.files.keys()].filter((k) => k.startsWith(`${DIR}/status/`))
     expect(files.length).toBe(1)
     const st = JSON.parse(w.files.get(files[0]!)!)
-    expect(st).toMatchObject({ effort: 'medium', trail: ['medium', 'high', 'medium'], previous: 'high', phase: 'finishing', source: 'jev' })
+    expect(st).toMatchObject({ effort: 'high', trail: ['high', 'xhigh', 'high'], previous: 'xhigh', phase: 'finishing', source: 'jev' })
     expect(typeof st.at).toBe('number')
   })
 
@@ -165,8 +169,8 @@ describe('task and step routing', () => {
     await bash(w, $, 'npm test', true)
     await step($, 1)
     expect(w.asks.length).toBe(0)
-    // default bounds low..high: code → medium, failed check → high
-    expect(sent(w)).toEqual(['medium', 'high'])
+    // default bounds low..high: code → high, a failed check cannot go above the bound
+    expect(sent(w)).toEqual(['high', 'high'])
     expect(journal(w)[0]!.source).toBe('heuristic')
   })
 
@@ -185,7 +189,7 @@ describe('task and step routing', () => {
     await w.clock.advance(3_500)
     await pending
     await step($, 0)
-    expect(sent(w)).toEqual(['medium'])
+    expect(sent(w)).toEqual(['high'])
     expect(journal(w)[0]).toMatchObject({ source: 'heuristic', jevError: 'deadline' })
   })
 
@@ -195,6 +199,25 @@ describe('task and step routing', () => {
     await step($, 0, 'xhigh', { model: 'claude-haiku-4-5' })
     await step($, 1, 3)
     expect(sent(w)).toEqual(['xhigh', 3])
+  })
+
+  test('a Mythos model is routed like Opus', async ($, on) => {
+    const w = world(on, { model: 'claude-mythos-5-1' })
+    await submit($, 'fix the crash in parser.ts')
+    await step($, 0, 'high', { model: 'claude-mythos-5-1' })
+    await bash(w, $, 'npm test', true)
+    await step($, 1, 'high', { model: 'claude-mythos-5-1' })
+    expect(sent(w)).toEqual(['high', 'xhigh'])
+    expect(journal(w).map((r) => [r.event, r.model])).toEqual([['prompt', 'claude-mythos-5-1'], ['step', 'claude-mythos-5-1'], ['step', 'claude-mythos-5-1']])
+  })
+
+  test('a Fable session: the prompt is not routed either, so Jev is never asked', async ($, on) => {
+    const w = world(on, { model: 'claude-fable-5-1' })
+    await submit($, 'fix the crash in parser.ts')
+    await step($, 0, 'high', { model: 'claude-fable-5-1' })
+    expect(w.asks.length).toBe(0)
+    expect(journal(w)).toEqual([])
+    expect(sent(w)).toEqual(['high'])
   })
 
   test('a jev/ model is left to the jev-opus gateway', async ($, on) => {
@@ -220,7 +243,7 @@ describe('manual override', () => {
     await step($, 1, 'low')
     await bash(w, $, 'npm test', true)
     await step($, 2, 'low')
-    expect(sent(w)).toEqual(['medium', 'low', 'low'])
+    expect(sent(w)).toEqual(['high', 'low', 'low'])
     expect(journal(w).at(-1)).toMatchObject({ source: 'pinned', reasons: ['manual override'], manual: true })
   })
 })
@@ -244,9 +267,10 @@ describe('follow-up signal', () => {
     history(w)
     await submit($, '不对，你做错了')
     await step($, 0)
-    expect(sent(w)).toEqual(['medium', 'high', 'xhigh'])
+    // the first prompt ran up to xhigh; one above would be max, which waits for two xhigh losses
+    expect(sent(w)).toEqual(['high', 'xhigh', 'xhigh'])
     const prompt = journal(w).filter((r) => r.event === 'prompt').at(-1)!
-    expect(prompt.followUp).toMatchObject({ yes: true, prevMax: 'high', raisedTo: 'xhigh', streak: 1, advisor: false })
+    expect(prompt.followUp).toMatchObject({ yes: true, prevMax: 'xhigh', raisedTo: 'xhigh', streak: 1, advisor: false })
     expect(w.asks.some((a) => a.questions.includes('dissatisfied') && a.state.includes('PREVIOUS USER REQUEST: add a unit test'))).toBe(true)
     expect(w.toasts.some((t) => t.includes('xhigh'))).toBe(true)
   })
@@ -264,7 +288,7 @@ describe('follow-up signal', () => {
     history(w)
     await submit($, 'now add a README section for add()')
     await step($, 0)
-    expect(sent(w)).toEqual(['medium'])
+    expect(sent(w)).toEqual(['high'])
     expect(journal(w)[0]!.followUp).toMatchObject({ yes: false })
   })
 
@@ -317,7 +341,7 @@ describe('subagents', () => {
   test('a subagent routes its own brief and never asks the follow-up question', async ($, on) => {
     const w = world(on, { agentRows: { 'agent-7': [{ role: 'user', text: 'Investigate why the parser crashes on empty input' }] } })
     await step($, 0, 'xhigh', { agentId: 'agent-7' })
-    expect(w.steps[0]).toEqual({ index: 0, effort: 'medium', agentId: 'agent-7' })
+    expect(w.steps[0]).toEqual({ index: 0, effort: 'high', agentId: 'agent-7' })
     expect(w.asks.map((a) => a.questions[0])).toEqual(['task_type'])
     expect(journal(w)[0]).toMatchObject({ agent: 'agent-7', kind: 'task' })
   })

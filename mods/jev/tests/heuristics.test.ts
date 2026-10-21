@@ -21,7 +21,7 @@ test('task heuristics: kind confidence 0.5; deep 0.55 when a deep word matches, 
   assert.equal(plain.deep, 0.3);
   const deep = heuristicTaskProfile('Design the architecture for a multi-region event bus and discuss trade-offs');
   assert.equal(deep.deep, 0.55);
-  assert.equal(taskEffort(deep, { min: 'low', max: 'max' }).effort, 'high', 'a deep heuristic task starts at high');
+  assert.equal(taskEffort(deep, { min: 'low', max: 'max' }).effort, 'xhigh', 'a deep heuristic research task starts one above high');
 });
 
 test('task heuristics: unmatched requests default to research', () => {
@@ -29,7 +29,7 @@ test('task heuristics: unmatched requests default to research', () => {
     const p = heuristicTaskProfile(prompt);
     assert.equal(p.taskType, 'research', prompt);
     assert.equal(p.deep, 0.3, prompt);
-    assert.equal(taskEffort(p, { min: 'low', max: 'max' }).effort, 'medium', prompt);
+    assert.equal(taskEffort(p, { min: 'low', max: 'max' }).effort, 'high', prompt);
   }
 });
 

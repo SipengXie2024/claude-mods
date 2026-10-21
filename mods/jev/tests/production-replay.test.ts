@@ -34,7 +34,7 @@ const OTHER_PASSING_SUITE = (): ToolCallSummary[] => round('cd api && npm test 2
 async function stepper(start: Effort = 'medium') {
   const router = new EffortRouter({ jev: null, bounds: { min: 'low', max: 'max' } });
   await router.routeTask('improve the failure checks in the runtime package', null);
-  // policy.v8 starts this prompt as deep research (high); these cases need a medium task level.
+  // policy.v9 starts this prompt as code (high); these cases need a medium task level.
   router.restore({ v: 2, hold: 0, base: 'medium' });
   let current = start, turn = 0;
   const decisions: EffortDecision[] = [];

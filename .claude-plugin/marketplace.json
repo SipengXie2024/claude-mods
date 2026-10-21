@@ -7,7 +7,7 @@
     {
       "name": "subagent-opus",
       "source": "./mods/subagent-opus",
-      "description": "Under a Fable main loop, start Agent-tool subagents on Opus."
+      "description": "Under a Fable or Mythos main loop, start Agent-tool subagents on Opus."
     },
     {
       "name": "no-bg-poll",
@@ -17,12 +17,12 @@
     {
       "name": "workflow-opus-guard",
       "source": "./mods/workflow-opus-guard",
-      "description": "Under a Fable main loop, deny Workflow scripts whose agent() calls do not pin model: 'opus'."
+      "description": "Under a Fable or Mythos main loop, deny Workflow scripts whose agent() calls do not pin model: 'opus'."
     },
     {
       "name": "jev",
       "source": "./mods/jev",
-      "description": "Per-step Jev effort routing for Opus (jev-opus policy.v8): task, step and follow-up effort."
+      "description": "Per-step Jev effort routing for Opus and Mythos (policy.v9): task, step and follow-up effort."
     },
     {
       "name": "mode",

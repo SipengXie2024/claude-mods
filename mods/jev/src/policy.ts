@@ -1,16 +1,20 @@
-import { clampEffort, fromRank, maxEffort, rank, type Effort } from './effort';
+import { clampEffort, fromRank, maxEffort, minEffort, rank, type Effort } from './effort';
 import type { TaskType } from './questions';
 import type { FollowUpRecord, StepSignals, TaskProfile } from './types';
 
 /**
- * Pure mapping from evidence and Jev signals to an Opus 5.5 effort level.
+ * Pure mapping from evidence and Jev signals to an effort level, for Opus and
+ * Mythos alike.
  *
- * Calibrated for Opus 5.5, whose `medium` already beats Opus 5 at `high` on
- * coding work: `medium` is the workhorse, `high`/`xhigh` are for hard or
- * failing steps, and `max` is reserved for coding or deep-reasoning work
- * after xhigh has failed twice on the same issue. Every task starts at or above
- * its kind's floor; bounds apply after that. Steps never run below the task's
- * own level: phase only explains, it never lowers.
+ * Task starts follow Anthropic's five-level effort guidance as the user
+ * applies it (policy.v9, 2026-10-21): `low` for simple edits and operations,
+ * `medium` for everyday questions and documents, `high` (the Claude Code
+ * default) for coding and research, `xhigh` for work that needs something
+ * worked out on top of that, and `max` only after xhigh has failed twice on
+ * the same issue, since max costs far more and does not always beat xhigh.
+ * Every task starts at or above its kind's floor; bounds apply after that.
+ * Steps never run below the task's own level: phase only explains, it never
+ * lowers.
  */
 
 export interface Bounds {
@@ -19,11 +23,11 @@ export interface Bounds {
 }
 
 /** Version of this policy, recorded on every decision for provenance. */
-export const POLICY_VERSION = 'policy.v8';
+export const POLICY_VERSION = 'policy.v9';
 
 /**
  * Rules an A/B run can switch off to measure them:
- * r1 = deep starts a non-code task at high, r4 = step difficulty lifts effort,
+ * r1 = deep raises a task one level (at least high), r4 = step difficulty lifts effort,
  * stuck = the stuck jump, dissat = the follow-up fault signal runs in shadow
  * (asked and recorded, never acted on). Set once at startup from
  * JEV_OPUS_ABLATE; every decision records them via policyVersion().
@@ -59,21 +63,23 @@ export interface TypePrefs {
 }
 
 /**
- * Per-kind start and floor. Starts are priors from Anthropic's effort guidance
- * (Opus 5.5 defaults to medium; research/knowledge work gains little above it).
- * Not yet fitted to measured outcomes.
+ * Per-kind start and floor, from the effort table the user keeps (Anthropic's
+ * guidance for the 5.x models): simple edits and operations low; everyday
+ * questions and document work medium; coding (PRs, tests) and research
+ * (surveys, comparisons, anything that must look things up, which low
+ * tends to skip) high. Not yet fitted to measured outcomes.
  */
 export const TYPE_PREFS: Record<TaskType, TypePrefs> = {
   chat: { floor: 'low', base: 'low' },
   explain: { floor: 'low', base: 'medium' },
-  operate: { floor: 'low', base: 'medium' },
+  operate: { floor: 'low', base: 'low' },
   write: { floor: 'low', base: 'medium' },
-  research: { floor: 'low', base: 'medium' },
-  code: { floor: 'medium', base: 'medium' },
+  research: { floor: 'medium', base: 'high' },
+  code: { floor: 'medium', base: 'high' },
 };
 
-/** Start and floor used when the task kind itself is not trusted. */
-export const UNTRUSTED_TYPE: TypePrefs = { floor: 'low', base: 'medium' };
+/** Start and floor used when the task kind itself is not trusted: the general default level. */
+export const UNTRUSTED_TYPE: TypePrefs = { floor: 'low', base: 'high' };
 
 /** Start and floor follow the kind when heuristics decided or Jev is reasonably sure. */
 const TYPE_TRUST = 0.35;
@@ -117,11 +123,15 @@ export function isDeep(p: TaskProfile): boolean {
 
 export function typePrefs(p: TaskProfile): TypePrefs {
   let prefs = typeTrusted(p) ? TYPE_PREFS[p.taskType] : UNTRUSTED_TYPE;
-  if (isDeep(p)) {
-    // Deep code keeps its medium start: the failure floor raises effort when needed.
-    const raise = !ablated.has('r1') && p.taskType !== 'code';
-    const base = raise ? maxEffort(prefs.base, 'high') : prefs.base;
-    prefs = { ...prefs, base };
+  if (isDeep(p) && !ablated.has('r1')) {
+    // Working something out costs one level over the kind's start, at least
+    // high: a bug traced across files or an architecture rewrite is xhigh
+    // work, a document that needs a design decision is high. An untrusted
+    // kind only reaches high: xhigh needs to know what the work is. Max is
+    // never a task start; it comes from step escalation alone.
+    const trusted = typeTrusted(p);
+    const base = trusted ? maxEffort(fromRank(rank(prefs.base) + 1), 'high') : maxEffort(prefs.base, 'high');
+    prefs = { ...prefs, base: minEffort(base, 'xhigh') };
   }
   return prefs;
 }

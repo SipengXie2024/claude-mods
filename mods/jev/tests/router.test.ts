@@ -342,13 +342,13 @@ test('invalid signals keep the local estimate; present answers on old clients co
   const legacy = stubJev(() => ({ answers: { task_type: choice('research'), deep: noul(0.9) } }));
   const r2 = new EffortRouter({ jev: legacy, bounds: { min: 'low', max: 'max' } });
   const t2 = await r2.routeTask('thanks', null);
-  assert.equal(t2.effort, 'high', 'a present answer on an old client counts as valid');
+  assert.equal(t2.effort, 'xhigh', 'a present answer on an old client counts as valid (deep research)');
   assert.equal(t2.source, 'jev');
 });
 
 test('missing Jev evidence cannot itself cause a downgrade', async () => {
   const jev = stubJev((_s, q) => 'task_type' in q
-    ? { answers: { task_type: choice('research'), deep: noul(0.6) }, signals: allValid(Object.keys(q)) }
+    ? { answers: { task_type: choice('research'), deep: noul(0.2) }, signals: allValid(Object.keys(q)) }
     : { answers: {}, signals: Object.fromEntries(Object.keys(q).map((n) => [n, 'missing' as const])) });
   const r = new EffortRouter({ jev, bounds: { min: 'low', max: 'max' } });
   const t = await r.routeTask('implement the feature', null);
@@ -376,7 +376,7 @@ test('Jev can veto a proposed downgrade', async () => {
     : { answers: { phase: choice('diagnosing', 0.9), step_difficulty: score(3.5), stuck: noul(0.4) }, signals: allValid(Object.keys(q)) });
   const r = new EffortRouter({ jev, bounds: { min: 'low', max: 'max' } });
   const t = await r.routeTask('implement the feature', null);
-  const d = await r.routeStep(step([read()], 'high', { profile: t.profile }));
+  const d = await r.routeStep(step([read()], 'xhigh', { profile: t.profile }));
   assert.equal(d.source, 'jev');
   assert.ok(rank(d.effort) >= rank('high'), 'a confident diagnosing answer blocks the downgrade');
 });
@@ -460,18 +460,18 @@ test('router snapshots hold hashes only: no command text or tool output', async 
 });
 
 test('once the failing check passes, the escalation is released and effort steps down one level', async () => {
-  const r = new EffortRouter({ jev: null, bounds: { min: 'low', max: 'high' } });
+  const r = new EffortRouter({ jev: null, bounds: { min: 'low', max: 'xhigh' } });
   const task = await r.routeTask('the date tests fail, fix them', null);
-  assert.equal(task.effort, 'medium');
+  assert.equal(task.effort, 'high');
   const ctx = (current: Effort, batch: Array<{ tool: string; summary: string; failed: boolean; result: string }>, turn: number) => ({
     prompt: 'the date tests fail, fix them', profile: task.profile!, turn, current, consecutiveFailures: 0,
     assistantNote: '', trajectory: [], lastBatch: batch,
   });
-  const fail = await r.routeStep(ctx('medium', [{ tool: 'Bash', summary: 'npm test', failed: true, result: 'not ok 1 - isLeapYear expected true actual false' }], 1));
-  assert.equal(fail.effort, 'high', 'failure escalates');
+  const fail = await r.routeStep(ctx('high', [{ tool: 'Bash', summary: 'npm test', failed: true, result: 'not ok 1 - isLeapYear expected true actual false' }], 1));
+  assert.equal(fail.effort, 'xhigh', 'failure escalates');
   // The very next batch fixes it and the same check passes: no hold, one level down.
-  const pass = await r.routeStep(ctx('high', [{ tool: 'Bash', summary: "sed -i '' 's/x/y/' dates.js && npm test", failed: false, result: '# pass 8 # fail 0' }, { tool: 'Bash', summary: 'npm test 2>&1 | tail -5', failed: false, result: '# pass 8' }], 2));
-  assert.equal(pass.effort, 'medium', 'released and stepped down one level, not straight to low');
+  const pass = await r.routeStep(ctx('xhigh', [{ tool: 'Bash', summary: "sed -i '' 's/x/y/' dates.js && npm test", failed: false, result: '# pass 8 # fail 0' }, { tool: 'Bash', summary: 'npm test 2>&1 | tail -5', failed: false, result: '# pass 8' }], 2));
+  assert.equal(pass.effort, 'high', 'released and stepped down one level, not straight to medium');
   assert.ok(pass.reasons.some((x) => x.includes('release hold')));
 });
 
@@ -488,16 +488,16 @@ test('a successful read while the failure is still open does not release the esc
 });
 
 test('live repro: a different command that reruns the same suite and passes resolves the failure', async () => {
-  const r = new EffortRouter({ jev: null, bounds: { min: 'low', max: 'high' } });
+  const r = new EffortRouter({ jev: null, bounds: { min: 'low', max: 'xhigh' } });
   const task = await r.routeTask('the date tests fail, fix them', null);
   const ctx = (current: Effort, batch: Array<{ tool: string; summary: string; failed: boolean; result: string; runner?: string }>, turn: number) => ({
     prompt: 'the date tests fail, fix them', profile: task.profile!, turn, current, consecutiveFailures: 0,
     assistantNote: '', trajectory: [], lastBatch: batch,
   });
-  const fail = await r.routeStep(ctx('medium', [{ tool: 'Bash', summary: "cat > package.json <<'EOF' {\"type\":\"module\"…", failed: true, result: 'not ok 1 - isLeapYear', runner: 'npm test' }], 1));
-  assert.equal(fail.effort, 'high');
-  const pass = await r.routeStep(ctx('high', [{ tool: 'Bash', summary: "sed -i '' -e 's/return y % 4…' dates.js && npm test", failed: false, result: '# pass 3 # fail 0', runner: 'npm test' }], 2));
-  assert.equal(pass.effort, 'medium', 'same suite passing resolves the issue and releases the escalation');
+  const fail = await r.routeStep(ctx('high', [{ tool: 'Bash', summary: "cat > package.json <<'EOF' {\"type\":\"module\"…", failed: true, result: 'not ok 1 - isLeapYear', runner: 'npm test' }], 1));
+  assert.equal(fail.effort, 'xhigh');
+  const pass = await r.routeStep(ctx('xhigh', [{ tool: 'Bash', summary: "sed -i '' -e 's/return y % 4…' dates.js && npm test", failed: false, result: '# pass 3 # fail 0', runner: 'npm test' }], 2));
+  assert.equal(pass.effort, 'high', 'same suite passing resolves the issue and releases the escalation');
 });
 
 test('actual date-debug session: grep-filtered setup and repair resolve the same suite', async () => {
@@ -505,13 +505,13 @@ test('actual date-debug session: grep-filtered setup and repair resolve the same
   const batch = (index: number, failed: boolean) => [{tool:'Bash',summary:describeToolInput('Bash',{command:commands[index]}),runner:testRunner('Bash',{command:commands[index]}),failed,result:failed?'# fail 3':'# pass 3\n# fail 0'}];
   assert.ok(batch(0,true)[0]!.runner);
   assert.equal(batch(0,true)[0]!.runner,batch(1,false)[0]!.runner);
-  const router = new EffortRouter({jev:null,bounds:{min:'medium',max:'high'}});
+  const router = new EffortRouter({jev:null,bounds:{min:'medium',max:'xhigh'}});
   const start = await router.routeTask('debug the failing date tests', 'medium');
   const ctx = {prompt:'debug the failing date tests',profile:start.profile!,assistantNote:'',trajectory:[]};
   const raised = await router.routeStep({...ctx,turn:1,current:start.effort,consecutiveFailures:1,lastBatch:batch(0,true)});
   const recovered = await router.routeStep({...ctx,turn:2,current:raised.effort,consecutiveFailures:0,lastBatch:batch(1,false)});
-  assert.equal(raised.effort,'high');
-  assert.equal(recovered.effort,'medium');
+  assert.equal(raised.effort,'xhigh');
+  assert.equal(recovered.effort,'high');
   assert.ok(recovered.reasons.some(r=>r.includes('now passes')));
   assert.equal(issues(router).length,0);
 });
@@ -524,18 +524,18 @@ test('a failed exploratory lookup (glob with no matches) neither escalates nor l
   assert.equal(isExploratoryFailure(b('rm -rf build && make', true, 'error')), false);
 
   // The demo's exact sequence: exploratory ls fails, tests fail, sed + tests pass.
-  const r = new EffortRouter({ jev: null, bounds: { min: 'low', max: 'high' } });
+  const r = new EffortRouter({ jev: null, bounds: { min: 'low', max: 'xhigh' } });
   const task = await r.routeTask('The tests fail. Find and fix the bugs in dates.js', null);
-  assert.equal(task.effort, 'medium');
+  assert.equal(task.effort, 'high');
   const ctx = (current: Effort, batch: ReturnType<typeof b>[], turn: number) => ({
     prompt: 'fix the tests', profile: task.profile!, turn, current, consecutiveFailures: 0, assistantNote: '', trajectory: [], lastBatch: batch,
   });
-  const look = await r.routeStep(ctx('medium', [b('ls && cat package.json 2>/dev/null; cat dates.js; ls test* *.test.js 2>/dev/null', true, 'zsh: no matches found: test*')], 1));
-  assert.notEqual(look.effort, 'high', 'looking around does not escalate');
+  const look = await r.routeStep(ctx('high', [b('ls && cat package.json 2>/dev/null; cat dates.js; ls test* *.test.js 2>/dev/null', true, 'zsh: no matches found: test*')], 1));
+  assert.notEqual(look.effort, 'xhigh', 'looking around does not escalate');
   const fail = await r.routeStep(ctx(look.effort, [b('cat dates.test.js && npm test 2>&1 | tail -30', true, 'not ok 1 - leap years', 'npm test')], 2));
-  assert.equal(fail.effort, 'high', 'the real test failure escalates');
-  const pass = await r.routeStep(ctx('high', [b("sed -i '' -e 's/a/b/' dates.js && npm test 2>&1 | tail -30", false, '# pass 3 # fail 0', 'npm test')], 3));
-  assert.equal(pass.effort, 'medium', 'nothing lingers from the ls: effort steps down once the tests pass');
+  assert.equal(fail.effort, 'xhigh', 'the real test failure escalates');
+  const pass = await r.routeStep(ctx('xhigh', [b("sed -i '' -e 's/a/b/' dates.js && npm test 2>&1 | tail -30", false, '# pass 3 # fail 0', 'npm test')], 3));
+  assert.equal(pass.effort, 'high', 'nothing lingers from the ls: effort steps down once the tests pass');
 });
 
 /* ---------- step state size ---------- */
@@ -741,7 +741,7 @@ test('follow-up: the task ask is byte-identical with and without the follow-up s
   await withDissat(async () => {
     const withIt = faultJev(0.99);
     const without = faultJev(0.99);
-    const a1 = await new EffortRouter({ jev: withIt, bounds: { min: 'low', max: 'max' } }).routeTask('这个还是不行', 'medium', undefined, complaint());
+    const a1 = await new EffortRouter({ jev: withIt, bounds: { min: 'low', max: 'max' } }).routeTask('这个还是不行', 'medium', undefined, complaint({ prevMax: 'high' }));
     const a2 = await new EffortRouter({ jev: without, bounds: { min: 'low', max: 'max' } }).routeTask('这个还是不行', 'medium');
     assert.equal(withIt.calls.length, 2);
     assert.equal(without.calls.length, 1);
@@ -749,8 +749,8 @@ test('follow-up: the task ask is byte-identical with and without the follow-up s
     assert.ok(withIt.calls.some((st) => st.startsWith('CONVERSATION SO FAR') && st.includes('这个还是不行')));
     assert.deepEqual(a1.profile, a2.profile);
     assert.equal(a2.followUp, undefined);
-    assert.equal(a1.effort, 'high');
-    assert.equal(a2.effort, 'medium');
+    assert.equal(a1.effort, 'xhigh');
+    assert.equal(a2.effort, 'high');
   });
 });
 
@@ -758,7 +758,7 @@ test('follow-up: a failed, invalid or throwing follow-up ask raises nothing and 
   await withDissat(async () => {
     for (const p of ['fail', 'throw'] as const) {
       const d = await new EffortRouter({ jev: faultJev(p), bounds: { min: 'low', max: 'max' } }).routeTask('不对', 'medium', undefined, complaint());
-      assert.equal(d.effort, 'medium', p);
+      assert.equal(d.effort, 'high', p);
       assert.equal(d.jevError, undefined, p);
       assert.equal(d.source, 'jev', p);
       assert.equal(d.followUp?.yes, false, p);
@@ -769,7 +769,7 @@ test('follow-up: a failed, invalid or throwing follow-up ask raises nothing and 
       ? { answers: { dissatisfied: noul(0.99) }, signals: { dissatisfied: 'invalid' } }
       : { answers: { task_type: choice('code'), deep: noul(0.1) }, signals: allValid(Object.keys(q)) });
     const d = await new EffortRouter({ jev: invalid, bounds: { min: 'low', max: 'max' } }).routeTask('不对', 'medium', undefined, complaint());
-    assert.equal(d.effort, 'medium');
+    assert.equal(d.effort, 'high');
     assert.equal(d.followUp?.error, 'jev returned no usable answers');
   });
 });

@@ -21,8 +21,8 @@ import type { EffortDecision, TaskProfile, ToolCallSummary } from '../src/types'
 type $ = EngineInterface
 
 const MAIN = 'main'
-/** The policy is calibrated for Opus 5.5; jc routed only its own Opus alias. */
-const ROUTED_MODEL = /opus/i
+/** Models the policy's effort table is written for (Opus and Mythos; the same five levels). */
+const ROUTED_MODEL = /opus|mythos/i
 /** A `jev/…` model belongs to the jev-opus gateway, which routes it itself: two routers would undo each other. */
 const GATEWAY_MODEL = /^jev\//i
 const EDIT_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit'])
@@ -221,8 +221,15 @@ async function writeStatus($: $, dir: string, session: string, loop: Loop, d: Ef
   await $.fs.write(`${dir}/status/${session}.json`, JSON.stringify(status)).catch(() => {})
 }
 
-/** Task decision for a prompt about to start the main loop's turn. */
-async function routePrompt($: $, text: string, origin: string): Promise<{ decision: EffortDecision; advisor: boolean }> {
+/** Whether turn.step would act on requests to this model; a prompt for any other model is left alone. */
+function routed(model: string): boolean {
+  return ROUTED_MODEL.test(model) && !GATEWAY_MODEL.test(model)
+}
+
+/** Task decision for a prompt about to start the main loop's turn; null when the session's model is not routed. */
+async function routePrompt($: $, text: string, origin: string): Promise<{ decision: EffortDecision; advisor: boolean } | null> {
+  const model = await $.session.model()
+  if (!routed(model)) return null
   const { cfg, client, dir } = await load($)
   const loop = loopFor(MAIN, cfg)
   const session = await $.session.id()
@@ -275,7 +282,7 @@ async function routePrompt($: $, text: string, origin: string): Promise<{ decisi
   })
   loop.task = decision
   const advisor = f?.advisor === true
-  await journal($, dir, record(decision, { at: await $.clock.now(), session, agent: MAIN, event: 'prompt', origin, ...(f ? { advisorAvailable: followUp?.advisorAvailable } : {}), ...(cfg.jevRefusedHost ? { jevRefusedHost: cfg.jevRefusedHost } : {}) }))
+  await journal($, dir, record(decision, { at: await $.clock.now(), session, agent: MAIN, event: 'prompt', origin, model, ...(f ? { advisorAvailable: followUp?.advisorAvailable } : {}), ...(cfg.jevRefusedHost ? { jevRefusedHost: cfg.jevRefusedHost } : {}) }))
   if (cfg.jevRefusedHost && !refusedWarned) {
     refusedWarned = true
     $.ui.toast(`Jev off: endpoint ${cfg.jevRefusedHost} is not local or in JEV_ALLOWED_HOSTS; routing by heuristics`)
@@ -299,7 +306,7 @@ async function loopPrompt($: $, agentId: string | undefined): Promise<string> {
 }
 
 async function decideStep($: $, e: { index: number; model: string; effort?: unknown; agentId?: string; turnId: string }): Promise<Effort | undefined> {
-  if (!isEffort(e.effort) || !ROUTED_MODEL.test(e.model) || GATEWAY_MODEL.test(e.model)) return undefined
+  if (!isEffort(e.effort) || !routed(e.model)) return undefined
   const { cfg, client, dir } = await load($)
   const key = e.agentId ?? MAIN
   const loop = loopFor(key, cfg)
@@ -363,7 +370,7 @@ async function decideStep($: $, e: { index: number; model: string; effort?: unkn
   }
   await journal($, dir, record(decision, {
     at: await $.clock.now(), session, agent: e.agentId ?? MAIN, event: 'step', step: e.index, turnId: e.turnId,
-    sessionEffort: client0, ...(loop.manual ? { manual: true } : {}),
+    model: e.model, sessionEffort: client0, ...(loop.manual ? { manual: true } : {}),
   }))
   return effort
 }
@@ -387,8 +394,8 @@ export const register: Register = (on) => {
     if (e.turnId !== undefined || SLASH_COMMAND.test(e.text.trim())) return next(e)
     let context = e.context
     try {
-      const { advisor } = await routePrompt($, e.text, e.origin.kind)
-      if (advisor) context = [...(e.context ?? []), ADVISOR_NOTE]
+      const routed = await routePrompt($, e.text, e.origin.kind)
+      if (routed?.advisor) context = [...(e.context ?? []), ADVISOR_NOTE]
     } catch (err) {
       $.ui.log(`jev: prompt routing failed (${(err as Error)?.name ?? 'error'})`, { to: 'debug' })
     }
