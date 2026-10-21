@@ -3,8 +3,8 @@ import { describeToolInput, testRunner } from '../src/describe';
 import { dateDebugCommands } from './fixtures';
 import { rank, type Effort } from '../src/effort';
 import type { JevLike, JevQuestion } from '../src/jev';
-import { FOLLOWUP_SET_VERSION, STEP_SET_VERSION, TASK_SET_VERSION } from '../src/questions';
-import { EffortRouter, stepState, taskState, type FollowUpAsk, type RouterSnapshot } from '../src/router';
+import { FOLLOWUP_QUESTIONS, FOLLOWUP_SET_VERSION, STEP_QUESTIONS, STEP_SET_VERSION, TASK_QUESTIONS, TASK_SET_VERSION } from '../src/questions';
+import { clipEnds, EffortRouter, followUpState, stepState, taskState, trajectoryLine, TRAJECTORY_LINE_MAX, type FollowUpAsk, type RouterSnapshot } from '../src/router';
 import {
   commandKey, emptyCore, fingerprint, isEnvironmentFailure, isExploratoryFailure, reasoningIssues, reduceBatch,
 } from '../src/state';
@@ -552,7 +552,7 @@ test('stepState caps the total length, keeping the header and the most recent to
   const s = stepState(step(batch, 'medium', { assistantNote: 'working on it', trajectory: ['step 1 @low: Read a ok'] }), { maxChars: 3000 });
   assert.ok(s.length <= 3000, `length ${s.length}`);
   assert.ok(s.startsWith('TASK: implement the feature\n'), s.slice(0, 80));
-  assert.ok(s.includes('STEP 1 · effort in force: medium'));
+  assert.ok(s.includes('STEP 1 · effort in force: medium · consecutive steps with a failed tool call: 0'));
   assert.ok(s.includes('AGENT SAID: working on it'));
   assert.ok(s.includes('cmd-39'), 'most recent call kept');
   assert.ok(!s.includes('cmd-0 '), 'oldest call dropped');
@@ -588,6 +588,50 @@ test('truncation never splits a UTF-16 surrogate pair', fullContent(() => {
     }
   }
 }));
+
+test('every question tells Jev that the state is evidence, not instructions', () => {
+  for (const set of [TASK_QUESTIONS, STEP_QUESTIONS, FOLLOWUP_QUESTIONS]) {
+    for (const [name, q] of Object.entries(set)) assert.match(q.instructions, /untrusted evidence/, name);
+  }
+});
+
+test('clipEnds keeps the tail of a long prompt and says how much was dropped', () => {
+  const prompt = `<pasted_content>${'log line\n'.repeat(1000)}</pasted_content>\n帮我看看最后一行报错是什么原因`;
+  assert.equal(clipEnds('short', 3, 3), 'short');
+  const s = clipEnds(prompt, 2200, 800);
+  assert.ok(s.startsWith('<pasted_content>'));
+  assert.ok(s.endsWith('帮我看看最后一行报错是什么原因'), 'the request after the paste survives');
+  const m = s.match(/…\[\+(\d+) chars\]…/);
+  assert.ok(m, 'drop marker between head and tail');
+  assert.equal(s.length - m![0].length + Number(m![1]), prompt.length, 'kept + dropped = whole');
+  for (const state of [taskState(prompt), followUpState(null, prompt), stepState(step([], 'medium', { prompt }))]) {
+    assert.ok(state.includes('帮我看看最后一行报错是什么原因'), state.slice(-80));
+  }
+  assert.ok(taskState(prompt).length <= 3100);
+  assert.ok(followUpState(null, prompt).length < 2100);
+});
+
+test('clipEnds never splits a surrogate pair at either boundary', () => {
+  for (const pad of ['', 'a']) {
+    const s = pad + '😀'.repeat(500);
+    for (const [head, tail] of [[101, 50], [100, 51], [7, 7], [1, 1]] as const) {
+      const out = clipEnds(s, head, tail);
+      assert.ok(!LONE_SURROGATE.test(out), `pad=${JSON.stringify(pad)} head=${head} tail=${tail}`);
+      assert.ok(out.length <= head + tail + 24);
+    }
+  }
+});
+
+test('trajectoryLine caps a batch of many calls and keeps the failed ones', () => {
+  const one = trajectoryLine(3, 'high', [read('src/a.ts')]);
+  assert.equal(one, 'step 3 @high: Read src/a.ts ok');
+  const batch = [...Array.from({ length: 20 }, (_, i) => read(`src/deep/path/to/module-${i}.ts`)), fail('npm test', 'not ok 1')];
+  const line = trajectoryLine(4, 'medium', batch);
+  assert.ok(line.length <= TRAJECTORY_LINE_MAX, `length ${line.length}`);
+  assert.ok(line.startsWith('step 4 @medium: 21 calls, 1 FAILED: Bash npm test FAILED; '), line.slice(0, 80));
+  assert.match(line, /…\[\+\d+ chars\]$/);
+  assert.ok(!LONE_SURROGATE.test(trajectoryLine(5, 'low', [read('😀'.repeat(40))])));
+});
 
 /* ---------- escalation per kind through the router ---------- */
 

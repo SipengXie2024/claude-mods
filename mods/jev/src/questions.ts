@@ -53,7 +53,7 @@ export const TASK_QUESTIONS = {
   },
 } satisfies Record<string, JevQuestion>;
 
-export const STEP_SET_VERSION = 'step.v2';
+export const STEP_SET_VERSION = 'step.v3';
 export const STEP_QUESTIONS = {
   phase: {
     type: 'choice',
@@ -68,7 +68,7 @@ export const STEP_QUESTIONS = {
   stuck: {
     type: 'noul',
     instructions:
-      'Is the agent stuck: repeating a failed approach, going in circles, or making no progress over its recent steps?',
+      'Is the agent stuck: repeating a failed approach, going in circles, or making no progress over its recent steps?' + UNTRUSTED,
   },
 } satisfies Record<string, JevQuestion>;
 

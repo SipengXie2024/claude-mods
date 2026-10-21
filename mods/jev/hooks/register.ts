@@ -4,7 +4,7 @@ import { stringifyResult, summarizeToolCall } from '../src/describe'
 import { clampEffort, isEffort, maxEffort, rank, type Effort } from '../src/effort'
 import { followUpSummary, isHumanPrompt, previousPromptIndex, userText, type Message } from '../src/followup'
 import { JevClient, type JevIo } from '../src/jev'
-import { EffortRouter, type FollowUpAsk } from '../src/router'
+import { EffortRouter, trajectoryLine, type FollowUpAsk } from '../src/router'
 import type { EffortDecision, TaskProfile, ToolCallSummary } from '../src/types'
 
 /**
@@ -349,7 +349,7 @@ async function decideStep($: $, e: { index: number; model: string; effort?: unkn
       consecutiveFailures: loop.consecutiveFailures, assistantNote: loop.note, lastBatch: batch, trajectory: loop.trajectory,
       fileEdits: Math.max(0, ...loop.edits.values()),
     })
-    loop.trajectory.push(`step ${loop.turn} @${current}: ${batch.map((c) => `${c.tool} ${c.summary.slice(0, 60)} ${c.failed ? 'FAILED' : 'ok'}`).join('; ')}`)
+    loop.trajectory.push(trajectoryLine(loop.turn, current, batch))
   }
 
   const effort = decision.effort
@@ -426,7 +426,9 @@ export const register: Register = (on) => {
     }
     const result = yield* next(effort ? { ...e, effort } : e)
     const loop = loops.get(e.agentId ?? MAIN)
-    if (loop && effort) loop.note = result.answer
+    // Even when routing failed this step, the next state must pair the
+    // tool calls with what the agent said in this step, not an older one.
+    if (loop) loop.note = result.answer
     return result
   })
 

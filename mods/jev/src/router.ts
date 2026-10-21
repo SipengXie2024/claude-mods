@@ -10,7 +10,7 @@ import {
   type Phase, type TaskType,
 } from './questions';
 import { auditIssues, emptyCore, isEnvironmentFailure, isExploratoryFailure, reasoningIssues, reduceBatch, reviveCore, serializeCore, type CoreState } from './state';
-import type { DecisionEvidence, EffortDecision, FollowUpRecord, JevResponse, StepContext, StepSignals, TaskProfile } from './types';
+import type { DecisionEvidence, EffortDecision, FollowUpRecord, JevResponse, StepContext, StepSignals, TaskProfile, ToolCallSummary } from './types';
 
 /** Prefix of at most n UTF-16 units that never ends on half a surrogate pair. */
 export function cut(s: string, n: number): string {
@@ -27,6 +27,21 @@ export function clip(s: string, n: number): string {
   return `${head}…[+${s.length - head.length} chars]`;
 }
 
+/**
+ * Surrogate-safe clip that keeps both ends. A prompt often puts the request
+ * after a long paste, so the tail carries the ask; the marker between the
+ * two parts states how much was dropped.
+ */
+export function clipEnds(s: string, head: number, tail: number): string {
+  if (s.length <= head + tail) return s;
+  const front = cut(s, head);
+  let start = Math.max(front.length, s.length - tail);
+  const first = s.charCodeAt(start);
+  if (first >= 0xdc00 && first <= 0xdfff) start++;
+  const back = s.slice(start);
+  return `${front}…[+${s.length - front.length - back.length} chars]…${back}`;
+}
+
 /** Lone surrogates (e.g. from a caller's naive slice) crash some Jev servers; replace them. */
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 const wellFormed = (s: string) => s.replace(LONE_SURROGATE, '\uFFFD');
@@ -34,6 +49,9 @@ const wellFormed = (s: string) => s.replace(LONE_SURROGATE, '\uFFFD');
 // The evaluator always gets the full request and tool-call state
 // (JEV_OPUS_EVALUATOR_CONTENT=full in jev-opus): the self-hosted Jev's
 // thresholds were calibrated on it. The summary-only state is not ported.
+// One departure from the calibrated state: long prompts keep their tail
+// (clipEnds) instead of only their head, so a request written after a
+// paste still reaches the evaluator. The thresholds were not re-run on it.
 
 /**
  * Upper bound on the step state sent to Jev (JEV_OPUS_STEP_STATE_MAX); the
@@ -66,14 +84,14 @@ function validAnswer(res: JevResponse, name: string): JevAnswer | undefined {
 }
 
 export function taskState(prompt: string, conversationNote?: string): string {
-  let s = `USER REQUEST TO A CODING AGENT:\n${clip(prompt.trim(), 3000)}`;
+  let s = `USER REQUEST TO A CODING AGENT:\n${clipEnds(prompt.trim(), 2200, 800)}`;
   if (conversationNote) s += `\n\nEARLIER IN THIS CONVERSATION (context only):\n${clip(conversationNote, 800)}`;
   return wellFormed(s);
 }
 
 /** State for the follow-up (dissatisfaction) question: an optional summary of the previous turn, then the new message. */
 export function followUpState(summary: string | null, prompt: string): string {
-  const latest = `USER'S LATEST MESSAGE:\n${clip(prompt.trim(), 2000)}`;
+  const latest = `USER'S LATEST MESSAGE:\n${clipEnds(prompt.trim(), 1500, 500)}`;
   return wellFormed(summary ? `CONVERSATION SO FAR (context only, may be partial):\n${summary}\n\n${latest}` : latest);
 }
 
@@ -91,8 +109,9 @@ const OMITTED_RESERVE = 48;
 export function stepState(ctx: StepContext, opts: { maxChars?: number } = {}): string {
   const max = opts.maxChars ?? stepStateMax;
   const head = [
-    `TASK: ${clip(ctx.prompt.trim(), 1200)}`,
-    `STEP ${ctx.turn} · effort in force: ${ctx.current} · consecutive failed tool calls: ${ctx.consecutiveFailures}`,
+    `TASK: ${clipEnds(ctx.prompt.trim(), 900, 300)}`,
+    // consecutiveFailures counts steps whose batch had a failure, not calls.
+    `STEP ${ctx.turn} · effort in force: ${ctx.current} · consecutive steps with a failed tool call: ${ctx.consecutiveFailures}`,
   ];
   if (ctx.assistantNote) head.push(`AGENT SAID: ${clip(ctx.assistantNote.trim(), 500)}`);
   head.push('TOOL CALLS JUST MADE:');
@@ -127,6 +146,19 @@ export function stepState(ctx: StepContext, opts: { maxChars?: number } = {}): s
   if (keptSteps.length) lines.push(`EARLIER STEPS:\n${keptSteps.join('\n')}`);
   // Only a cap smaller than the header itself reaches this hard cut.
   return wellFormed(cut(lines.join('\n'), max));
+}
+
+/** Cap on one EARLIER STEPS line, so a batch of many parallel calls cannot crowd out the rest of the history. */
+export const TRAJECTORY_LINE_MAX = 300;
+
+/** One EARLIER STEPS line for a finished batch: counts first, then failed calls, so both survive the cap. */
+export function trajectoryLine(turn: number, effort: Effort, batch: readonly ToolCallSummary[]): string {
+  const failed = batch.filter((c) => c.failed);
+  const ordered = [...failed, ...batch.filter((c) => !c.failed)];
+  const calls = ordered.map((c) => `${c.tool} ${cut(c.summary, 60)} ${c.failed ? 'FAILED' : 'ok'}`).join('; ');
+  const counts = batch.length > 1 ? `${batch.length} calls, ${failed.length} FAILED: ` : '';
+  // clip appends its `…[+N chars]` marker past the limit; keep the whole line within the cap.
+  return clip(`step ${turn} @${effort}: ${counts}${calls}`, TRAJECTORY_LINE_MAX - 16);
 }
 
 /** What routeTask needs to ask and act on the follow-up signal for a new prompt. */
