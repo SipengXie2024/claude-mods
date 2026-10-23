@@ -30,9 +30,9 @@
       "description": "Per-repo general/academic mode: /mode writes .claude/settings.local.json; paper repos get a one-time hint."
     },
     {
-      "name": "fast-jev-compaction",
-      "source": "./mods/fast-jev-compaction",
-      "description": "At 90% context, drop old tool calls Jev judges unneeded instead of summarising; AskUserQuestion calls are always kept."
+      "name": "html-plan",
+      "source": "./mods/html-plan",
+      "description": "html-plan with Chinese prose: CJK-aware linter, Chinese UI and response template under <html lang=\"zh\">."
     }
   ]
 }

@@ -1,0 +1,6 @@
+{
+  "name": "html-plan",
+  "version": "1.0.0-zh.1",
+  "description": "html-plan (anthropics/claude-plugins-community) with Chinese prose: the linter reads 。？！ as sentence ends and counts CJK text, and the page UI and response template switch to Chinese under <html lang=\"zh\">.",
+  "author": { "name": "sipeng" }
+}
