@@ -216,6 +216,8 @@ export class EffortRouter {
     let profile: TaskProfile = heuristicTaskProfile(prompt);
     let jevLatencyMs = 0;
     let jevError: string | undefined;
+    let jevProvider: string | undefined;
+    let jevFallbackFrom: string | undefined;
     // The follow-up question is a separate ask in parallel: the task ask and its
     // state stay exactly as calibrated.
     const [res, fault] = await Promise.all([
@@ -224,6 +226,8 @@ export class EffortRouter {
     ]);
     if (res) {
       jevLatencyMs = res.latencyMs;
+      jevProvider = res.provider;
+      jevFallbackFrom = res.fallbackFrom;
       if (res.failed || res.circuitOpen) {
         jevError = res.error ?? 'jev circuit open';
       } else {
@@ -259,7 +263,7 @@ export class EffortRouter {
     this.base = effort;
     return {
       kind: 'task', effort, previous, changed: effort !== previous, reasons,
-      source: profile.source, jevLatencyMs, jevError, profile,
+      source: profile.source, jevLatencyMs, jevError, jevProvider, jevFallbackFrom, profile,
       policyVersion: policyVersion(), questionVersions: { ...QUESTION_VERSIONS },
       ...(followUpRecord ? { followUp: followUpRecord } : {}),
     };
@@ -319,6 +323,8 @@ export class EffortRouter {
 
     let jevLatencyMs = 0;
     let jevError: string | undefined;
+    let jevProvider: string | undefined;
+    let jevFallbackFrom: string | undefined;
     let source: EffortDecision['source'] = this.jev ? 'local' : 'heuristic';
 
     // Selective Jev: ask only when the answer could change the decision — a
@@ -329,6 +335,8 @@ export class EffortRouter {
     if (this.jev && consult) {
       const res = (await this.jev.ask(this.stepAskState(judged), STEP_QUESTIONS)) as JevResponse;
       jevLatencyMs = res.latencyMs;
+      jevProvider = res.provider;
+      jevFallbackFrom = res.fallbackFrom;
       if (res.failed || res.circuitOpen) {
         jevError = res.error ?? 'jev circuit open';
         source = 'heuristic';
@@ -383,7 +391,7 @@ export class EffortRouter {
     if (effort !== h.effort) reasons.push(`bounded to ${effort}`);
     return {
       kind: 'step', effort, previous: ctx.current, changed: effort !== ctx.current, reasons,
-      source, jevLatencyMs, jevError, signals, profile: ctx.profile,
+      source, jevLatencyMs, jevError, jevProvider, jevFallbackFrom, signals, profile: ctx.profile,
       policyVersion: policyVersion(), questionVersions: { ...QUESTION_VERSIONS },
       evidence: this.evidence(ctx, heldByIssues && effort === ctx.current),
     };

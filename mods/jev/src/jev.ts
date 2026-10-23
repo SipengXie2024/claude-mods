@@ -37,6 +37,10 @@ export interface JevResult {
   circuitOpen?: boolean;
   latencyMs: number;
   inputTokens: number;
+  /** The endpoint that produced this result (JevClientOptions.label). */
+  provider?: string;
+  /** Set on a fallback client's result: why the primary was not used. */
+  fallbackFrom?: string;
 }
 
 export interface JevLike {
@@ -181,6 +185,8 @@ export interface JevIo {
 export interface JevClientOptions {
   apiKey: string;
   baseUrl: string;
+  /** Name recorded on each result (default: the endpoint's host). */
+  label?: string;
   model?: string;
   /** Overall deadline for one ask(). */
   deadlineMs?: number;
@@ -194,9 +200,24 @@ export interface JevClientOptions {
 
 const TIMEOUT = 'timeout' as const;
 
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
+/** A Jev endpoint, or a chain of them, that a hook binds its I/O to. */
+export interface JevSource {
+  readonly enabled: boolean;
+  bind(io: JevIo): JevLike;
+}
+
 export class JevClient {
   private readonly apiKey: string;
   private readonly baseUrl: string;
+  readonly label: string;
   private readonly model: string;
   private readonly deadlineMs: number;
   private readonly breakerThreshold: number;
@@ -209,6 +230,7 @@ export class JevClient {
   constructor(opts: JevClientOptions) {
     this.apiKey = opts.apiKey;
     this.baseUrl = opts.baseUrl;
+    this.label = opts.label ?? hostOf(opts.baseUrl);
     this.model = opts.model ?? 'jev-latest';
     this.deadlineMs = opts.deadlineMs ?? 2_500;
     this.breakerThreshold = Math.max(1, opts.breakerThreshold ?? 3);
@@ -243,12 +265,12 @@ export class JevClient {
   async ask(state: string, questions: Record<string, JevQuestion>, io: JevIo): Promise<JevResult> {
     const start = await io.now();
     if (!this.enabled) {
-      return { answers: {}, signals: missingSignals(questions), failed: true, error: 'JEV_API_KEY not set', latencyMs: 0, inputTokens: 0 };
+      return { answers: {}, signals: missingSignals(questions), failed: true, error: 'JEV_API_KEY not set', latencyMs: 0, inputTokens: 0, provider: this.label };
     }
     // Circuit breaker: while open, fail without fetching. After the cooldown,
     // the first real call becomes the single recovery probe.
     if (this.breakerOpenUntil > 0 && (start < this.breakerOpenUntil || this.probing)) {
-      return { answers: {}, signals: missingSignals(questions), failed: true, error: 'circuit open', circuitOpen: true, latencyMs: 0, inputTokens: 0 };
+      return { answers: {}, signals: missingSignals(questions), failed: true, error: 'circuit open', circuitOpen: true, latencyMs: 0, inputTokens: 0, provider: this.label };
     }
     if (this.breakerOpenUntil > 0) this.probing = true;
 
@@ -280,7 +302,7 @@ export class JevClient {
         const latencyMs = Math.max(0, (await io.now()) - start);
         if (Object.values(signals).includes('valid')) {
           this.noteSuccess();
-          return { answers: parsed.answers, signals, failed: false, latencyMs, inputTokens };
+          return { answers: parsed.answers, signals, failed: false, latencyMs, inputTokens, provider: this.label };
         }
         lastError = 'no valid answers in response';
       }
@@ -291,6 +313,34 @@ export class JevClient {
     }
     const end = await io.now();
     this.noteFailure(end);
-    return { answers: {}, signals, failed: true, error: lastError, latencyMs: Math.max(0, end - start), inputTokens: 0 };
+    return { answers: {}, signals, failed: true, error: lastError, latencyMs: Math.max(0, end - start), inputTokens: 0, provider: this.label };
+  }
+}
+
+/**
+ * A primary client with a stand-in. The fallback is asked only after the
+ * primary's result is `failed` (deadline, HTTP error, no valid answers, or its
+ * circuit open), so one ask costs at most both deadlines. Each client keeps
+ * its own circuit breaker: a primary that is down is skipped at once and the
+ * fallback answers alone until the primary's probe succeeds. The result is the
+ * fallback's, carrying the primary's error as `fallbackFrom` and the summed
+ * latency.
+ */
+export class JevFallback implements JevSource {
+  constructor(private readonly primary: JevClient, private readonly fallback: JevClient) {}
+
+  get enabled(): boolean {
+    return this.primary.enabled || this.fallback.enabled;
+  }
+
+  bind(io: JevIo): JevLike {
+    return { enabled: this.enabled, ask: (state, questions) => this.ask(state, questions, io) };
+  }
+
+  async ask(state: string, questions: Record<string, JevQuestion>, io: JevIo): Promise<JevResult> {
+    const first = await this.primary.ask(state, questions, io);
+    if (!first.failed) return first;
+    const second = await this.fallback.ask(state, questions, io);
+    return { ...second, latencyMs: first.latencyMs + second.latencyMs, fallbackFrom: first.error ?? 'request failed' };
   }
 }

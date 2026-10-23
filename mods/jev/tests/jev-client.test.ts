@@ -1,5 +1,5 @@
 import assert, { test } from './assert';
-import { JevClient, parseAnswers, validateAnswers, type JevIo } from '../src/jev';
+import { JevClient, JevFallback, parseAnswers, validateAnswers, type JevIo } from '../src/jev';
 import { STEP_QUESTIONS, TASK_QUESTIONS } from '../src/questions';
 
 // Legacy lenient parser — still exported for scripted JevLike stubs elsewhere.
@@ -262,4 +262,68 @@ test('validateAnswers never inflates confidence from a partial probability map',
   // only the chosen option reported: the other five kinds still hold 0.65 of the mass
   const { answers } = validateAnswers({ task_type: { choice: 'research', confidence: 0.2, probabilities: { research: 0.35 } } }, TASK_QUESTIONS);
   assert.ok(answers.task_type?.kind === 'choice' && answers.task_type.confidence < 0.6, JSON.stringify(answers.task_type));
+});
+
+const PRIMARY = 'http://primary.test/v1/systemone';
+const FALLBACK = 'http://127.0.0.1:18016/v1/systemone';
+const STUCK = { stuck: STEP_QUESTIONS.stuck };
+const answered = { body: { answers: { stuck: { noul: 0.1 } } } };
+
+function chain(opts: { primary?: Partial<ConstructorParameters<typeof JevClient>[0]>; fallback?: Partial<ConstructorParameters<typeof JevClient>[0]> } = {}) {
+  return new JevFallback(
+    new JevClient({ apiKey: 'primary-key', baseUrl: PRIMARY, ...opts.primary }),
+    new JevClient({ apiKey: 'fallback-key', baseUrl: FALLBACK, ...opts.fallback }),
+  );
+}
+
+test('JevFallback: a primary answer is returned as is and the fallback is never fetched', async () => {
+  const urls: string[] = [];
+  const io = fakeIo((req) => (urls.push(req.url), answered));
+  const r = await chain().ask('s', STUCK, io);
+  assert.equal(r.failed, false);
+  assert.equal(r.provider, 'primary.test');
+  assert.equal(r.fallbackFrom, undefined);
+  assert.deepEqual(urls, [PRIMARY]);
+});
+
+test('JevFallback: an HTTP error at the primary is answered by the fallback, with the primary error kept', async () => {
+  const io = fakeIo((req) => (req.url === PRIMARY ? { status: 500, text: 'err' } : answered));
+  const r = await chain().ask('s', STUCK, io);
+  assert.equal(r.failed, false);
+  assert.equal(r.provider, '127.0.0.1:18016');
+  assert.equal(r.fallbackFrom, 'Jev HTTP 500');
+  assert.equal(r.answers.stuck?.kind === 'noul' && r.answers.stuck.p, 0.1);
+  assert.equal(io.hits, 2);
+});
+
+test('JevFallback: a primary past its deadline falls back, and the latency is the sum of both', async () => {
+  // deadlineFires advances the fake clock by each client's deadline, the fallback's included.
+  const io = fakeIo((req) => (req.url === PRIMARY ? 'hang' : answered), { deadlineFires: true });
+  const r = await chain({ primary: { deadlineMs: 3_000 }, fallback: { deadlineMs: 500 } }).ask('s', STUCK, io);
+  assert.equal(r.failed, false);
+  assert.equal(r.fallbackFrom, 'deadline exceeded');
+  assert.equal(r.latencyMs, 3_500);
+  assert.equal(io.hits, 2);
+});
+
+test('JevFallback: an open primary circuit goes straight to the fallback without a primary fetch', async () => {
+  const io = fakeIo((req) => (req.url === PRIMARY ? { status: 500, text: 'err' } : answered));
+  const c = chain({ primary: { breakerThreshold: 2 } });
+  await c.ask('s', STUCK, io);
+  await c.ask('s', STUCK, io);
+  assert.equal(io.hits, 4);
+  const r = await c.ask('s', STUCK, io);
+  assert.equal(r.failed, false);
+  assert.equal(r.fallbackFrom, 'circuit open');
+  assert.equal(io.hits, 5, 'only the fallback was fetched');
+});
+
+test('JevFallback: when both fail the result is the fallback failure, its error unchanged', async () => {
+  const io = fakeIo((req) => ({ status: req.url === PRIMARY ? 500 : 503, text: 'err' }));
+  const r = await chain().ask('s', STUCK, io);
+  assert.equal(r.failed, true);
+  assert.equal(r.error, 'Jev HTTP 503');
+  assert.equal(r.fallbackFrom, 'Jev HTTP 500');
+  assert.equal(r.provider, '127.0.0.1:18016');
+  assert.deepEqual(r.signals, { stuck: 'missing' });
 });

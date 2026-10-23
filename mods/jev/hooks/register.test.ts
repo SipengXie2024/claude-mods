@@ -10,11 +10,16 @@ const NO_KEY = [
   'JEV_OPUS_MIN_EFFORT=medium',
   'JEV_OPUS_MAX_EFFORT=max',
 ].join('\n')
+const PRIMARY_URL = 'http://jev.test/v1/systemone'
+const FALLBACK_URL = 'http://127.0.0.1:18016/v1/systemone'
 const ENV = [
-  'JEV_BASE_URL=http://jev.test/v1/systemone',
+  `JEV_BASE_URL=${PRIMARY_URL}`,
   'JEV_ALLOWED_HOSTS=jev.test',
   'JEV_API_KEY=test-key',
   'JEV_DEADLINE_MS=3500',
+  `JEV_FALLBACK_BASE_URL=${FALLBACK_URL}`,
+  'JEV_FALLBACK_API_KEY=mac-key',
+  'JEV_FALLBACK_DEADLINE_MS=1500',
   'JEV_OPUS_MIN_EFFORT=medium',
   'JEV_OPUS_MAX_EFFORT=max',
   'JEV_OPUS_DISSAT_YES=0.75',
@@ -25,7 +30,7 @@ type Msg = { role: string; content: unknown }
 
 interface World {
   files: Map<string, string>
-  asks: Array<{ questions: string[]; state: string; auth: string | undefined }>
+  asks: Array<{ url: string; questions: string[]; state: string; auth: string | undefined }>
   steps: Array<{ index: number; effort: unknown; agentId?: string }>
   contexts: Array<readonly string[] | undefined>
   status: string[]
@@ -40,6 +45,8 @@ interface Opts {
   env?: string | null
   /** Jev's answers for one ask; null from it = never answers */
   jev?: (questions: string[], state: string) => Answers | null
+  /** the primary endpoint answers HTTP 503 */
+  primaryDown?: boolean
   settings?: Record<string, unknown>
   agentRows?: Record<string, Array<{ role: 'user' | 'assistant'; text: string }>>
   store?: Record<string, unknown>
@@ -77,7 +84,8 @@ function world(on: On, o: Opts = {}): World {
   on('http.fetch', async ($, e) => {
     const body = JSON.parse(e.init?.body ?? '{}') as { state: string; questions: Record<string, unknown> }
     const questions = Object.keys(body.questions)
-    w.asks.push({ questions, state: body.state, auth: e.init?.headers?.Authorization })
+    w.asks.push({ url: e.url, questions, state: body.state, auth: e.init?.headers?.Authorization })
+    if (o.primaryDown && e.url === PRIMARY_URL) return { value: { status: 503, ok: false, headers: {}, text: 'down' } }
     const answers = jev(questions, body.state)
     if (!answers) return new Promise(() => {}) // never answers: the deadline decides
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ answers, usage: { input_tokens: 10 } }) } }
@@ -175,7 +183,7 @@ describe('task and step routing', () => {
   })
 
   test('a key with no allowed endpoint: heuristics only, nothing leaves the machine', async ($, on) => {
-    const w = world(on, { env: ENV.replace('JEV_ALLOWED_HOSTS=jev.test\n', '') })
+    const w = world(on, { env: ENV.replace('JEV_ALLOWED_HOSTS=jev.test\n', '').replace(/JEV_FALLBACK_[^\n]*\n/g, '') })
     await submit($, 'fix the crash in parser.ts')
     await step($, 0)
     expect(w.asks.length).toBe(0)
@@ -183,14 +191,42 @@ describe('task and step routing', () => {
     expect(journal(w)[0]!.jevRefusedHost).toBe('jev.test')
   })
 
+  test('a refused primary with an allowed fallback: only the fallback is asked, and the refusal is reported', async ($, on) => {
+    const w = world(on, { env: ENV.replace('JEV_ALLOWED_HOSTS=jev.test\n', '') })
+    await submit($, 'fix the crash in parser.ts')
+    expect(w.asks.map((a) => a.url)).toEqual([FALLBACK_URL])
+    expect(journal(w)[0]).toMatchObject({ source: 'jev', jevProvider: '127.0.0.1:18016', jevRefusedHost: 'jev.test' })
+    expect(journal(w)[0]!.jevFallbackFrom).toBeUndefined()
+  })
+
   test('Jev past its deadline: heuristics, the request is not held', async ($, on) => {
     const w = world(on, { jev: () => null })
     const pending = submit($, 'fix the crash in parser.ts')
-    await w.clock.advance(3_500)
+    await w.clock.advance(3_500) // primary deadline
+    await w.clock.advance(1_500) // fallback deadline
     await pending
     await step($, 0)
     expect(sent(w)).toEqual(['high'])
-    expect(journal(w)[0]).toMatchObject({ source: 'heuristic', jevError: 'deadline' })
+    expect(journal(w)[0]).toMatchObject({ source: 'heuristic', jevError: 'deadline', jevFallbackFrom: 'deadline', jevProvider: '127.0.0.1:18016' })
+  })
+
+  test('a primary Jev that fails is answered by the fallback endpoint, and the journal says so', async ($, on) => {
+    const w = world(on, { primaryDown: true })
+    await submit($, 'add a unit test for add() and fix the bug')
+    await step($, 0)
+    expect(sent(w)).toEqual(['high'])
+    expect(w.asks.map((a) => a.url)).toEqual([PRIMARY_URL, FALLBACK_URL])
+    expect(w.asks[1]!.auth).toBe('Bearer mac-key')
+    expect(journal(w)[0]).toMatchObject({ source: 'jev', jevProvider: '127.0.0.1:18016', jevFallbackFrom: 'http-503' })
+    expect(journal(w)[0]!.jevError).toBeUndefined()
+  })
+
+  test('a healthy primary Jev is the only endpoint asked', async ($, on) => {
+    const w = world(on)
+    await submit($, 'add a unit test for add() and fix the bug')
+    expect(w.asks.map((a) => a.url)).toEqual([PRIMARY_URL])
+    expect(journal(w)[0]).toMatchObject({ source: 'jev', jevProvider: 'jev.test' })
+    expect(journal(w)[0]!.jevFallbackFrom).toBeUndefined()
   })
 
   test('a non-Opus model and a numeric effort pass through untouched', async ($, on) => {
@@ -334,6 +370,88 @@ describe('borrowed from jev-pilot', () => {
     expect(last.reasons.some((r: string) => r.includes('one file edited 4×'))).toBe(true)
     // stuck jumps at least two levels above the task level: medium → xhigh (max only after xhigh fails twice)
     expect(sent(w).at(-1)).toBe('xhigh')
+  })
+})
+
+describe('prompt effort tag', () => {
+  test('[effort xhigh..max]: the task starts at xhigh, two xhigh failures reach max, a pass steps down no further than xhigh, the next prompt is back to the configured range', async ($, on) => {
+    const w = world(on)
+    await submit($, '[effort xhigh..max] add a unit test for add() and fix the bug')
+    await step($, 0)
+    await bash(w, $, 'npm test', true)
+    await step($, 1)
+    await bash(w, $, 'npm test', true)
+    await step($, 2)
+    await bash(w, $, 'npm test')
+    await step($, 3)
+    expect(sent(w)).toEqual(['xhigh', 'xhigh', 'max', 'xhigh'])
+    const j = journal(w)
+    expect(j[0]).toMatchObject({ kind: 'task', effort: 'xhigh', promptBounds: 'xhigh..max' })
+    expect(j[0]!.reasons).toContain('prompt tag [effort xhigh..max]')
+    expect(j[3]).toMatchObject({ event: 'step', effort: 'max', promptBounds: 'xhigh..max' })
+    // the tag goes to the model and to Jev as written
+    expect(w.asks[0]!.state).toContain('[effort xhigh..max]')
+
+    await submit($, 'add a unit test for add() and fix the bug')
+    await step($, 0)
+    expect(sent(w).at(-1)).toBe('high')
+    expect(journal(w).at(-1)!.promptBounds).toBeUndefined()
+  })
+
+  test('[effort >=xhigh] keeps the configured max; [effort low] overrides the configured floor', async ($, on) => {
+    const w = world(on)
+    await submit($, 'add a unit test for add() and fix the bug [effort >=xhigh]')
+    expect(journal(w)[0]).toMatchObject({ effort: 'xhigh', promptBounds: 'xhigh..max' })
+    await submit($, '[effort low] add a unit test for add() and fix the bug')
+    expect(journal(w)[1]).toMatchObject({ effort: 'low', promptBounds: 'low' })
+  })
+
+  test('[effort >=xhigh] above a configured max of high still runs at xhigh', async ($, on) => {
+    const w = world(on, { env: ENV.replace('JEV_OPUS_MAX_EFFORT=max', 'JEV_OPUS_MAX_EFFORT=high') })
+    await submit($, 'add a unit test for add() and fix the bug [effort >=xhigh]')
+    expect(journal(w)[0]).toMatchObject({ effort: 'xhigh', promptBounds: 'xhigh' })
+  })
+
+  test('a /effort pin beats the prompt tag', async ($, on) => {
+    const w = world(on)
+    await submit($, '[effort max] add a unit test for add() and fix the bug')
+    await step($, 0, 'xhigh')
+    await step($, 1, 'medium')
+    await step($, 2, 'medium')
+    expect(sent(w)).toEqual(['max', 'medium', 'medium'])
+    expect(journal(w).at(-1)).toMatchObject({ source: 'pinned', manual: true })
+  })
+
+  test('a subagent brief with a tag is bounded the same way', async ($, on) => {
+    const w = world(on, { agentRows: { 'agent-7': [{ role: 'user', text: '[effort max] Investigate why the parser crashes on empty input' }] } })
+    await step($, 0, 'xhigh', { agentId: 'agent-7' })
+    expect(w.steps[0]).toEqual({ index: 0, effort: 'max', agentId: 'agent-7' })
+    expect(journal(w)[0]).toMatchObject({ agent: 'agent-7', promptBounds: 'max' })
+    expect(journal(w)[0]!.promptBoundsInherited).toBeUndefined()
+  })
+
+  test('a subagent started under a tagged main prompt inherits its range; its own tag wins; the next main prompt starts subagents unbounded', async ($, on) => {
+    const w = world(on, { agentRows: {
+      'agent-1': [{ role: 'user', text: 'Investigate why the parser crashes on empty input' }],
+      'agent-2': [{ role: 'user', text: '[effort high] Investigate why the parser crashes on empty input' }],
+      'agent-3': [{ role: 'user', text: 'Investigate why the parser crashes on empty input' }],
+    } })
+    await submit($, '[effort xhigh..max] find and fix the parser crash')
+    await step($, 0)
+    await step($, 0, 'xhigh', { agentId: 'agent-1' })
+    await step($, 0, 'xhigh', { agentId: 'agent-2' })
+    expect(w.steps.slice(1)).toEqual([{ index: 0, effort: 'xhigh', agentId: 'agent-1' }, { index: 0, effort: 'high', agentId: 'agent-2' }])
+    const j = journal(w)
+    expect(j[2]).toMatchObject({ agent: 'agent-1', effort: 'xhigh', promptBounds: 'xhigh..max', promptBoundsInherited: true })
+    expect(j[2]!.reasons).toContain('main prompt tag [effort xhigh..max]')
+    expect(j[3]).toMatchObject({ agent: 'agent-2', effort: 'high', promptBounds: 'high' })
+    expect(j[3]!.promptBoundsInherited).toBeUndefined()
+
+    await submit($, 'now write the changelog entry')
+    await step($, 0)
+    await step($, 0, 'xhigh', { agentId: 'agent-3' })
+    expect(w.steps.at(-1)).toEqual({ index: 0, effort: 'high', agentId: 'agent-3' })
+    expect(journal(w).at(-1)!.promptBounds).toBeUndefined()
   })
 })
 

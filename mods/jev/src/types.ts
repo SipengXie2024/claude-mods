@@ -135,6 +135,10 @@ export interface EffortDecision {
   source: 'jev' | 'heuristic' | 'pinned' | 'local';
   jevLatencyMs: number;
   jevError?: string;
+  /** which Jev endpoint answered (or failed last) */
+  jevProvider?: string;
+  /** the primary endpoint's error when the fallback was asked */
+  jevFallbackFrom?: string;
   profile?: TaskProfile;
   signals?: StepSignals;
   policyVersion?: string;

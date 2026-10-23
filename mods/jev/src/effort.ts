@@ -31,3 +31,26 @@ export function maxEffort(a: Effort, b: Effort): Effort {
 export function minEffort(a: Effort, b: Effort): Effort {
   return rank(a) <= rank(b) ? a : b;
 }
+
+/** A prompt's own effort range: `[effort xhigh..max]`, `[effort >=xhigh]` (max stays configured), `[effort max]` (one level). */
+export interface EffortTag {
+  min?: Effort;
+  max?: Effort;
+}
+
+const LEVEL = EFFORT_LEVELS.join('|');
+const EFFORT_TAG = new RegExp(`\\[\\s*effort\\s+(?:(>=)\\s*)?(${LEVEL})(?:\\s*\\.\\.\\s*(${LEVEL}))?\\s*\\]`, 'i');
+
+/** The first `[effort …]` tag anywhere in the text; null without one. */
+export function effortTag(text: string): EffortTag | null {
+  const m = EFFORT_TAG.exec(text);
+  if (!m) return null;
+  const a = m[2]!.toLowerCase() as Effort;
+  if (m[1]) return { min: a };
+  if (m[3]) return { min: a, max: m[3].toLowerCase() as Effort };
+  return { min: a, max: a };
+}
+
+export function describeBounds(b: { min: Effort; max: Effort }): string {
+  return b.min === b.max ? b.min : `${b.min}..${b.max}`;
+}

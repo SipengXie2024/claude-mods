@@ -77,3 +77,27 @@ test('hash20: stable 20-hex identities that differ for nearby inputs', () => {
   assert.notEqual(hash20('ab'), hash20('ba'));
   assert.notEqual(hash20('测试'), hash20('测验'));
 });
+
+test('modConfig: JEV_FALLBACK_* names a second endpoint under the same host rule', () => {
+  const both = modConfig({
+    JEV_API_KEY: 'k1', JEV_BASE_URL: 'https://maas-api.antdigital.com/v1/systemone', JEV_MODEL: 'lingdt-decision-1.0', JEV_DEADLINE_MS: '3000',
+    JEV_ALLOWED_HOSTS: 'maas-api.antdigital.com',
+    JEV_FALLBACK_API_KEY: 'k2', JEV_FALLBACK_BASE_URL: 'http://127.0.0.1:18016/v1/systemone', JEV_FALLBACK_DEADLINE_MS: '10000',
+  });
+  assert.equal(both.jev?.baseUrl, 'https://maas-api.antdigital.com/v1/systemone');
+  assert.equal(both.jev?.model, 'lingdt-decision-1.0');
+  assert.equal(both.jev?.deadlineMs, 3000);
+  assert.equal(both.jevFallback?.baseUrl, 'http://127.0.0.1:18016/v1/systemone');
+  assert.equal(both.jevFallback?.apiKey, 'k2');
+  assert.equal(both.jevFallback?.model, 'jev-latest');
+  assert.equal(both.jevFallback?.deadlineMs, 10000);
+  assert.equal(both.jevRefusedHost, null);
+  assert.equal(modConfig({ JEV_API_KEY: 'k1', JEV_BASE_URL: 'http://127.0.0.1:18016/v1/systemone' }).jevFallback, null, 'no fallback key: none');
+  const refused = modConfig({
+    JEV_API_KEY: 'k1', JEV_BASE_URL: 'http://127.0.0.1:18016/v1/systemone',
+    JEV_FALLBACK_API_KEY: 'k2', JEV_FALLBACK_BASE_URL: 'https://api.typesafe.ai/v1/systemone',
+  });
+  assert.equal(refused.jevFallback, null);
+  assert.equal(refused.jevRefusedHost, 'api.typesafe.ai');
+  assert.equal(modConfig({ TYPESAFE_API_KEY: 'k', JEV_FALLBACK_BASE_URL: 'http://127.0.0.1:1/v1/systemone' }).jevFallback, null, 'TYPESAFE_API_KEY is the primary key only');
+});

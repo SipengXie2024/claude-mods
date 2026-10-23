@@ -1,9 +1,10 @@
 import type { EngineInterface, Register } from 'claude-code'
 import { applyPolicyConfig, modConfig, parseEnvFile, type ModConfig } from '../src/config'
 import { stringifyResult, summarizeToolCall } from '../src/describe'
-import { clampEffort, isEffort, maxEffort, rank, type Effort } from '../src/effort'
+import { clampEffort, describeBounds, effortTag, isEffort, maxEffort, rank, type Effort } from '../src/effort'
 import { followUpSummary, isHumanPrompt, previousPromptIndex, userText, type Message } from '../src/followup'
-import { JevClient, type JevIo } from '../src/jev'
+import { JevClient, JevFallback, type JevIo, type JevSource } from '../src/jev'
+import { normalizeBounds, type Bounds } from '../src/policy'
 import { EffortRouter, trajectoryLine, type FollowUpAsk } from '../src/router'
 import type { EffortDecision, TaskProfile, ToolCallSummary } from '../src/types'
 
@@ -41,6 +42,10 @@ const STORE_SESSIONS = 200
 interface Loop {
   router: EffortRouter
   prompt: string
+  /** the [effort …] range in force until the next prompt: the prompt's own tag, or the main prompt's for a subagent */
+  tagged: { bounds: Bounds; inherited: boolean } | null
+  /** a subagent loop: the main prompt's tagged range when this loop was started */
+  inherited: Bounds | null
   profile: TaskProfile | null
   turn: number
   consecutiveFailures: number
@@ -69,7 +74,7 @@ interface SessionRecord {
 }
 
 const loops = new Map<string, Loop>()
-let setup: Promise<{ cfg: ModConfig; client: JevClient | null; dir: string }> | null = null
+let setup: Promise<{ cfg: ModConfig; client: JevSource | null; dir: string }> | null = null
 let journalQueue: Promise<void> = Promise.resolve()
 let refusedWarned = false
 
@@ -91,9 +96,16 @@ function load($: $) {
     } catch { /* no config: heuristics only */ }
     const cfg = modConfig(env)
     applyPolicyConfig(cfg)
-    return { cfg, client: cfg.jev ? new JevClient(cfg.jev) : null, dir }
+    return { cfg, client: jevSource(cfg), dir }
   })()
   return setup
+}
+
+/** The configured endpoints as one source: none, one, or a primary with its fallback. */
+function jevSource(cfg: ModConfig): JevSource | null {
+  const clients = [cfg.jev, cfg.jevFallback].filter((c) => c !== null).map((c) => new JevClient(c))
+  if (clients.length === 2) return new JevFallback(clients[0]!, clients[1]!)
+  return clients[0] ?? null
 }
 
 function io($: $): JevIo {
@@ -104,23 +116,36 @@ function io($: $): JevIo {
   }
 }
 
-function newLoop(cfg: ModConfig): Loop {
+function newLoop(cfg: ModConfig, inherited: Bounds | null): Loop {
   return {
     router: new EffortRouter({ jev: null, bounds: cfg.bounds }),
-    prompt: '', profile: null, turn: 0, consecutiveFailures: 0, trajectory: [],
+    prompt: '', tagged: null, inherited, profile: null, turn: 0, consecutiveFailures: 0, trajectory: [],
     effort: null, clientEffort: null, manual: false, pending: [], note: '', edits: new Map(), trail: [], task: null,
   }
 }
 
+/** A subagent started under a tagged main prompt works inside that prompt's range. */
 function loopFor(key: string, cfg: ModConfig): Loop {
   let loop = loops.get(key)
-  if (!loop) loops.set(key, (loop = newLoop(cfg)))
+  if (!loop) loops.set(key, (loop = newLoop(cfg, key === MAIN ? null : loops.get(MAIN)?.tagged?.bounds ?? null)))
   return loop
 }
 
-/** A new prompt (or subagent run): fresh per-prompt evidence, same router. */
-function startPrompt(loop: Loop, prompt: string): void {
+/**
+ * A new prompt (or subagent run): fresh per-prompt evidence, same router. A
+ * `[effort …]` tag in the prompt replaces the configured range for this
+ * prompt only; every later decision (task level, raises, step-downs) stays
+ * inside it, and the next prompt returns to the configured range. A subagent
+ * brief without a tag of its own inherits the main prompt's range.
+ */
+function startPrompt(loop: Loop, prompt: string, cfg: ModConfig): void {
   loop.prompt = prompt
+  // `[effort >=xhigh]` keeps the configured max unless that sits below the asked floor.
+  const tag = effortTag(prompt)
+  loop.tagged = tag
+    ? { bounds: normalizeBounds({ min: tag.min ?? cfg.bounds.min, max: tag.max ?? maxEffort(tag.min ?? cfg.bounds.min, cfg.bounds.max) }), inherited: false }
+    : loop.inherited ? { bounds: loop.inherited, inherited: true } : null
+  loop.router.bounds = loop.tagged?.bounds ?? cfg.bounds
   loop.turn = 0
   loop.consecutiveFailures = 0
   loop.trajectory = []
@@ -129,6 +154,14 @@ function startPrompt(loop: Loop, prompt: string): void {
   loop.edits = new Map()
   loop.trail = []
 }
+
+/** Say in the task decision that the prompt's tag set the range. */
+function noteTag(loop: Loop, decision: EffortDecision): void {
+  if (loop.tagged) decision.reasons.push(`${loop.tagged.inherited ? 'main prompt tag' : 'prompt tag'} [effort ${describeBounds(loop.tagged.bounds)}]`)
+}
+
+/** Journal fields naming the tagged range while it is in force, and whether a subagent inherited it. */
+const taggedField = (loop: Loop) => (loop.tagged ? { promptBounds: describeBounds(loop.tagged.bounds), ...(loop.tagged.inherited ? { promptBoundsInherited: true } : {}) } : {})
 
 const storeKey = (session: string) => `session:${session}`
 
@@ -194,6 +227,8 @@ function record(d: EffortDecision, extra: Record<string, unknown>): Record<strin
     ...(d.signals ? { signals: { ...d.signals, phaseConfidence: round(d.signals.phaseConfidence), stepDifficulty: round(d.signals.stepDifficulty), stuck: round(d.signals.stuck) } } : {}),
     jevLatencyMs: d.jevLatencyMs,
     ...(d.jevError ? { jevError: errorCode(d.jevError) } : {}),
+    ...(d.jevProvider ? { jevProvider: d.jevProvider } : {}),
+    ...(d.jevFallbackFrom ? { jevFallbackFrom: errorCode(d.jevFallbackFrom) } : {}),
     ...(d.followUp ? { followUp: { ...d.followUp, ...(d.followUp.p !== undefined ? { p: round(d.followUp.p) } : {}), error: errorCode(d.followUp.error) } } : {}),
     ...(d.evidence ? { evidence: d.evidence } : {}),
     policy: d.policyVersion,
@@ -256,9 +291,10 @@ async function routePrompt($: $, text: string, origin: string): Promise<{ decisi
     }
   }
 
-  startPrompt(loop, text)
+  startPrompt(loop, text, cfg)
   loop.router.useJev(client ? client.bind(io($)) : null)
   const decision = await loop.router.routeTask(text || '(continuing an earlier task)', loop.effort, undefined, followUp)
+  noteTag(loop, decision)
   loop.profile = decision.profile ?? loop.router.lastProfileFallback(text)
 
   // A short acknowledgement continues the work at hand: never start it below
@@ -266,7 +302,7 @@ async function routePrompt($: $, text: string, origin: string): Promise<{ decisi
   const trimmed = text.trim()
   const ack = trimmed.length <= ACK_MAX_CHARS && (loop.profile.taskType === 'chat' || ACK.test(trimmed))
   if (ack && prev && decision.source !== 'pinned' && rank(decision.effort) < rank(prev.last)) {
-    const effort = clampEffort(prev.last, cfg.bounds.min, cfg.bounds.max)
+    const effort = clampEffort(prev.last, loop.router.bounds.min, loop.router.bounds.max)
     if (rank(effort) > rank(decision.effort)) {
       decision.reasons.push(`short acknowledgement → stays at ${effort}`)
       decision.effort = effort
@@ -282,7 +318,7 @@ async function routePrompt($: $, text: string, origin: string): Promise<{ decisi
   })
   loop.task = decision
   const advisor = f?.advisor === true
-  await journal($, dir, record(decision, { at: await $.clock.now(), session, agent: MAIN, event: 'prompt', origin, model, ...(f ? { advisorAvailable: followUp?.advisorAvailable } : {}), ...(cfg.jevRefusedHost ? { jevRefusedHost: cfg.jevRefusedHost } : {}) }))
+  await journal($, dir, record(decision, { at: await $.clock.now(), session, agent: MAIN, event: 'prompt', origin, model, ...taggedField(loop), ...(f ? { advisorAvailable: followUp?.advisorAvailable } : {}), ...(cfg.jevRefusedHost ? { jevRefusedHost: cfg.jevRefusedHost } : {}) }))
   if (cfg.jevRefusedHost && !refusedWarned) {
     refusedWarned = true
     $.ui.toast(`Jev off: endpoint ${cfg.jevRefusedHost} is not local or in JEV_ALLOWED_HOSTS; routing by heuristics`)
@@ -325,15 +361,16 @@ async function decideStep($: $, e: { index: number; model: string; effort?: unkn
   if (loop.manual) {
     const before = loop.effort ?? client0
     decision = { kind: fresh ? 'task' : 'step', effort: client0, previous: before, changed: client0 !== before, reasons: ['manual override'], source: 'pinned', jevLatencyMs: 0 }
-    if (fresh) { startPrompt(loop, loop.prompt); loop.task = null }
+    if (fresh) { startPrompt(loop, loop.prompt, cfg); loop.task = null }
   } else if (fresh) {
     if (!e.agentId && loop.task) {
       decision = loop.task
     } else {
       const text = await loopPrompt($, e.agentId)
-      startPrompt(loop, text)
+      startPrompt(loop, text, cfg)
       loop.router.useJev(client ? client.bind(io($)) : null)
       decision = await loop.router.routeTask(text || '(continuing an earlier task)', loop.effort)
+      noteTag(loop, decision)
       loop.profile = decision.profile ?? loop.router.lastProfileFallback(text)
     }
     loop.task = null
@@ -370,7 +407,7 @@ async function decideStep($: $, e: { index: number; model: string; effort?: unkn
   }
   await journal($, dir, record(decision, {
     at: await $.clock.now(), session, agent: e.agentId ?? MAIN, event: 'step', step: e.index, turnId: e.turnId,
-    model: e.model, sessionEffort: client0, ...(loop.manual ? { manual: true } : {}),
+    model: e.model, sessionEffort: client0, ...taggedField(loop), ...(loop.manual ? { manual: true } : {}),
   }))
   return effort
 }

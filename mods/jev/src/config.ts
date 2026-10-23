@@ -11,7 +11,9 @@ import { setStepStateMax, STEP_STATE_DEFAULT, STEP_STATE_MIN } from './router';
 export interface ModConfig {
   /** null without an API key or an allowed JEV_BASE_URL: heuristics only */
   jev: JevClientOptions | null;
-  /** The refused endpoint's host when a key is set but JEV_BASE_URL is unset or not allowed, so the
+  /** The stand-in asked when the primary fails (JEV_FALLBACK_*); null when unset or not allowed. */
+  jevFallback: JevClientOptions | null;
+  /** The refused endpoint's host when a key is set but its base URL is unset or not allowed, so the
    * fallback to heuristics can be reported instead of happening silently. */
   jevRefusedHost: string | null;
   bounds: Bounds;
@@ -85,25 +87,41 @@ function endpointHost(url: string): string {
   }
 }
 
-export function modConfig(env: Record<string, string>): ModConfig {
-  const apiKey = env.JEV_API_KEY || env.TYPESAFE_API_KEY || '';
-  const baseUrl = env.JEV_BASE_URL || '';
+/**
+ * One endpoint's client options from its key set: JEV_BASE_URL / JEV_API_KEY /
+ * JEV_MODEL / JEV_DEADLINE_MS for the primary, the same names with a
+ * JEV_FALLBACK_ prefix for the stand-in. Breaker and confidence settings are
+ * shared. `refusedHost` is set when a key exists but the URL is not allowed.
+ */
+function endpoint(env: Record<string, string>, prefix: '' | 'FALLBACK_'): { options: JevClientOptions | null; refusedHost: string | null } {
+  const apiKey = env[`JEV_${prefix}API_KEY`] || (prefix ? '' : env.TYPESAFE_API_KEY) || '';
+  const baseUrl = env[`JEV_${prefix}BASE_URL`] || '';
   const allowed = jevEndpointAllowed(baseUrl, env.JEV_ALLOWED_HOSTS);
-  const dissat = (env.JEV_OPUS_DISSATISFACTION ?? '').trim().toLowerCase();
   return {
-    jev: apiKey && allowed
+    options: apiKey && allowed
       ? {
         apiKey,
         baseUrl,
-        model: env.JEV_MODEL || 'jev-latest',
+        model: env[`JEV_${prefix}MODEL`] || 'jev-latest',
         // Jev sits in the request path, so the budget is small.
-        deadlineMs: int(env.JEV_DEADLINE_MS, 2_500),
+        deadlineMs: int(env[`JEV_${prefix}DEADLINE_MS`], 2_500),
         breakerThreshold: int(env.JEV_BREAKER_THRESHOLD, 3, 1),
         breakerCooldownMs: int(env.JEV_BREAKER_COOLDOWN_MS, 30_000),
         confidence: (env.JEV_CONFIDENCE === 'server' ? 'server' : 'recompute') as ConfidenceMode,
       }
       : null,
-    jevRefusedHost: apiKey && !allowed ? endpointHost(baseUrl) : null,
+    refusedHost: apiKey && !allowed ? endpointHost(baseUrl) : null,
+  };
+}
+
+export function modConfig(env: Record<string, string>): ModConfig {
+  const primary = endpoint(env, '');
+  const fallback = endpoint(env, 'FALLBACK_');
+  const dissat = (env.JEV_OPUS_DISSATISFACTION ?? '').trim().toLowerCase();
+  return {
+    jev: primary.options,
+    jevFallback: fallback.options,
+    jevRefusedHost: primary.refusedHost ?? fallback.refusedHost,
     bounds: normalizeBounds({ min: effort(env.JEV_OPUS_MIN_EFFORT, 'low'), max: effort(env.JEV_OPUS_MAX_EFFORT, 'high') }),
     deep: { yes: unit(env.JEV_OPUS_DEEP_YES, DEEP_DEFAULTS.yes), no: unit(env.JEV_OPUS_DEEP_NO, DEEP_DEFAULTS.no) },
     followUp: {
