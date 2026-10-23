@@ -16,7 +16,9 @@ import type { EffortDecision, TaskProfile, ToolCallSummary } from '../src/types'
  * request's effort: the task decision at step 0, routeStep on the batch since
  * the last step after that. Claude Code itself states each change as a
  * per-message effort, which keeps the prompt cache. Any failure leaves the
- * request as the engine made it.
+ * request as the engine made it. The band above the prompt draws the effort
+ * trail of the loop whose transcript is in view: the main conversation, or
+ * the subagent opened from the tasks list.
  */
 
 type $ = EngineInterface
@@ -37,6 +39,8 @@ const ACK_MAX_CHARS = 20
 export const ADVISOR_NOTE = 'The user says the previous attempt got something wrong, and it already ran at the highest available effort. Before continuing, call the advisor tool for a second opinion on the approach.'
 const JOURNAL_CAP = 512 * 1024
 const STORE_SESSIONS = 200
+/** Band lines kept at most, the main loop's and the subagents'; a done subagent's is dropped first. */
+const BAND_AGENTS = 64
 
 /** One model loop's routing state: the main conversation or one subagent run. */
 interface Loop {
@@ -73,7 +77,16 @@ interface SessionRecord {
   at: number
 }
 
+/** What the band draws for one loop; a subagent's stays after its loop ends, marked done. */
+interface BandStatus {
+  trail: Effort[]
+  phase: string | null
+  source: EffortDecision['source']
+  done: boolean
+}
+
 const loops = new Map<string, Loop>()
+const band = new Map<string, BandStatus>()
 let setup: Promise<{ cfg: ModConfig; client: JevSource | null; dir: string }> | null = null
 let journalQueue: Promise<void> = Promise.resolve()
 let refusedWarned = false
@@ -237,23 +250,25 @@ function record(d: EffortDecision, extra: Record<string, unknown>): Record<strin
 
 const round = (n: number) => Math.round(n * 1000) / 1000
 
-/** The trail is shown by the status-line script from the status file, not by `$.ui.status`, which would repeat it. */
 function pushTrail(loop: Loop, effort: Effort): void {
   if (loop.trail.at(-1) !== effort) loop.trail.push(effort)
 }
 
-/**
- * The status file ~/.claude/statusline/simple.mjs reads (the gateway's format):
- * `<config dir>/status/<session>.json` with the effort, the prompt's trail, the
- * step phase or task kind, and where the decision came from. Best effort.
- */
-async function writeStatus($: $, dir: string, session: string, loop: Loop, d: EffortDecision): Promise<void> {
-  if (!/^[\w-]+$/.test(session)) return
-  const status = {
-    effort: d.effort, previous: d.previous, trail: [...loop.trail],
-    phase: d.signals?.phase ?? d.profile?.taskType ?? null, source: d.source, at: await $.clock.now(),
+/** The band's state for this loop after a decision: the prompt's trail, the step phase or task kind, and where the decision came from. */
+function noteBand($: $, key: string, loop: Loop, d: EffortDecision): void {
+  band.set(key, { trail: [...loop.trail], phase: d.signals?.phase ?? d.profile?.taskType ?? null, source: d.source, done: false })
+  for (const [k, s] of band) {
+    if (band.size <= BAND_AGENTS) break
+    if (s.done) band.delete(k)
   }
-  await $.fs.write(`${dir}/status/${session}.json`, JSON.stringify(status)).catch(() => {})
+  $.ui.invalidate('ui.render')
+}
+
+/** `◆ Jev · low → HIGH · diagnosing`: the trail's last six levels, the current one upper-case; `· done` once a subagent has ended. */
+function bandLine(s: BandStatus): string {
+  const shown = s.trail.length > 6 ? ['…', ...s.trail.slice(-5)] : s.trail
+  const trail = shown.map((e, i) => (i === shown.length - 1 ? e.toUpperCase() : e)).join(' → ')
+  return `◆ Jev · ${trail}${s.phase ? ` · ${s.phase.replaceAll('_', ' ')}` : ''}${s.source === 'heuristic' ? ' · local routing' : ''}${s.done ? ' · done' : ''}`
 }
 
 /** Whether turn.step would act on requests to this model; a prompt for any other model is left alone. */
@@ -391,10 +406,10 @@ async function decideStep($: $, e: { index: number; model: string; effort?: unkn
 
   const effort = decision.effort
   loop.effort = effort
+  pushTrail(loop, effort)
+  noteBand($, key, loop, decision)
   const session = await $.session.id()
   if (key === MAIN) {
-    pushTrail(loop, effort)
-    await writeStatus($, dir, session, loop, decision)
     // The session record is the previous prompt's outcome for the next one:
     // a prompt starts it (prompt.submit, or here when none decided the turn),
     // and every step raises its max.
@@ -469,14 +484,32 @@ export const register: Register = (on) => {
     return result
   })
 
-  // A subagent run's state ends with it; the main loop's lives for the session.
+  // The band above the prompt: the trail of the loop whose transcript is in
+  // view. Nothing before that loop's first decision, and nothing over a survey.
+  on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => {
+    const s = e.props.hasSurvey ? undefined : band.get(e.props.view.agentId ?? MAIN)
+    if (!s) return next(e)
+    const { Text } = $.ui.resolve(e)
+    return <Text color="warning">{bandLine(s)}</Text>
+  })
+
+  // A subagent run's routing state ends with it; its band line stays, marked
+  // done, for whoever reads its transcript. The main loop's lives for the session.
   on('turn.complete', ($, e, next) => {
-    if (e.agentId) loops.delete(e.agentId)
+    if (e.agentId) {
+      loops.delete(e.agentId)
+      const s = band.get(e.agentId)
+      if (s) {
+        s.done = true
+        $.ui.invalidate('ui.render')
+      }
+    }
     return next(e)
   })
 
   on('session.end', ($, e, next) => {
     loops.clear()
+    band.clear()
     return next(e)
   })
 }

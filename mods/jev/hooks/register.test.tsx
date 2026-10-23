@@ -35,6 +35,8 @@ interface World {
   contexts: Array<readonly string[] | undefined>
   status: string[]
   toasts: string[]
+  /** `$.ui.invalidate` calls: the band asked to redraw */
+  invalidates: number
   messages: Msg[]
   clock: ReturnType<typeof mock.clock>
   /** the next Bash call's outcome */
@@ -74,7 +76,7 @@ export function stubJev(questions: string[], state: string): Answers {
 }
 
 function world(on: On, o: Opts = {}): World {
-  const w: World = { files: new Map(), asks: [], steps: [], contexts: [], status: [], toasts: [], messages: [], clock: mock.clock(on, { now: 1_000 }), fail: false }
+  const w: World = { files: new Map(), asks: [], steps: [], contexts: [], status: [], toasts: [], invalidates: 0, messages: [], clock: mock.clock(on, { now: 1_000 }), fail: false }
   if (o.env !== null) w.files.set(`${DIR}/.env`, o.env ?? ENV)
   mock.env(on, { HOME: '/home/u', JEV_OPUS_CONFIG_DIR: DIR })
   mock.store(on, o.store ?? {})
@@ -104,6 +106,13 @@ function world(on: On, o: Opts = {}): World {
   on('ui.status', ($, e) => (w.status.push(e.text ?? ''), { value: undefined }))
   on('ui.toast', ($, e) => (w.toasts.push(e.text), { value: undefined }))
   on('ui.log', () => ({ value: undefined }))
+  on('ui.invalidate', () => ((w.invalidates += 1), { value: undefined }))
+  // The engine's own drawing, where the mod leaves the band to it.
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine</Text>
+  })
+  on('turn.complete', ($, e) => ({ text: e.answer }))
   on('prompt.submit', ($, e) => (w.contexts.push(e.context), { text: e.text, context: e.context, origin: e.origin }))
   on('turn.step', async function* ($, e) {
     w.steps.push({ index: e.index, effort: e.effort, ...(e.agentId ? { agentId: e.agentId } : {}) })
@@ -131,6 +140,16 @@ const bash = (w: World, $: any, command: string, fail = false) => ((w.fail = fai
 const edit = ($: any, file: string) => $.tool.call({ tool: 'Edit', file_path: file, old_string: 'a', new_string: 'b' })
 const sent = (w: World) => w.steps.map((s) => s.effort)
 const journal = (w: World) => (w.files.get(`${DIR}/mod-journal.jsonl`) ?? '').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as Record<string, any>)
+const complete = ($: any, agentId?: string) => $.turn.complete({ turnId: 'turn-1', answer: 'done', durationMs: 1_000, isAborted: false, ...(agentId ? { agentId } : {}) })
+
+const BAND = { plugin: 'jev', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: true, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 10 }, view: {} } } as const
+/** The band's line for the transcript in view (the main conversation unless an agent is named); `engine` where the mod left the band to the engine. */
+async function bandText($: any, view: { agentId?: string } = {}, surface: 'terminal' | 'desktop' = 'terminal', hasSurvey = false): Promise<string | undefined> {
+  const ui = await $.ui.mount({ ...BAND, surface, props: { ...BAND.props, hasSurvey, view } })
+  const text = (await ui.find({ type: 'Text' }))?.text
+  await ui.unmount()
+  return text
+}
 
 describe('task and step routing', () => {
   test('a code task starts at high, a failing check raises, a pass steps back down', async ($, on) => {
@@ -153,12 +172,9 @@ describe('task and step routing', () => {
     expect(j[4]!.reasons[0]).toBe('failing check now passes → release hold')
     expect(w.status).toEqual([])
     expect(w.asks[0]!.auth).toBe('Bearer test-key')
-    // the status-line script reads the gateway-format file per session
-    const files = [...w.files.keys()].filter((k) => k.startsWith(`${DIR}/status/`))
-    expect(files.length).toBe(1)
-    const st = JSON.parse(w.files.get(files[0]!)!)
-    expect(st).toMatchObject({ effort: 'high', trail: ['high', 'xhigh', 'high'], previous: 'xhigh', phase: 'finishing', source: 'jev' })
-    expect(typeof st.at).toBe('number')
+    // the band draws the trail; no status file is written for a status-line script
+    expect([...w.files.keys()].some((k) => k.includes('/status/'))).toBe(false)
+    expect(await bandText($)).toBe('◆ Jev · high → xhigh → HIGH · finishing')
   })
 
   test('the journal holds no prompt text and no key', async ($, on) => {
@@ -462,5 +478,50 @@ describe('subagents', () => {
     expect(w.steps[0]).toEqual({ index: 0, effort: 'high', agentId: 'agent-7' })
     expect(w.asks.map((a) => a.questions[0])).toEqual(['task_type'])
     expect(journal(w)[0]).toMatchObject({ agent: 'agent-7', kind: 'task' })
+  })
+})
+
+describe('band above the prompt', () => {
+  const BRIEF = { 'agent-7': [{ role: 'user' as const, text: 'Investigate why the parser crashes on empty input' }] }
+
+  test('before any decision, and over a survey, the band is the engine\'s', async ($, on) => {
+    const w = world(on)
+    expect(await bandText($)).toBe('engine')
+    await submit($, 'fix the crash in parser.ts')
+    await step($, 0)
+    expect(w.invalidates).toBe(1)
+    expect(await bandText($, {}, 'terminal', true)).toBe('engine')
+  })
+
+  test('the subagent view draws that subagent\'s trail and the main view the main loop\'s, on terminal and desktop', async ($, on) => {
+    const w = world(on, { agentRows: BRIEF })
+    await step($, 0, 'xhigh', { agentId: 'agent-7' })
+    expect(await bandText($, { agentId: 'agent-7' })).toBe('◆ Jev · HIGH · code')
+    expect(await bandText($)).toBe('engine')
+    await submit($, 'add a unit test for add() and fix the bug')
+    await step($, 0)
+    await bash(w, $, 'npm test', true)
+    await step($, 1)
+    expect(await bandText($)).toBe('◆ Jev · high → XHIGH · diagnosing')
+    expect(await bandText($, {}, 'desktop')).toBe('◆ Jev · high → XHIGH · diagnosing')
+    expect(await bandText($, { agentId: 'agent-7' })).toBe('◆ Jev · HIGH · code')
+  })
+
+  test('a finished subagent keeps its line, marked done; an unknown agent gets the engine\'s', async ($, on) => {
+    const w = world(on, { agentRows: BRIEF })
+    await step($, 0, 'xhigh', { agentId: 'agent-7' })
+    await complete($, 'agent-7')
+    expect(w.invalidates).toBe(2)
+    expect(await bandText($, { agentId: 'agent-7' })).toBe('◆ Jev · HIGH · code · done')
+    expect(await bandText($, { agentId: 'agent-9' })).toBe('engine')
+  })
+
+  test('heuristic routing says so; a long trail shows its last five levels', async ($, on) => {
+    const w = world(on, { env: null })
+    await submit($, 'fix the crash in parser.ts')
+    await step($, 0)
+    expect(await bandText($)).toBe('◆ Jev · HIGH · code · local routing')
+    for (const effort of ['low', 'medium', 'high', 'xhigh', 'max', 'low']) await step($, w.steps.length, effort)
+    expect(await bandText($)).toBe('◆ Jev · … → medium → high → xhigh → max → LOW')
   })
 })
