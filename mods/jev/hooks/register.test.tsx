@@ -113,6 +113,7 @@ function world(on: On, o: Opts = {}): World {
     return <Text>engine</Text>
   })
   on('turn.complete', ($, e) => ({ text: e.answer }))
+  on('classic.PostModelSwitch', () => ({}))
   on('prompt.submit', ($, e) => (w.contexts.push(e.context), { text: e.text, context: e.context, origin: e.origin }))
   on('turn.step', async function* ($, e) {
     w.steps.push({ index: e.index, effort: e.effort, ...(e.agentId ? { agentId: e.agentId } : {}) })
@@ -174,7 +175,7 @@ describe('task and step routing', () => {
     expect(w.asks[0]!.auth).toBe('Bearer test-key')
     // the band draws the trail; no status file is written for a status-line script
     expect([...w.files.keys()].some((k) => k.includes('/status/'))).toBe(false)
-    expect(await bandText($)).toBe('◆ Jev · high → xhigh → HIGH · finishing')
+    expect(await bandText($)).toBe('Opus 5.5 · ◆ Jev · high → xhigh → HIGH · finishing')
   })
 
   test('the journal holds no prompt text and no key', async ($, on) => {
@@ -484,35 +485,60 @@ describe('subagents', () => {
 describe('band above the prompt', () => {
   const BRIEF = { 'agent-7': [{ role: 'user' as const, text: 'Investigate why the parser crashes on empty input' }] }
 
-  test('before any decision, and over a survey, the band is the engine\'s', async ($, on) => {
+  test('before any request the main line names the session\'s model; over a survey the band is the engine\'s', async ($, on) => {
     const w = world(on)
-    expect(await bandText($)).toBe('engine')
+    expect(await bandText($)).toBe('Opus 5.5')
     await submit($, 'fix the crash in parser.ts')
     await step($, 0)
-    expect(w.invalidates).toBe(1)
+    expect(w.invalidates).toBe(2)
+    expect(await bandText($)).toBe('Opus 5.5 · ◆ Jev · HIGH · code')
     expect(await bandText($, {}, 'terminal', true)).toBe('engine')
   })
 
-  test('the subagent view draws that subagent\'s trail and the main view the main loop\'s, on terminal and desktop', async ($, on) => {
+  test('the subagent view draws that subagent\'s model and trail and the main view the main loop\'s, on terminal and desktop', async ($, on) => {
     const w = world(on, { agentRows: BRIEF })
     await step($, 0, 'xhigh', { agentId: 'agent-7' })
-    expect(await bandText($, { agentId: 'agent-7' })).toBe('◆ Jev · HIGH · code')
-    expect(await bandText($)).toBe('engine')
+    expect(await bandText($, { agentId: 'agent-7' })).toBe('Opus 5.5 · ◆ Jev · HIGH · code')
+    expect(await bandText($)).toBe('Opus 5.5')
     await submit($, 'add a unit test for add() and fix the bug')
     await step($, 0)
     await bash(w, $, 'npm test', true)
     await step($, 1)
-    expect(await bandText($)).toBe('◆ Jev · high → XHIGH · diagnosing')
-    expect(await bandText($, {}, 'desktop')).toBe('◆ Jev · high → XHIGH · diagnosing')
-    expect(await bandText($, { agentId: 'agent-7' })).toBe('◆ Jev · HIGH · code')
+    expect(await bandText($)).toBe('Opus 5.5 · ◆ Jev · high → XHIGH · diagnosing')
+    expect(await bandText($, {}, 'desktop')).toBe('Opus 5.5 · ◆ Jev · high → XHIGH · diagnosing')
+    expect(await bandText($, { agentId: 'agent-7' })).toBe('Opus 5.5 · ◆ Jev · HIGH · code')
+  })
+
+  test('a Fable main loop and a Haiku subagent: the model alone, since Jev decides nothing for them', async ($, on) => {
+    const w = world(on, { model: 'claude-fable-5-1', agentRows: BRIEF })
+    await submit($, 'fix the crash in parser.ts')
+    await step($, 0, 'high', { model: 'claude-fable-5-1' })
+    await step($, 0, 'xhigh', { agentId: 'agent-7' })
+    await step($, 0, 'high', { agentId: 'agent-8', model: 'claude-haiku-4-5-20251001' })
+    await complete($, 'agent-8')
+    expect(await bandText($)).toBe('Fable 5.1')
+    expect(await bandText($, { agentId: 'agent-7' })).toBe('Opus 5.5 · ◆ Jev · HIGH · code')
+    expect(await bandText($, { agentId: 'agent-8' })).toBe('Haiku 4.5 · done')
+    expect(w.asks.every((a) => !a.state.includes('fix the crash'))).toBe(true)
+  })
+
+  test('/model names the new model at once and drops the trail decided on the old one', async ($, on) => {
+    world(on)
+    await submit($, 'fix the crash in parser.ts')
+    await step($, 0)
+    await $.classic.PostModelSwitch({
+      from_model: 'claude-opus-5-5', to_model: 'claude-fable-5-1[1m]', requested_model: 'fable[1m]', source: 'command',
+      context_tokens: 0, prompt_cache_warm: false, cache_ttl: '1h', estimated_cache_write_usd: 0, pricing: 'catalog',
+    })
+    expect(await bandText($)).toBe('Fable 5.1 (1M)')
   })
 
   test('a finished subagent keeps its line, marked done; an unknown agent gets the engine\'s', async ($, on) => {
     const w = world(on, { agentRows: BRIEF })
     await step($, 0, 'xhigh', { agentId: 'agent-7' })
     await complete($, 'agent-7')
-    expect(w.invalidates).toBe(2)
-    expect(await bandText($, { agentId: 'agent-7' })).toBe('◆ Jev · HIGH · code · done')
+    expect(w.invalidates).toBe(3)
+    expect(await bandText($, { agentId: 'agent-7' })).toBe('Opus 5.5 · ◆ Jev · HIGH · code · done')
     expect(await bandText($, { agentId: 'agent-9' })).toBe('engine')
   })
 
@@ -520,8 +546,8 @@ describe('band above the prompt', () => {
     const w = world(on, { env: null })
     await submit($, 'fix the crash in parser.ts')
     await step($, 0)
-    expect(await bandText($)).toBe('◆ Jev · HIGH · code · local routing')
+    expect(await bandText($)).toBe('Opus 5.5 · ◆ Jev · HIGH · code · local routing')
     for (const effort of ['low', 'medium', 'high', 'xhigh', 'max', 'low']) await step($, w.steps.length, effort)
-    expect(await bandText($)).toBe('◆ Jev · … → medium → high → xhigh → max → LOW')
+    expect(await bandText($)).toBe('Opus 5.5 · ◆ Jev · … → medium → high → xhigh → max → LOW')
   })
 })

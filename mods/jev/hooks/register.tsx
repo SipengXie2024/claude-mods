@@ -4,6 +4,7 @@ import { stringifyResult, summarizeToolCall } from '../src/describe'
 import { clampEffort, describeBounds, effortTag, isEffort, maxEffort, rank, type Effort } from '../src/effort'
 import { followUpSummary, isHumanPrompt, previousPromptIndex, userText, type Message } from '../src/followup'
 import { JevClient, JevFallback, type JevIo, type JevSource } from '../src/jev'
+import { modelLabel } from '../src/model'
 import { normalizeBounds, type Bounds } from '../src/policy'
 import { EffortRouter, trajectoryLine, type FollowUpAsk } from '../src/router'
 import type { EffortDecision, TaskProfile, ToolCallSummary } from '../src/types'
@@ -16,9 +17,10 @@ import type { EffortDecision, TaskProfile, ToolCallSummary } from '../src/types'
  * request's effort: the task decision at step 0, routeStep on the batch since
  * the last step after that. Claude Code itself states each change as a
  * per-message effort, which keeps the prompt cache. Any failure leaves the
- * request as the engine made it. The band above the prompt draws the effort
- * trail of the loop whose transcript is in view: the main conversation, or
- * the subagent opened from the tasks list.
+ * request as the engine made it. The band above the prompt names the model
+ * of the loop whose transcript is in view (the main conversation, or the
+ * subagent opened from the tasks list) and, once Jev has decided a step
+ * there, that loop's effort trail.
  */
 
 type $ = EngineInterface
@@ -79,9 +81,12 @@ interface SessionRecord {
 
 /** What the band draws for one loop; a subagent's stays after its loop ends, marked done. */
 interface BandStatus {
+  /** the model of the loop's latest request, or the main loop's after /model */
+  model: string
+  /** empty until Jev decides a step on this model */
   trail: Effort[]
   phase: string | null
-  source: EffortDecision['source']
+  source: EffortDecision['source'] | null
   done: boolean
 }
 
@@ -254,21 +259,42 @@ function pushTrail(loop: Loop, effort: Effort): void {
   if (loop.trail.at(-1) !== effort) loop.trail.push(effort)
 }
 
-/** The band's state for this loop after a decision: the prompt's trail, the step phase or task kind, and where the decision came from. */
-function noteBand($: $, key: string, loop: Loop, d: EffortDecision): void {
-  band.set(key, { trail: [...loop.trail], phase: d.signals?.phase ?? d.profile?.taskType ?? null, source: d.source, done: false })
-  for (const [k, s] of band) {
+function setBand($: $, key: string, s: BandStatus): void {
+  band.set(key, s)
+  for (const [k, old] of band) {
     if (band.size <= BAND_AGENTS) break
-    if (s.done) band.delete(k)
+    if (old.done) band.delete(k)
   }
   $.ui.invalidate('ui.render')
 }
 
-/** `◆ Jev · low → HIGH · diagnosing`: the trail's last six levels, the current one upper-case; `· done` once a subagent has ended. */
+/** The model a loop's request (or /model) names; a trail decided on another model is dropped with it. */
+function noteModel($: $, key: string, model: string): void {
+  const s = band.get(key)
+  if (s?.model === model) return
+  setBand($, key, { model, trail: [], phase: null, source: null, done: s?.done ?? false })
+}
+
+/** The band's state for this loop after a decision: the prompt's trail, the step phase or task kind, and where the decision came from. */
+function noteBand($: $, key: string, model: string, loop: Loop, d: EffortDecision): void {
+  setBand($, key, { model, trail: [...loop.trail], phase: d.signals?.phase ?? d.profile?.taskType ?? null, source: d.source, done: false })
+}
+
+/**
+ * `Opus 5.5 · ◆ Jev · low → HIGH · diagnosing`: the model, then the trail's
+ * last six levels, the current one upper-case; the model alone where Jev has
+ * decided nothing; `· done` once a subagent has ended.
+ */
 function bandLine(s: BandStatus): string {
-  const shown = s.trail.length > 6 ? ['…', ...s.trail.slice(-5)] : s.trail
-  const trail = shown.map((e, i) => (i === shown.length - 1 ? e.toUpperCase() : e)).join(' → ')
-  return `◆ Jev · ${trail}${s.phase ? ` · ${s.phase.replaceAll('_', ' ')}` : ''}${s.source === 'heuristic' ? ' · local routing' : ''}${s.done ? ' · done' : ''}`
+  const parts = [modelLabel(s.model)]
+  if (s.trail.length > 0) {
+    const shown = s.trail.length > 6 ? ['…', ...s.trail.slice(-5)] : s.trail
+    parts.push(`◆ Jev · ${shown.map((e, i) => (i === shown.length - 1 ? e.toUpperCase() : e)).join(' → ')}`)
+    if (s.phase) parts.push(s.phase.replaceAll('_', ' '))
+    if (s.source === 'heuristic') parts.push('local routing')
+  }
+  if (s.done) parts.push('done')
+  return parts.join(' · ')
 }
 
 /** Whether turn.step would act on requests to this model; a prompt for any other model is left alone. */
@@ -407,7 +433,7 @@ async function decideStep($: $, e: { index: number; model: string; effort?: unkn
   const effort = decision.effort
   loop.effort = effort
   pushTrail(loop, effort)
-  noteBand($, key, loop, decision)
+  noteBand($, key, e.model, loop, decision)
   const session = await $.session.id()
   if (key === MAIN) {
     // The session record is the previous prompt's outcome for the next one:
@@ -470,6 +496,7 @@ export const register: Register = (on) => {
   }).catch(($, e, next) => next(e))
 
   on('turn.step', async function* ($, e, next) {
+    noteModel($, e.agentId ?? MAIN, e.model)
     let effort: Effort | undefined
     try {
       effort = await decideStep($, e)
@@ -484,10 +511,21 @@ export const register: Register = (on) => {
     return result
   })
 
-  // The band above the prompt: the trail of the loop whose transcript is in
-  // view. Nothing before that loop's first decision, and nothing over a survey.
-  on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => {
-    const s = e.props.hasSurvey ? undefined : band.get(e.props.view.agentId ?? MAIN)
+  // /model, or the engine's own fallback, changed the main loop's model: the
+  // main line names the new one before its next request.
+  on('classic.PostModelSwitch', ($, e, next) => {
+    noteModel($, MAIN, e.to_model)
+    return next(e)
+  })
+
+  // The band above the prompt: the model and trail of the loop whose
+  // transcript is in view; the main loop's model is the session's until its
+  // first request. Nothing for a subagent before its first request, and
+  // nothing over a survey.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.props.hasSurvey) return next(e)
+    const key = e.props.view.agentId ?? MAIN
+    const s = band.get(key) ?? (key === MAIN ? { model: await $.session.model(), trail: [], phase: null, source: null, done: false } : undefined)
     if (!s) return next(e)
     const { Text } = $.ui.resolve(e)
     return <Text color="warning">{bandLine(s)}</Text>
