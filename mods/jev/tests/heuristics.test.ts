@@ -1,7 +1,6 @@
 import assert, { test } from './assert';
-import { heuristicStepSignals, heuristicTaskProfile } from '../src/heuristics';
+import { heuristicTaskProfile } from '../src/heuristics';
 import { isDeep, setDeepThresholds, taskEffort } from '../src/policy';
-import type { StepContext, ToolCallSummary } from '../src/types';
 
 test('task heuristics classify common requests', () => {
   assert.equal(heuristicTaskProfile('thanks!').taskType, 'chat');
@@ -88,50 +87,6 @@ test('Chinese deep words set deep 0.55, plain requests 0.3', () => {
   assert.equal(heuristicTaskProfile('为什么要和 Octopus 比？？').deep, 0.55);
   assert.equal(heuristicTaskProfile('帮我设计一个多租户系统的架构方案').deep, 0.55);
   assert.equal(heuristicTaskProfile('这两个方案对比一下，哪个更合理').deep, 0.55);
-});
-
-const ctx = (lastBatch: ToolCallSummary[], consecutiveFailures = 0): StepContext => ({
-  prompt: 'fix the bug',
-  profile: heuristicTaskProfile('fix the bug'),
-  turn: 1,
-  current: 'medium',
-  consecutiveFailures,
-  assistantNote: '',
-  lastBatch,
-  trajectory: [],
-});
-const call = (tool: string, summary: string, failed = false): ToolCallSummary => ({ tool, summary, failed, result: '' });
-
-test('step heuristics derive the phase from the tool batch', () => {
-  assert.equal(heuristicStepSignals(ctx([call('Read', 'a.ts'), call('Grep', '"x"')])).phase, 'exploring');
-  assert.equal(heuristicStepSignals(ctx([call('Edit', 'a.ts')])).phase, 'implementing');
-  assert.equal(heuristicStepSignals(ctx([call('Bash', 'npm test')])).phase, 'verifying');
-  assert.equal(heuristicStepSignals(ctx([call('Bash', 'npm test', true)], 1)).phase, 'diagnosing');
-});
-
-test('step heuristics flag stuck after repeated failures', () => {
-  assert.ok(heuristicStepSignals(ctx([call('Bash', 'npm test', true)], 3)).stuck >= 0.7);
-});
-
-test('step heuristics mark ambiguous batches as low confidence', () => {
-  assert.ok(heuristicStepSignals(ctx([])).phaseConfidence < 0.5, 'empty batch: no evidence the work is finishing');
-  const mixed = heuristicStepSignals(ctx([call('Edit', 'a.ts'), call('Bash', 'npm test')]));
-  assert.ok(mixed.phaseConfidence < 0.5, 'write + verify in one batch is ambiguous');
-});
-
-test('step heuristics: an implementing step is harder when the task needs deep reasoning', () => {
-  const editing = (deep: number) => heuristicStepSignals({ ...ctx([call('Edit', 'a.ts')]), profile: { ...heuristicTaskProfile('fix the bug'), deep } });
-  assert.equal(editing(0.6).stepDifficulty, 2.5);
-  assert.equal(editing(0.5).stepDifficulty, 2.5);
-  assert.equal(editing(0.3).stepDifficulty, 1.5);
-});
-
-test('step heuristics ignore environment-only failures when asked', () => {
-  const down = ctx([call('Bash', 'npm install', true)], 4);
-  assert.equal(heuristicStepSignals(down).phase, 'diagnosing');
-  const env = heuristicStepSignals(down, { ignoreFailures: true });
-  assert.notEqual(env.phase, 'diagnosing');
-  assert.ok(env.stuck < 0.7, 'environment blockers are not being stuck');
 });
 
 test('heuristics: greetings are chat, editing a passage is write, 调研 counts as deep', () => {

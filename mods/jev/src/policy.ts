@@ -1,20 +1,20 @@
-import { clampEffort, fromRank, maxEffort, minEffort, rank, type Effort } from './effort';
+import { clampEffort, fromRank, maxEffort, minEffort, rank, shift, type Effort } from './effort';
 import type { TaskType } from './questions';
-import type { FollowUpRecord, StepSignals, TaskProfile } from './types';
+import type { FollowUpRecord, TaskProfile } from './types';
 
 /**
  * Pure mapping from evidence and Jev signals to an effort level, for Opus and
- * Mythos alike.
+ * Mythos alike (policy.v10, 2026-10-26).
  *
  * Task starts follow Anthropic's five-level effort guidance as the user
- * applies it (policy.v9, 2026-10-21): `low` for simple edits and operations,
- * `medium` for everyday questions and documents, `high` (the Claude Code
- * default) for coding and research, `xhigh` for work that needs something
- * worked out on top of that, and `max` only after xhigh has failed twice on
- * the same issue, since max costs far more and does not always beat xhigh.
+ * applies it: `low` for simple edits and operations, `medium` for everyday
+ * questions and documents, `high` (the Claude Code default) for coding and
+ * research, `xhigh` for work that needs something worked out on top of that.
  * Every task starts at or above its kind's floor; bounds apply after that.
- * Steps never run below the task's own level: phase only explains, it never
- * lowers.
+ * The start is decided once per prompt. After it only the ladder moves the
+ * level, and only up: a check that fails again after the model changed code
+ * raises one level (mid-loop on Mythos, carried into the next prompt on
+ * Opus, whose effort change would not act before the next user turn).
  */
 
 export interface Bounds {
@@ -23,16 +23,15 @@ export interface Bounds {
 }
 
 /** Version of this policy, recorded on every decision for provenance. */
-export const POLICY_VERSION = 'policy.v9';
+export const POLICY_VERSION = 'policy.v10';
 
 /**
  * Rules an A/B run can switch off to measure them:
- * r1 = deep raises a task one level (at least high), r4 = step difficulty lifts effort,
- * stuck = the stuck jump, dissat = the follow-up fault signal runs in shadow
- * (asked and recorded, never acted on). Set once at startup from
+ * r1 = deep raises a task one level (at least high), dissat = the follow-up
+ * fault signal runs in shadow (asked and recorded, never acted on). Set once at startup from
  * JEV_OPUS_ABLATE; every decision records them via policyVersion().
  */
-export const ABLATABLE = ['r1', 'r4', 'stuck', 'dissat'] as const;
+export const ABLATABLE = ['r1', 'dissat'] as const;
 export type Ablation = (typeof ABLATABLE)[number];
 let ablated = new Set<Ablation>();
 
@@ -44,7 +43,7 @@ export function getAblations(): Ablation[] {
   return ABLATABLE.filter((x) => ablated.has(x));
 }
 
-/** POLICY_VERSION plus any switched-off rules, e.g. "policy.v6-ablate:r1,stuck". */
+/** POLICY_VERSION plus any switched-off rules, e.g. "policy.v10-ablate:r1,dissat". */
 export function policyVersion(): string {
   const off = getAblations();
   return off.length ? `${POLICY_VERSION}-ablate:${off.join(',')}` : POLICY_VERSION;
@@ -55,7 +54,7 @@ export function normalizeBounds(b: Bounds): Bounds {
   return rank(b.min) <= rank(b.max) ? b : { min: b.max, max: b.min };
 }
 
-const MEDIUM = 1, HIGH = 2, XHIGH = 3, MAX = 4;
+const XHIGH = 3, MAX = 4;
 
 export interface TypePrefs {
   floor: Effort;
@@ -128,7 +127,7 @@ export function typePrefs(p: TaskProfile): TypePrefs {
     // high: a bug traced across files or an architecture rewrite is xhigh
     // work, a document that needs a design decision is high. An untrusted
     // kind only reaches high: xhigh needs to know what the work is. Max is
-    // never a task start; it comes from step escalation alone.
+    // never a task start; it comes from the ladder alone.
     const trusted = typeTrusted(p);
     const base = trusted ? maxEffort(fromRank(rank(prefs.base) + 1), 'high') : maxEffort(prefs.base, 'high');
     prefs = { ...prefs, base: minEffort(base, 'xhigh') };
@@ -153,136 +152,36 @@ export function taskEffort(p: TaskProfile, bounds: Bounds): { effort: Effort; re
   return { effort, reasons };
 }
 
-/** What the reducer observed, distilled for the policy. */
-export interface StepEvidence {
-  /** unresolved issues that are not environment blockers */
-  unresolved: number;
-  /** a non-environment issue failed again this batch (stalled recovery) */
-  repeated: boolean;
-  /** effort levels already tried on the non-environment issues that failed this batch */
-  triedOnFailure: readonly Effort[];
-  /** most batches any non-environment issue failing this batch has failed at xhigh */
-  xhighAttempts: number;
-  /** attempts so far on the most-retried unresolved issue */
-  maxAttempts: number;
-  /** every failure this batch was an environment blocker */
-  environmentOnly: boolean;
-  /** positive evidence that the next step is routine */
-  routineOk: boolean;
-  /** most edits of one file in this prompt so far (absent = not tracked) */
-  fileEdits?: number;
-}
+/** Mid-loop raises allowed per prompt on Mythos (decision 2). */
+export const MAX_RAISES = 2;
 
 /**
- * Edits of the same file within one prompt that count as stuck evidence
- * (borrowed from jev-pilot): rewriting one file again and again while an
- * issue stays open is going in circles, whatever the evaluator says.
+ * One rung up the ladder: the level above `current`, inside the bounds, or
+ * null at the top. A raise moves one level at a time, so max is reached only
+ * from xhigh.
  */
-export const CHURN_EDITS = 4;
-
-export function stepTarget(
-  base: Effort,
-  s: StepSignals,
-  ev: StepEvidence,
-  current: Effort,
-): { effort: Effort; reasons: string[]; heldByIssues?: boolean } {
-  const reasons: string[] = [];
-  let heldByIssues = false;
-  const b = rank(base);
-  const c = rank(current);
-  let r = b;
-
-  const trustPhase = s.source === 'heuristic' || s.phaseConfidence >= 0.3;
-  if (trustPhase) {
-    // Phases never move effort: reading to understand a problem or writing the
-    // final synthesis needs the task's level, and a failed check already
-    // raises effort below.
-    reasons.push(`${s.phase} → task level`);
-  } else {
-    reasons.push(`phase unclear (${s.phaseConfidence.toFixed(2)}) → task level`);
-  }
-
-  if (ablated.has('r4')) { /* step difficulty ignored */ }
-  else if (s.stepDifficulty >= 3.25 && r < HIGH) { r = HIGH; reasons.push(`hard step ${s.stepDifficulty.toFixed(1)} → high`); }
-  else if (s.stepDifficulty >= 2.4 && r < MEDIUM) { r = MEDIUM; reasons.push(`step ${s.stepDifficulty.toFixed(1)} → medium`); }
-
-  // Failures escalate relative to the effort already tried on them, never the
-  // initial estimate: a repeated unresolved failure goes one level above the
-  // highest effort that has already failed on that issue.
-  if (ev.triedOnFailure.length) {
-    const tried = Math.max(c, ...ev.triedOnFailure.map(rank));
-    const floor = tried + 1;
-    if (r < floor) {
-      r = floor;
-      reasons.push(ev.repeated
-        ? `same failure already lost at ${fromRank(tried)} → ${fromRank(floor)}`
-        : `failed step → ${fromRank(floor)}`);
-    }
-  }
-
-  const churn = (ev.fileEdits ?? 0) >= CHURN_EDITS;
-  const stuck = s.stuck >= 0.7 || ev.maxAttempts >= 3 || churn;
-  if (stuck && ev.unresolved > 0 && !ablated.has('stuck')) {
-    // Raising works best as a large jump: go at least two levels up, at least high.
-    r = Math.max(r, b + 2, HIGH);
-    reasons.push(`stuck (${s.stuck.toFixed(2)}, ${ev.maxAttempts} attempts${churn ? `, one file edited ${ev.fileEdits}×` : ''}) → escalate`);
-  }
-
-  // Environment blockers hold the current effort; they never drive escalation.
-  if (ev.environmentOnly) {
-    if (r !== c) reasons.push('environment blocker → hold');
-    r = c;
-  }
-
-  // De-escalation needs positive evidence: no unresolved reasoning issues and
-  // a routine next step. A successful read or a finishing phase alone never
-  // lowers effort while an issue remains open.
-  if (r < c) {
-    if (ev.unresolved > 0) {
-      r = c;
-      heldByIssues = true;
-      reasons.push(`${ev.unresolved} unresolved issue(s) → hold ${current}`);
-    } else if (s.phase === 'diagnosing' || !ev.routineOk) {
-      r = c;
-      reasons.push('no routine evidence → hold');
-    }
-  }
-
-  // Never below the task's own level.
-  r = Math.max(r, b);
-
-  // Escalation stops at xhigh unless xhigh has lost twice on the same issue
-  // (or the agent is badly stuck). Anthropic's Opus 5.5 guidance treats two
-  // xhigh failures as the point where xhigh is exhausted. A task already
-  // running at max keeps it.
-  let cap = XHIGH;
-  if (ev.xhighAttempts >= 2 || (ev.unresolved > 0 && s.stuck >= 0.9 && !ablated.has('stuck')) || b === MAX || c === MAX) cap = MAX;
-  cap = Math.max(cap, b);
-  // Say why an escalation reason above stops short, so the trail matches the effort.
-  if (r > cap) reasons.push('max only after xhigh fails twice → xhigh');
-  r = Math.min(r, cap);
-
-  return { effort: fromRank(r), reasons, ...(heldByIssues ? { heldByIssues } : {}) };
+export function ladderRaise(current: Effort, bounds: Bounds): Effort | null {
+  const nb = normalizeBounds(bounds);
+  const to = clampEffort(shift(current, 1), nb.min, nb.max);
+  return rank(to) > rank(current) ? to : null;
 }
 
+/** Start levels exploration may move to. */
+export const EXPLORE_RANGE: Bounds = { min: 'medium', max: 'max' };
+
 /**
- * Anti-flapping: raises apply at once; after a raise the level is held for
- * one more step; decreases step down one level at a time (except when the
- * work is finishing, which drops straight to the target).
+ * Exploration of the start level: with probability `p` (`roll` < p) move
+ * one level up or down (`coin` < 0.5 is down), equal odds. A move that would
+ * leave medium..max or the bounds is no exploration: the start stays.
+ * `roll` and `coin` are uniform draws in [0, 1).
  */
-export function applyHysteresis(
-  current: Effort,
-  target: Effort,
-  hold: number,
-  finishing: boolean,
-): { effort: Effort; hold: number; note?: string } {
-  const c = rank(current), t = rank(target);
-  if (t > c) return { effort: target, hold: 1 };
-  if (t === c) return { effort: current, hold: Math.max(0, hold - 1) };
-  if (hold > 0 && !finishing) return { effort: current, hold: hold - 1, note: `holding ${current} after escalation` };
-  if (finishing) return { effort: target, hold: 0 };
-  const next = fromRank(c - 1);
-  return { effort: next, hold: 0, note: next !== target ? `stepping down toward ${target}` : undefined };
+export function exploreStart(from: Effort, bounds: Bounds, p: number, roll: number, coin: number): Effort | null {
+  if (!(roll < p)) return null;
+  const to = shift(from, coin < 0.5 ? -1 : 1);
+  const nb = normalizeBounds(bounds);
+  const lo = Math.max(rank(EXPLORE_RANGE.min), rank(nb.min));
+  const hi = Math.min(rank(EXPLORE_RANGE.max), rank(nb.max));
+  return to !== from && rank(to) >= lo && rank(to) <= hi ? to : null;
 }
 
 /**

@@ -1,34 +1,12 @@
 import assert, { test } from './assert';
-import { describeToolInput, testRunner } from '../src/describe';
-import { dateDebugCommands } from './fixtures';
-import { rank, type Effort } from '../src/effort';
 import type { JevLike, JevQuestion } from '../src/jev';
-import { FOLLOWUP_QUESTIONS, FOLLOWUP_SET_VERSION, STEP_QUESTIONS, STEP_SET_VERSION, TASK_QUESTIONS, TASK_SET_VERSION } from '../src/questions';
-import { clipEnds, EffortRouter, followUpState, stepState, taskState, trajectoryLine, TRAJECTORY_LINE_MAX, type FollowUpAsk, type RouterSnapshot } from '../src/router';
-import {
-  commandKey, emptyCore, fingerprint, isEnvironmentFailure, isExploratoryFailure, reasoningIssues, reduceBatch,
-} from '../src/state';
-import type { EffortDecision, JevResponse, StepContext, TaskProfile, ToolCallSummary } from '../src/types';
-import { DISSAT_DEFAULT, POLICY_VERSION, setDissatThreshold } from '../src/policy';
-
-/* ---------- fixtures ---------- */
-
-const bash = (summary: string, failed = false, result = ''): ToolCallSummary => ({ tool: 'Bash', summary, failed, result });
-const fail = (summary: string, result: string): ToolCallSummary => bash(summary, true, result);
-const read = (path = 'src/a.ts'): ToolCallSummary => ({ tool: 'Read', summary: path, failed: false, result: 'file contents' });
-const edit = (path = 'src/a.ts'): ToolCallSummary => ({ tool: 'Edit', summary: path, failed: false, result: 'applied' });
-
-const PROFILE: TaskProfile = { taskType: 'code', typeConfidence: 0.5, deep: 0.2, source: 'heuristic' };
-
-/** A step context as the adapters build it: `current` is the effort in force during the batch. */
-const step = (lastBatch: ToolCallSummary[], current: Effort, over: Partial<StepContext> = {}): StepContext => ({
-  prompt: 'implement the feature', profile: PROFILE, turn: 1, current,
-  consecutiveFailures: lastBatch.some((c) => c.failed) ? 1 : 0,
-  assistantNote: '', lastBatch, trajectory: [], ...over,
-});
+import { FOLLOWUP_QUESTIONS, FOLLOWUP_SET_VERSION, TASK_QUESTIONS, TASK_SET_VERSION } from '../src/questions';
+import { clipEnds, EffortRouter, FALLBACK_IGNORED, followUpState, taskState, type FollowUpAsk } from '../src/router';
+import type { JevResponse } from '../src/types';
+import { DISSAT_DEFAULT, POLICY_VERSION, setDeepThresholds, setDissatThreshold, DEEP_DEFAULTS } from '../src/policy';
 
 type Answer = Record<string, unknown>;
-type AskResponse = { answers?: Record<string, unknown>; signals?: Record<string, 'valid' | 'missing' | 'invalid'>; circuitOpen?: boolean };
+type AskResponse = { answers?: Record<string, unknown>; signals?: Record<string, 'valid' | 'missing' | 'invalid'>; circuitOpen?: boolean; fallbackFrom?: string };
 
 /** Scriptable Jev stub speaking the validating-client contract (absent answers + signals map). */
 function stubJev(handler: (state: string, questions: Record<string, JevQuestion>) => AskResponse | 'fail' | null) {
@@ -48,6 +26,7 @@ function stubJev(handler: (state: string, questions: Record<string, JevQuestion>
       };
       if (r.signals) res.signals = r.signals;
       if (r.circuitOpen) res.circuitOpen = true;
+      if (r.fallbackFrom) res.fallbackFrom = r.fallbackFrom;
       return res;
     },
   };
@@ -55,276 +34,28 @@ function stubJev(handler: (state: string, questions: Record<string, JevQuestion>
 }
 
 const choice = (value: string, confidence = 0.9): Answer => ({ kind: 'choice', choice: value, confidence, probabilities: {} });
-const score = (n: number, confidence = 0.9): Answer => ({ kind: 'score', score: n, confidence, probabilities: {} });
 const noul = (p: number): Answer => ({ kind: 'noul', p });
 const allValid = (names: string[]) => Object.fromEntries(names.map((n) => [n, 'valid' as const]));
 
-const issues = (r: EffortRouter) => {
-  const s = r.snapshot().state as { issues: Array<{ environment: boolean; attempts: number; tried: Effort[] }> };
-  return s.issues;
-};
-
 const lowTask = (jev: JevLike | null = null) => new EffortRouter({ jev, bounds: { min: 'low', max: 'max' } });
 
-// The mod always sends the full state (jev-opus JEV_OPUS_EVALUATOR_CONTENT=full).
-test('the evaluator gets the full request and tool-call state', () => {
+// The mod always sends the full request (jev-opus JEV_OPUS_EVALUATOR_CONTENT=full).
+test('the evaluator gets the full request', () => {
   assert.match(taskState('Fix PRIVATE_EXAMPLE_TOKEN'), /PRIVATE_EXAMPLE_TOKEN/);
-  assert.match(stepState(step([fail('npm test', 'PRIVATE_EXAMPLE_TOKEN')], 'medium')), /PRIVATE_EXAMPLE_TOKEN/);
 });
 
-/* ---------- reducer ---------- */
-
-test('reducer: failure fingerprints ignore numbers, paths, and timestamps', () => {
-  const a = fingerprint(fail('npm test', 'FAIL src/foo/bar.test.ts:12:4 expected 3, got 4 at 12:03:44'));
-  const b = fingerprint(fail('npm test', 'FAIL other/dir/x.test.ts:99:1 expected 8, got 9 at 23:59:01'));
-  assert.equal(a, b);
-  assert.notEqual(fingerprint(fail('npm test', 'a different error')), a);
+test('decisions carry policy and question-set versions', async () => {
+  const t = await lowTask().routeTask('hi', null);
+  assert.equal(t.policyVersion, POLICY_VERSION);
+  assert.equal(POLICY_VERSION, 'policy.v10');
+  assert.deepEqual(t.questionVersions, { task: TASK_SET_VERSION, followup: FOLLOWUP_SET_VERSION });
 });
-
-test('reducer: a successful unrelated call does not clear an issue; the same command passing does', () => {
-  let s = emptyCore();
-  const t = (batch: ToolCallSummary[]) => { const r = reduceBatch(s, batch, 'medium'); s = r.state; return r.outcome; };
-  t([fail('npm test', 'AssertionError: expected true')]);
-  assert.equal(s.issues.length, 1);
-  t([read(), edit(), bash('npm run lint')]);
-  assert.equal(s.issues.length, 1, 'unrelated successes keep the issue open');
-  const out = t([bash('npm test')]);
-  assert.equal(s.issues.length, 0, 'the same command passing clears it');
-  assert.equal(out.progress, 'resolved');
-});
-
-test('reducer: same command failing with a different error is a new issue', () => {
-  let s = emptyCore();
-  const t = (batch: ToolCallSummary[]) => { s = reduceBatch(s, batch, 'medium').state; };
-  t([fail('npm test', 'AssertionError A')]);
-  t([fail('npm test', 'TypeError B')]);
-  assert.equal(s.issues.length, 2);
-  t([bash('npm test')]);
-  assert.equal(s.issues.length, 0, 'a pass clears every issue for that command');
-});
-
-test('reducer: attempts and tried efforts accumulate per issue', () => {
-  let s = emptyCore();
-  for (const e of ['low', 'medium', 'medium', 'high'] as const) {
-    s = reduceBatch(s, [fail('npm test', 'AssertionError')], e).state;
-  }
-  assert.equal(s.issues.length, 1);
-  assert.equal(s.issues[0]!.attempts, 4);
-  assert.deepEqual(s.issues[0]!.tried, ['low', 'medium', 'high']);
-});
-
-test('reducer: progress classifies the latest batch', () => {
-  let s = emptyCore();
-  const t = (batch: ToolCallSummary[]) => { const r = reduceBatch(s, batch, 'medium'); s = r.state; return r.outcome.progress; };
-  assert.equal(t([fail('npm test', 'boom')]), 'new-failure');
-  assert.equal(t([edit(), fail('npm test', 'boom')]), 'repeat-failure');
-  assert.equal(t([read()]), 'steady');
-  assert.equal(t([bash('npm test')]), 'resolved');
-});
-
-test('reducer: environment blockers are classified separately', () => {
-  for (const result of [
-    'npm ERR! network ECONNREFUSED registry.npmjs.org',
-    'Error: connect ECONNREFUSED 127.0.0.1:443',
-    'getaddrinfo ENOTFOUND api.example.com',
-    'bash: pytest: command not found',
-    'EACCES: permission denied, open /etc/hosts',
-    'npm ERR! 401 Unauthorized - GET https://registry.npmjs.org/x',
-    '503 Service Unavailable',
-  ]) {
-    assert.ok(isEnvironmentFailure(fail('cmd', result)), result);
-  }
-  for (const result of [
-    'AssertionError: expected 3 === 4',
-    'TypeError: cannot read properties of undefined',
-    '1 failing test',
-    'ENOENT: no such file or directory, open ./data.json',
-  ]) {
-    assert.equal(isEnvironmentFailure(fail('cmd', result)), false, result);
-  }
-  let s = emptyCore();
-  s = reduceBatch(s, [fail('npm install', 'ECONNREFUSED')], 'medium').state;
-  assert.equal(s.issues[0]!.environment, true);
-  assert.equal(reasoningIssues(s).length, 0);
-});
-
-/* ---------- selective Jev ---------- */
-
-test('Jev is consulted at task start and skipped for routine local steps', async () => {
-  const jev = stubJev((_s, q) => 'task_type' in q
-    ? { answers: { task_type: choice('code'), deep: noul(0.1) }, signals: allValid(Object.keys(q)) }
-    : { answers: {}, signals: allValid(Object.keys(q)) });
-  const r = new EffortRouter({ jev, bounds: { min: 'low', max: 'max' } });
-  const t = await r.routeTask('rename the setting', null);
-  assert.equal(t.source, 'jev');
-  assert.equal(jev.calls.length, 1);
-
-  const d = await r.routeStep(step([read()], t.effort));
-  assert.equal(d.source, 'local', 'a quiet step decides locally');
-  assert.equal(jev.calls.length, 1, 'no Jev call for a routine step');
-});
-
-test('Jev triggers: new failure, stalled recovery, proposed downgrade, unclear phase', async () => {
-  const jev = stubJev(() => ({ answers: {}, signals: {} }));
-  const r = new EffortRouter({ jev, bounds: { min: 'low', max: 'max' } });
-  await r.routeTask('hi', null); // call 1
-  const base = jev.calls.length;
-
-  await r.routeStep(step([fail('npm test', 'AssertionError')], 'low'));
-  assert.equal(jev.calls.length, base + 1, 'new failure asks Jev');
-
-  const d1 = await r.routeStep(step([edit(), fail('npm test', 'AssertionError')], 'medium'));
-  assert.equal(jev.calls.length, base + 2, 'the same issue failing again asks Jev');
-  void d1;
-
-  // A routine read while the issue is open decides locally — nothing could change.
-  await r.routeStep(step([read()], 'high'));
-  assert.equal(jev.calls.length, base + 2);
-
-  // The failing test now passes: a downgrade is proposed → Jev is consulted.
-  await r.routeStep(step([bash('npm test')], 'high'));
-  assert.equal(jev.calls.length, base + 3, 'a proposed downgrade asks Jev');
-
-  // An empty batch is ambiguous (phase confidence < 0.5) → Jev is consulted.
-  await r.routeStep(step([], 'medium'));
-  assert.equal(jev.calls.length, base + 4, 'unclear phase asks Jev');
-});
-
-/* ---------- escalation relative to attempted effort ---------- */
-
-test('repeated failure escalates above the highest tried effort, up to bounds.max', async () => {
-  const r = lowTask();
-  const task = await r.routeTask('thanks', null);
-  assert.equal(task.effort, 'low');
-
-  const climb = async (router: EffortRouter, profile: TaskProfile) => {
-    let current: Effort = task.effort;
-    const path: Effort[] = [];
-    for (let i = 0; i < 10; i++) {
-      const d = await router.routeStep(step([edit(), fail('npm test', 'AssertionError: wrong value')], current, { turn: i + 1, profile }));
-      path.push(d.effort);
-      current = d.effort;
-    }
-    return path;
-  };
-  const path = await climb(r, PROFILE);
-  assert.deepEqual(path.slice(0, 5), ['medium', 'high', 'xhigh', 'xhigh', 'max'], 'one level above each tried effort; max only after xhigh fails twice');
-  assert.ok(rank(path.at(-1)!) > rank('high'), 'reproduction: low task + 10 failures must pass high when max is allowed');
-  assert.equal(path.at(-1), 'max');
-
-  const r2 = lowTask();
-  await r2.routeTask('thanks', null);
-  // a confident, shallow research call climbs the same way: no kind ceiling
-  const research = await climb(r2, { ...PROFILE, taskType: 'research', typeConfidence: 0.9, deep: 0.1, source: 'jev' });
-  assert.deepEqual(research.slice(0, 5), ['medium', 'high', 'xhigh', 'xhigh', 'max']);
-  assert.equal(research.at(-1), 'max');
-});
-
-test('a successful read between failures does not reset recovery', async () => {
-  const r = lowTask();
-  const t = await r.routeTask('thanks', null);
-  let d = await r.routeStep(step([fail('npm test', 'AssertionError')], t.effort));
-  assert.equal(d.effort, 'medium');
-
-  d = await r.routeStep(step([read()], d.effort));
-  assert.equal(d.effort, 'medium', 'the read keeps the issue open — effort holds');
-
-  d = await r.routeStep(step([edit(), fail('npm test', 'AssertionError')], d.effort));
-  assert.equal(d.effort, 'high', 'same fingerprint + a different fix attempted → one above highest tried');
-  assert.equal(issues(r).length, 1);
-  assert.equal(issues(r)[0]!.attempts, 2);
-});
-
-test('issue holds exclude decisions already held by hysteresis or the effort floor', async () => {
-  for (const bounded of [false, true]) {
-    const r = new EffortRouter({ jev: null, bounds: { min: bounded ? 'medium' : 'low', max: bounded ? 'medium' : 'max' } });
-    const task = await r.routeTask('hi', null);
-    const failed = await r.routeStep(step([fail('npm test', 'AssertionError')], task.effort));
-    assert.equal(failed.effort, 'medium');
-    assert.equal(failed.evidence?.heldByIssues, undefined, 'a failure escalation is not an issue hold');
-
-    const delayed = await r.routeStep(step([read()], failed.effort));
-    assert.equal(delayed.effort, 'medium');
-    assert.equal(delayed.evidence?.open.length, 1);
-    assert.equal(delayed.evidence?.heldByIssues, undefined, 'without the issue, hysteresis or the floor still prevents a step down');
-
-    const held = await r.routeStep(step([read()], delayed.effort));
-    assert.equal(held.effort, 'medium');
-    assert.equal(held.evidence?.heldByIssues, bounded ? undefined : true, 'only an otherwise permitted downgrade counts');
-  }
-});
-
-/* ---------- environment blockers ---------- */
-
-test('environment blockers hold the current effort and never escalate', async () => {
-  const r = lowTask();
-  const t = await r.routeTask('implement the export feature end to end', null);
-  let current: Effort = t.effort;
-  for (let i = 0; i < 6; i++) {
-    const d = await r.routeStep(step([fail('npm install', 'npm ERR! network ECONNREFUSED registry.npmjs.org')], current, { turn: i + 1 }));
-    assert.equal(d.effort, t.effort, 'registry outage repeats without reasoning escalation');
-    current = d.effort;
-  }
-  assert.equal(issues(r).length, 1);
-  assert.equal(issues(r)[0]!.environment, true);
-
-  const held = await r.routeStep(step([fail('curl https://api', 'command not found')], 'high'));
-  assert.equal(held.effort, 'high', 'a new environment blocker holds even at high');
-});
-
-/* ---------- de-escalation needs positive evidence ---------- */
-
-test('successful reads and finishing never lower effort while an issue is open', async () => {
-  const r = lowTask();
-  const t = await r.routeTask('thanks', null);
-  let d = await r.routeStep(step([fail('npm test', 'AssertionError')], t.effort));
-  assert.equal(d.effort, 'medium');
-
-  d = await r.routeStep(step([read(), read('src/b.ts')], d.effort));
-  assert.equal(d.effort, 'medium', 'a clean read cannot lower effort with an open issue');
-
-  d = await r.routeStep(step([], d.effort)); // finishing-looking step
-  assert.equal(d.effort, 'medium', 'finishing does not lower effort while the issue is open');
-
-  d = await r.routeStep(step([bash('npm test')], d.effort));
-  assert.equal(d.effort, 'low', 'once resolved and routine, effort steps down one level');
-  d = await r.routeStep(step([read()], d.effort));
-  assert.equal(d.effort, 'low');
-});
-
-/* ---------- bounds last ---------- */
-
-test('bounds are validated and clamped after hysteresis', async () => {
-  // min > max is a config error: swapped, not thrown.
-  const swapped = new EffortRouter({ jev: null, bounds: { min: 'high', max: 'low' } });
-  assert.deepEqual(swapped.bounds, { min: 'low', max: 'high' });
-
-  // Reproduction for finding #6: current high, bounds low..low, routine read → low.
-  const r = new EffortRouter({ jev: null, bounds: { min: 'low', max: 'max' } });
-  await r.routeTask('hi', null);
-  r.bounds = { min: 'low', max: 'low' }; // tightened mid-flight, as a manual control would
-  const d = await r.routeStep(step([read()], 'high'));
-  assert.equal(d.effort, 'low', 'the final effort respects the ceiling even after hysteresis');
-});
-
-/* ---------- malformed / missing Jev evidence ---------- */
 
 test('a stub Jev returning {} keeps the local estimate', async () => {
-  const empty = stubJev(() => ({ answers: {} }));
-  const r = new EffortRouter({ jev: empty, bounds: { min: 'low', max: 'max' } });
-  const local = lowTask();
-
-  const t = await r.routeTask('Design the architecture for a billing migration', null);
-  const l = await local.routeTask('Design the architecture for a billing migration', null);
-  assert.equal(t.effort, l.effort, 'missing answers must not displace the fallback');
-  assert.equal(t.source, 'heuristic');
-  assert.equal(t.profile!.taskType, l.profile!.taskType);
-  assert.equal(t.profile!.deep, l.profile!.deep);
-
-  const s = await r.routeStep(step([fail('npm test', 'AssertionError')], t.effort));
-  const ls = await local.routeStep(step([fail('npm test', 'AssertionError')], t.effort));
-  assert.equal(s.effort, ls.effort);
-  assert.equal(s.source, 'heuristic');
+  const d = await lowTask(stubJev(() => ({}))).routeTask('fix the crash in parser.ts', null);
+  assert.equal(d.source, 'heuristic');
+  assert.equal(d.jevError, 'jev returned no usable answers');
+  assert.equal(d.effort, 'high');
 });
 
 test('invalid signals keep the local estimate; present answers on old clients count as valid', async () => {
@@ -333,264 +64,46 @@ test('invalid signals keep the local estimate; present answers on old clients co
     answers: { deep: noul(0.9) },
     signals: { task_type: 'missing', deep: 'invalid' },
   }));
-  const r = new EffortRouter({ jev: invalid, bounds: { min: 'low', max: 'max' } });
-  const t = await r.routeTask('thanks', null);
+  const t = await lowTask(invalid).routeTask('thanks', null);
   assert.equal(t.effort, 'low', 'invalid deep must not escalate the task');
   assert.equal(t.source, 'heuristic', 'nothing usable was merged');
 
   // Old client (no signals map): a present answer is applied.
   const legacy = stubJev(() => ({ answers: { task_type: choice('research'), deep: noul(0.9) } }));
-  const r2 = new EffortRouter({ jev: legacy, bounds: { min: 'low', max: 'max' } });
-  const t2 = await r2.routeTask('thanks', null);
+  const t2 = await lowTask(legacy).routeTask('thanks', null);
   assert.equal(t2.effort, 'xhigh', 'a present answer on an old client counts as valid (deep research)');
   assert.equal(t2.source, 'jev');
 });
 
-test('missing Jev evidence cannot itself cause a downgrade', async () => {
-  const jev = stubJev((_s, q) => 'task_type' in q
-    ? { answers: { task_type: choice('research'), deep: noul(0.2) }, signals: allValid(Object.keys(q)) }
-    : { answers: {}, signals: Object.fromEntries(Object.keys(q).map((n) => [n, 'missing' as const])) });
-  const r = new EffortRouter({ jev, bounds: { min: 'low', max: 'max' } });
-  const t = await r.routeTask('implement the feature', null);
-  assert.ok(rank(t.effort) >= rank('high'));
-
-  // After an escalation above the task level, a clean read proposes stepping
-  // back down → Jev consulted → all answers missing → local estimate holds.
-  const d = await r.routeStep(step([read()], 'xhigh'));
-  assert.equal(d.source, 'heuristic');
-  assert.ok(d.jevError);
-  assert.equal(d.effort, t.effort, 'the local proposal stands; Jev evidence added nothing');
-});
-
 test('circuitOpen is treated as Jev unavailable', async () => {
-  const jev = stubJev(() => ({ answers: {}, circuitOpen: true }));
-  const r = new EffortRouter({ jev, bounds: { min: 'low', max: 'max' } });
-  const t = await r.routeTask('fix the bug', null);
-  assert.equal(t.source, 'heuristic');
-  assert.match(t.jevError ?? '', /circuit/);
+  const d = await lowTask(stubJev(() => ({ circuitOpen: true }))).routeTask('fix the crash in parser.ts', null);
+  assert.equal(d.source, 'heuristic');
+  assert.equal(d.jevError, 'jev circuit open');
 });
 
-test('Jev can veto a proposed downgrade', async () => {
-  const jev = stubJev((_s, q) => 'task_type' in q
-    ? { answers: { task_type: choice('code'), deep: noul(0.2) }, signals: allValid(Object.keys(q)) }
-    : { answers: { phase: choice('diagnosing', 0.9), step_difficulty: score(3.5), stuck: noul(0.4) }, signals: allValid(Object.keys(q)) });
-  const r = new EffortRouter({ jev, bounds: { min: 'low', max: 'max' } });
-  const t = await r.routeTask('implement the feature', null);
-  const d = await r.routeStep(step([read()], 'xhigh', { profile: t.profile }));
-  assert.equal(d.source, 'jev');
-  assert.ok(rank(d.effort) >= rank('high'), 'a confident diagnosing answer blocks the downgrade');
-});
-
-/* ---------- snapshot / restore ---------- */
-
-test('snapshot/restore round-trips reducer state, tolerates older and garbage input', async () => {
-  const r = lowTask();
-  await r.routeTask('hi', null);
-  await r.routeStep(step([fail('npm test', 'AssertionError')], 'low'));
-  const snap = JSON.parse(JSON.stringify(r.snapshot())) as RouterSnapshot;
-  assert.equal(snap.v, 2);
-
-  const r2 = lowTask();
-  await r2.routeTask('hi', null);
-  r2.restore(snap);
-  // The restored router still sees the open issue: a clean read cannot de-escalate.
-  const held = await r2.routeStep(step([read()], 'medium'));
-  assert.equal(held.effort, 'medium');
-  assert.equal(issues(r2).length, 1);
-
-  // v1 snapshots restore hold/base and start with no tracked issues.
-  const r3 = lowTask();
-  r3.restore({ v: 1, hold: 1, base: 'high' });
-  const d = await r3.routeStep(step([read()], 'medium'));
-  assert.equal(issues(r3).length, 0);
-  assert.equal(d.effort, 'high', 'the restored base is the step floor');
-
-  // Garbage is tolerated, never fatal.
-  for (const junk of [null, undefined, 42, 'x', [], { v: 'x' }, { v: 99, hold: 'NaN' }] as const) {
-    r3.restore(junk as unknown as RouterSnapshot);
-  }
-  const after = await r3.routeStep(step([read()], 'medium'));
-  assert.equal(after.kind, 'step');
-});
-
-test('restore returns the controller to the snapshotted ancestor state', async () => {
-  const r = lowTask();
-  await r.routeTask('thanks', null);
-  const clean = r.snapshot();
-  await r.routeStep(step([fail('npm test', 'AssertionError')], 'low'));
-  await r.routeStep(step([fail('npm test', 'AssertionError')], 'medium'));
-  assert.equal(issues(r).length, 1);
-  r.restore(clean);
-  assert.equal(issues(r).length, 0, 'rewind drops the abandoned branch’s issues');
-  const d = await r.routeStep(step([read()], 'medium'));
-  assert.equal(d.effort, 'low', 'with the issue gone, a routine step can de-escalate');
-});
-
-/* ---------- provenance ---------- */
-
-test('decisions carry policy and question-set versions', async () => {
-  const r = lowTask();
-  const t = await r.routeTask('hi', null);
-  const s = await r.routeStep(step([read()], t.effort));
-  for (const d of [t, s]) {
-    assert.equal(d.policyVersion, POLICY_VERSION);
-    assert.deepEqual(d.questionVersions, { task: TASK_SET_VERSION, step: STEP_SET_VERSION, followup: FOLLOWUP_SET_VERSION });
+test('decision 6: a fallback answer sets the task kind only; its deep never raises the start', async () => {
+  setDeepThresholds({ yes: 0.72, no: 0.38 });
+  try {
+    const answer = (fallbackFrom?: string) => stubJev((_s, q) => ({
+      answers: { task_type: choice('code'), deep: noul(0.95) }, signals: allValid(Object.keys(q)), ...(fallbackFrom ? { fallbackFrom } : {}),
+    }));
+    const primary = await lowTask(answer()).routeTask('rewrite the scheduler', null);
+    assert.equal(primary.effort, 'xhigh', 'the primary\'s deep raises code to xhigh');
+    const fallback = await lowTask(answer('deadline exceeded')).routeTask('rewrite the scheduler', null);
+    assert.equal(fallback.effort, 'high', 'the fallback\'s deep is ignored');
+    assert.equal(fallback.profile?.taskType, 'code');
+    assert.equal(fallback.source, 'jev');
+    assert.ok(fallback.reasons.includes('fallback answer: task kind only'), fallback.reasons.join('; '));
+    assert.ok(fallback.profile!.deep < 0.72);
+  } finally {
+    setDeepThresholds({ ...DEEP_DEFAULTS });
   }
 });
-
-test('commandKey ignores output plumbing so a piped rerun clears the same issue', async () => {
-  const k = (summary: string) => commandKey({ tool: 'Bash', summary, failed: false, result: '' });
-  assert.equal(k('npm test 2>&1 | tail -30'), k('npm test'));
-  assert.notEqual(k('cd app && npm test | grep -E "pass|fail"'), k('npm test'));
-  assert.equal(k('npm test > /dev/null 2>&1'), k('npm test'));
-  assert.notEqual(k('npm run lint'), k('npm test'));
-});
-
-test('router snapshots hold hashes only: no command text or tool output', async () => {
-  const r = new EffortRouter({ jev: null, bounds: { min: 'low', max: 'high' } });
-  const task = await r.routeTask('fix the date tests', null);
-  await r.routeStep({
-    prompt: 'fix the date tests', profile: task.profile!, turn: 1, current: task.effort, consecutiveFailures: 1,
-    assistantNote: '', trajectory: [],
-    lastBatch: [{ tool: 'Bash', summary: 'curl -H "Authorization: Bearer SECRET123" https://x && npm test', failed: true, result: 'FAIL secret-file-contents Exit code 1' }],
-  });
-  const snap = JSON.stringify(r.snapshot());
-  assert.ok(snap.includes('"issues":[{'), 'the issue is tracked');
-  for (const leak of ['SECRET123', 'curl', 'npm test', 'secret-file-contents', 'Bash:']) assert.ok(!snap.includes(leak), `snapshot leaks ${leak}`);
-});
-
-test('once the failing check passes, the escalation is released and effort steps down one level', async () => {
-  const r = new EffortRouter({ jev: null, bounds: { min: 'low', max: 'xhigh' } });
-  const task = await r.routeTask('the date tests fail, fix them', null);
-  assert.equal(task.effort, 'high');
-  const ctx = (current: Effort, batch: Array<{ tool: string; summary: string; failed: boolean; result: string }>, turn: number) => ({
-    prompt: 'the date tests fail, fix them', profile: task.profile!, turn, current, consecutiveFailures: 0,
-    assistantNote: '', trajectory: [], lastBatch: batch,
-  });
-  const fail = await r.routeStep(ctx('high', [{ tool: 'Bash', summary: 'npm test', failed: true, result: 'not ok 1 - isLeapYear expected true actual false' }], 1));
-  assert.equal(fail.effort, 'xhigh', 'failure escalates');
-  // The very next batch fixes it and the same check passes: no hold, one level down.
-  const pass = await r.routeStep(ctx('xhigh', [{ tool: 'Bash', summary: "sed -i '' 's/x/y/' dates.js && npm test", failed: false, result: '# pass 8 # fail 0' }, { tool: 'Bash', summary: 'npm test 2>&1 | tail -5', failed: false, result: '# pass 8' }], 2));
-  assert.equal(pass.effort, 'high', 'released and stepped down one level, not straight to medium');
-  assert.ok(pass.reasons.some((x) => x.includes('release hold')));
-});
-
-test('a successful read while the failure is still open does not release the escalation', async () => {
-  const r = new EffortRouter({ jev: null, bounds: { min: 'low', max: 'high' } });
-  const task = await r.routeTask('the date tests fail, fix them', null);
-  const ctx = (current: Effort, batch: Array<{ tool: string; summary: string; failed: boolean; result: string }>, turn: number) => ({
-    prompt: 'the date tests fail, fix them', profile: task.profile!, turn, current, consecutiveFailures: 0,
-    assistantNote: '', trajectory: [], lastBatch: batch,
-  });
-  await r.routeStep(ctx('medium', [{ tool: 'Bash', summary: 'npm test', failed: true, result: 'not ok 1 - isLeapYear' }], 1));
-  const read = await r.routeStep(ctx('high', [{ tool: 'Read', summary: 'dates.js', failed: false, result: 'export function isLeapYear' }], 2));
-  assert.equal(read.effort, 'high');
-});
-
-test('live repro: a different command that reruns the same suite and passes resolves the failure', async () => {
-  const r = new EffortRouter({ jev: null, bounds: { min: 'low', max: 'xhigh' } });
-  const task = await r.routeTask('the date tests fail, fix them', null);
-  const ctx = (current: Effort, batch: Array<{ tool: string; summary: string; failed: boolean; result: string; runner?: string }>, turn: number) => ({
-    prompt: 'the date tests fail, fix them', profile: task.profile!, turn, current, consecutiveFailures: 0,
-    assistantNote: '', trajectory: [], lastBatch: batch,
-  });
-  const fail = await r.routeStep(ctx('high', [{ tool: 'Bash', summary: "cat > package.json <<'EOF' {\"type\":\"module\"…", failed: true, result: 'not ok 1 - isLeapYear', runner: 'npm test' }], 1));
-  assert.equal(fail.effort, 'xhigh');
-  const pass = await r.routeStep(ctx('xhigh', [{ tool: 'Bash', summary: "sed -i '' -e 's/return y % 4…' dates.js && npm test", failed: false, result: '# pass 3 # fail 0', runner: 'npm test' }], 2));
-  assert.equal(pass.effort, 'high', 'same suite passing resolves the issue and releases the escalation');
-});
-
-test('actual date-debug session: grep-filtered setup and repair resolve the same suite', async () => {
-  const commands = dateDebugCommands;
-  const batch = (index: number, failed: boolean) => [{tool:'Bash',summary:describeToolInput('Bash',{command:commands[index]}),runner:testRunner('Bash',{command:commands[index]}),failed,result:failed?'# fail 3':'# pass 3\n# fail 0'}];
-  assert.ok(batch(0,true)[0]!.runner);
-  assert.equal(batch(0,true)[0]!.runner,batch(1,false)[0]!.runner);
-  const router = new EffortRouter({jev:null,bounds:{min:'medium',max:'xhigh'}});
-  const start = await router.routeTask('debug the failing date tests', 'medium');
-  const ctx = {prompt:'debug the failing date tests',profile:start.profile!,assistantNote:'',trajectory:[]};
-  const raised = await router.routeStep({...ctx,turn:1,current:start.effort,consecutiveFailures:1,lastBatch:batch(0,true)});
-  const recovered = await router.routeStep({...ctx,turn:2,current:raised.effort,consecutiveFailures:0,lastBatch:batch(1,false)});
-  assert.equal(raised.effort,'xhigh');
-  assert.equal(recovered.effort,'high');
-  assert.ok(recovered.reasons.some(r=>r.includes('now passes')));
-  assert.equal(issues(router).length,0);
-});
-
-test('a failed exploratory lookup (glob with no matches) neither escalates nor lingers', async () => {
-  const b = (summary: string, failed: boolean, result: string, runner?: string) => ({ tool: 'Bash', summary, failed, result, ...(runner ? { runner } : {}) });
-  assert.equal(isExploratoryFailure(b('ls && cat package.json 2>/dev/null; cat dates.js; ls test* *.test.js 2>/dev/null', true, 'zsh: no matches found: test*')), true);
-  assert.equal(isExploratoryFailure({ tool: 'Read', summary: 'missing.js', failed: true, result: 'File does not exist' }), true);
-  assert.equal(isExploratoryFailure(b('cat dates.test.js && npm test 2>&1 | tail -30', true, 'not ok 1', 'npm test')), false, 'a test run is never exploratory');
-  assert.equal(isExploratoryFailure(b('rm -rf build && make', true, 'error')), false);
-
-  // The demo's exact sequence: exploratory ls fails, tests fail, sed + tests pass.
-  const r = new EffortRouter({ jev: null, bounds: { min: 'low', max: 'xhigh' } });
-  const task = await r.routeTask('The tests fail. Find and fix the bugs in dates.js', null);
-  assert.equal(task.effort, 'high');
-  const ctx = (current: Effort, batch: ReturnType<typeof b>[], turn: number) => ({
-    prompt: 'fix the tests', profile: task.profile!, turn, current, consecutiveFailures: 0, assistantNote: '', trajectory: [], lastBatch: batch,
-  });
-  const look = await r.routeStep(ctx('high', [b('ls && cat package.json 2>/dev/null; cat dates.js; ls test* *.test.js 2>/dev/null', true, 'zsh: no matches found: test*')], 1));
-  assert.notEqual(look.effort, 'xhigh', 'looking around does not escalate');
-  const fail = await r.routeStep(ctx(look.effort, [b('cat dates.test.js && npm test 2>&1 | tail -30', true, 'not ok 1 - leap years', 'npm test')], 2));
-  assert.equal(fail.effort, 'xhigh', 'the real test failure escalates');
-  const pass = await r.routeStep(ctx('xhigh', [b("sed -i '' -e 's/a/b/' dates.js && npm test 2>&1 | tail -30", false, '# pass 3 # fail 0', 'npm test')], 3));
-  assert.equal(pass.effort, 'high', 'nothing lingers from the ls: effort steps down once the tests pass');
-});
-
-/* ---------- step state size ---------- */
-
-const bigCall = (i: number): ToolCallSummary => bash(`cmd-${i}`, false, `out-${i} ${'x'.repeat(380)}`);
-
-/** The length cap matters for full evaluator content; the default summary is short. */
-function fullContent(fn: () => void | Promise<void>) {
-  return async () => { await fn(); };
-}
-
-test('stepState caps the total length, keeping the header and the most recent tool calls', fullContent(() => {
-  const batch = Array.from({ length: 40 }, (_, i) => bigCall(i));
-  const s = stepState(step(batch, 'medium', { assistantNote: 'working on it', trajectory: ['step 1 @low: Read a ok'] }), { maxChars: 3000 });
-  assert.ok(s.length <= 3000, `length ${s.length}`);
-  assert.ok(s.startsWith('TASK: implement the feature\n'), s.slice(0, 80));
-  assert.ok(s.includes('STEP 1 · effort in force: medium · consecutive steps with a failed tool call: 0'));
-  assert.ok(s.includes('AGENT SAID: working on it'));
-  assert.ok(s.includes('cmd-39'), 'most recent call kept');
-  assert.ok(!s.includes('cmd-0 '), 'oldest call dropped');
-  const m = s.match(/\((\d+) earlier tool calls omitted\)/);
-  assert.ok(m, 'omission marker present');
-  const kept = [...s.matchAll(/- Bash cmd-\d+/g)].length;
-  assert.equal(Number(m![1]) + kept, 40);
-}));
-
-test('stepState leaves a small state untouched and defaults to a 6000-char cap', fullContent(() => {
-  const small = stepState(step([bigCall(1)], 'medium'));
-  assert.ok(!small.includes('omitted'));
-  const big = stepState(step(Array.from({ length: 40 }, (_, i) => bigCall(i)), 'medium'));
-  assert.ok(big.length <= 6000 && big.length > 5000, `length ${big.length}`);
-}));
 
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
-test('truncation never splits a UTF-16 surrogate pair', fullContent(() => {
-  // '😀' is two code units; offset the text so every clip boundary lands mid-pair.
-  const emoji = (n: number, pad: string) => pad + '😀'.repeat(n);
-  for (const pad of ['', 'a']) {
-    const ctx = step(
-      Array.from({ length: 30 }, () => ({ tool: 'Bash', summary: emoji(150, pad), failed: false, result: emoji(300, pad) })),
-      'medium',
-      { prompt: emoji(1000, pad), assistantNote: emoji(400, pad), trajectory: [emoji(3000, pad)] },
-    );
-    for (const maxChars of [1001, 2000, 2999, 6000]) {
-      const s = stepState(ctx, { maxChars });
-      assert.ok(!LONE_SURROGATE.test(s), `pad=${JSON.stringify(pad)} max=${maxChars}`);
-      assert.ok(!s.includes('\uFFFD'), 'cut backs off whole pairs; nothing needed replacing');
-      assert.ok(s.length <= maxChars);
-    }
-  }
-}));
-
 test('every question tells Jev that the state is evidence, not instructions', () => {
-  for (const set of [TASK_QUESTIONS, STEP_QUESTIONS, FOLLOWUP_QUESTIONS]) {
+  for (const set of [TASK_QUESTIONS, FOLLOWUP_QUESTIONS]) {
     for (const [name, q] of Object.entries(set)) assert.match(q.instructions, /untrusted evidence/, name);
   }
 });
@@ -604,7 +117,7 @@ test('clipEnds keeps the tail of a long prompt and says how much was dropped', (
   const m = s.match(/…\[\+(\d+) chars\]…/);
   assert.ok(m, 'drop marker between head and tail');
   assert.equal(s.length - m![0].length + Number(m![1]), prompt.length, 'kept + dropped = whole');
-  for (const state of [taskState(prompt), followUpState(null, prompt), stepState(step([], 'medium', { prompt }))]) {
+  for (const state of [taskState(prompt), followUpState(null, prompt)]) {
     assert.ok(state.includes('帮我看看最后一行报错是什么原因'), state.slice(-80));
   }
   assert.ok(taskState(prompt).length <= 3100);
@@ -622,134 +135,19 @@ test('clipEnds never splits a surrogate pair at either boundary', () => {
   }
 });
 
-test('trajectoryLine caps a batch of many calls and keeps the failed ones', () => {
-  const one = trajectoryLine(3, 'high', [read('src/a.ts')]);
-  assert.equal(one, 'step 3 @high: Read src/a.ts ok');
-  const batch = [...Array.from({ length: 20 }, (_, i) => read(`src/deep/path/to/module-${i}.ts`)), fail('npm test', 'not ok 1')];
-  const line = trajectoryLine(4, 'medium', batch);
-  assert.ok(line.length <= TRAJECTORY_LINE_MAX, `length ${line.length}`);
-  assert.ok(line.startsWith('step 4 @medium: 21 calls, 1 FAILED: Bash npm test FAILED; '), line.slice(0, 80));
-  assert.match(line, /…\[\+\d+ chars\]$/);
-  assert.ok(!LONE_SURROGATE.test(trajectoryLine(5, 'low', [read('😀'.repeat(40))])));
-});
-
-/* ---------- escalation per kind through the router ---------- */
-
-const typed = (taskType: TaskProfile['taskType'], deep = 0.2): TaskProfile => ({ taskType, typeConfidence: 0.9, deep, source: 'jev' });
-
-test('router: after xhigh fails twice, coding, deep research and shallow research all reach max', async () => {
-  const failAt = async (profile: TaskProfile, level: Effort, times = 1) => {
-    const r = new EffortRouter({ jev: null, bounds: { min: 'low', max: 'max' } });
-    r.restore({ v: 2, hold: 0, base: level });
-    let d!: EffortDecision;
-    for (let i = 0; i < times; i++) d = await r.routeStep(step([fail('npm test', 'AssertionError: expected 3')], level, { turn: i + 1, profile }));
-    return d;
-  };
-  assert.equal((await failAt(typed('code'), 'xhigh')).effort, 'xhigh', 'one xhigh failure holds at xhigh');
-  assert.equal((await failAt(typed('research', 0.6), 'xhigh', 2)).effort, 'max');
-  assert.equal((await failAt(typed('code'), 'xhigh', 2)).effort, 'max');
-  assert.equal((await failAt(typed('research', 0.1), 'high')).effort, 'xhigh', 'shallow research passes high');
-  assert.equal((await failAt(typed('research', 0.1), 'xhigh', 2)).effort, 'max');
-});
-
-test('router: a successful read-only batch keeps the task level without asking Jev', async () => {
-  let calls = 0;
-  const jev = stubJev((_s, q) => {
-    calls++;
-    return { answers: { task_type: choice('code'), deep: noul(0.2) }, signals: allValid(Object.keys(q)) };
-  });
-  const r = new EffortRouter({ jev, bounds: { min: 'medium', max: 'max' } });
-  const t = await r.routeTask('implement the feature', null);
-  const before = calls;
-  const d = await r.routeStep(step([read()], t.effort, { profile: t.profile }));
-  assert.equal(d.effort, t.effort);
-  assert.equal(d.source, 'local');
-  assert.equal(calls, before, 'no Jev call for a routine read at the task level');
-});
-
-test('router: a low-confidence chat call escalates on failure', async () => {
-  const r = new EffortRouter({ jev: null, bounds: { min: 'medium', max: 'max' } });
-  r.restore({ v: 2, hold: 0, base: 'medium' });
-  const chat: TaskProfile = { taskType: 'chat', typeConfidence: 0.44, deep: 0.1, source: 'jev' };
-  const d = await r.routeStep(step([fail('git commit -m x', 'error: pre-commit hook failed')], 'medium', { profile: chat }));
-  assert.equal(d.effort, 'high');
-});
-
-test('router: bounds low..high still clamp code escalation', async () => {
-  const r = new EffortRouter({ jev: null, bounds: { min: 'low', max: 'high' } });
-  r.restore({ v: 2, hold: 0, base: 'high' });
-  let current: Effort = 'high';
-  for (let i = 0; i < 4; i++) {
-    const d = await r.routeStep(step([fail('npm test', 'AssertionError: expected 3')], current, { profile: typed('code') }));
-    assert.ok(rank(d.effort) <= rank('high'), d.effort);
-    current = d.effort;
-  }
-});
-
-/* ---------- regressions ---------- */
-
-test('reducer: a duplicate failing call in one xhigh batch counts as one xhigh attempt', () => {
-  const same = fail('npm test', 'AssertionError: expected 3');
-  const one = reduceBatch(emptyCore(), [same, same], 'xhigh');
-  assert.equal(one.state.issues[0]!.xhighAttempts, 1);
-  const two = reduceBatch(one.state, [same, same], 'xhigh');
-  assert.equal(two.state.issues[0]!.xhighAttempts, 2);
-});
-
-test('router: one xhigh batch with a duplicated failing call does not unlock max', async () => {
-  const r = new EffortRouter({ jev: null, bounds: { min: 'low', max: 'max' } });
-  r.restore({ v: 2, hold: 0, base: 'xhigh' });
-  const same = fail('npm test', 'AssertionError: expected 3');
-  const d = await r.routeStep(step([same, same], 'xhigh', { profile: typed('code') }));
-  assert.equal(d.effort, 'xhigh');
-});
-
-test('router: a confident Jev chat kind without a valid deep answer still escalates on failure', async () => {
-  const jev = stubJev(() => ({ answers: { task_type: choice('chat') }, signals: { task_type: 'valid', deep: 'invalid' } }));
-  const r = new EffortRouter({ jev, bounds: { min: 'low', max: 'max' } });
-  const t = await r.routeTask('please update the login flow', null);
-  assert.equal(t.source, 'jev');
-  assert.equal(t.profile!.taskType, 'chat');
-  let current: Effort = t.effort;
-  for (let i = 0; i < 4; i++) {
-    const d = await r.routeStep(step([fail('npm test', 'AssertionError')], current, { turn: i + 1, profile: t.profile! }));
-    current = d.effort;
-  }
-  assert.ok(rank(current) > rank('medium'), `failures must escalate past medium, got ${current}`);
-});
-
-test('router: the state Jev sees for a step stays within the cap, unresolved issues included', fullContent(async () => {
-  const jev = stubJev((_s, q) => ('task_type' in q ? { answers: { task_type: choice('code'), deep: noul(0.2) } } : null));
-  const r = new EffortRouter({ jev, bounds: { min: 'low', max: 'max' } });
-  await r.routeTask('implement the feature', null);
-  const batch = Array.from({ length: 60 }, (_, i) => fail(`cmd-${i} --flag`, `Error ${'x'.repeat(300)} distinct-${String.fromCharCode(97 + (i % 26))}${i}`));
-  await r.routeStep(step(batch, 'medium'));
-  await r.routeStep(step(batch, 'high'));
-  const last = jev.calls.at(-1)!;
-  assert.ok(issues(r).length > 20, 'many open issues');
-  assert.ok(last.includes('UNRESOLVED ISSUES'));
-  assert.ok(last.length <= 6000, `length ${last.length}`);
-}));
-
-/* ---------- follow-up fault signal ---------- */
-
 const complaint = (over: Partial<FollowUpAsk> = {}): FollowUpAsk => ({
   summary: 'PREVIOUS USER REQUEST: fix the date test', prevMax: 'medium', prevDissatisfied: false, prevStreak: 0, prevHiLosses: 0,
   shadow: false, advisorOption: true, advisorAvailable: true, ...over,
 });
 
-/** Answers task, step and follow-up questions by which set is asked. */
-const faultJev = (p: number | 'fail' | 'throw', deep = 0.1) => {
-  const jev = stubJev((_s, q) => {
-    if ('dissatisfied' in q) {
-      if (p === 'throw') throw new Error('socket hang up');
-      return p === 'fail' ? 'fail' : { answers: { dissatisfied: noul(p) }, signals: allValid(['dissatisfied']) };
-    }
-    if ('task_type' in q) return { answers: { task_type: choice('code'), deep: noul(deep) }, signals: allValid(Object.keys(q)) };
-    return { answers: {}, signals: allValid(Object.keys(q)) };
-  });
-  return jev;
-};
+/** Answers task and follow-up questions by which set is asked. */
+const faultJev = (p: number | 'fail' | 'throw', deep = 0.1, fallbackFrom?: string) => stubJev((_s, q) => {
+  if ('dissatisfied' in q) {
+    if (p === 'throw') throw new Error('socket hang up');
+    return p === 'fail' ? 'fail' : { answers: { dissatisfied: noul(p) }, signals: allValid(['dissatisfied']), ...(fallbackFrom ? { fallbackFrom } : {}) };
+  }
+  return { answers: { task_type: choice('code'), deep: noul(deep) }, signals: allValid(Object.keys(q)), ...(fallbackFrom ? { fallbackFrom } : {}) };
+});
 
 async function withDissat(fn: () => Promise<void>): Promise<void> {
   setDissatThreshold(0.98);
@@ -818,43 +216,13 @@ test('follow-up: a failed, invalid or throwing follow-up ask raises nothing and 
   });
 });
 
-test('follow-up: later steps never run below the raised task level', async () => {
+test('decision 6: a follow-up verdict from the fallback endpoint never raises', async () => {
   await withDissat(async () => {
-    const r = new EffortRouter({ jev: faultJev(0.99), bounds: { min: 'low', max: 'max' } });
-    const t = await r.routeTask('不对，还是报错', 'medium', undefined, complaint({ prevMax: 'high' }));
-    assert.equal(t.effort, 'xhigh');
-    const s1 = await r.routeStep(step([read()], 'xhigh'));
-    assert.equal(s1.effort, 'xhigh');
-    const s2 = await r.routeStep(step([read('b.ts')], s1.effort, { turn: 2 }));
-    assert.equal(s2.effort, 'xhigh');
-    assert.equal(r.snapshot().base, 'xhigh', 'the raise is the task level the snapshot restores');
+    const d = await new EffortRouter({ jev: faultJev(0.99, 0.1, 'Jev HTTP 503'), bounds: { min: 'low', max: 'max' } })
+      .routeTask('不对，还是报错', 'medium', undefined, complaint({ prevMax: 'high' }));
+    assert.equal(d.effort, 'high');
+    assert.equal(d.followUp?.yes, false);
+    assert.equal(d.followUp?.error, FALLBACK_IGNORED);
+    assert.equal(d.followUp?.raisedTo, undefined);
   });
-});
-
-test('follow-up: a pinned router asks nothing', async () => {
-  await withDissat(async () => {
-    const jev = faultJev(0.99);
-    const r = new EffortRouter({ jev, bounds: { min: 'low', max: 'max' }, pinned: 'low' });
-    const d = await r.routeTask('不对', 'medium', undefined, complaint());
-    assert.equal(jev.calls.length, 0);
-    assert.equal(d.effort, 'low');
-    assert.equal(d.followUp, undefined);
-  });
-});
-
-test('suspect output (failure text from a non-check) consults Jev but never opens or clears an issue', async () => {
-  const jev = stubJev(() => ({ answers: { phase: choice('exploring'), step_difficulty: score(1), stuck: noul(0.1) }, signals: allValid(['phase', 'step_difficulty', 'stuck']) }));
-  const r = lowTask(jev);
-  await r.routeTask('implement the feature', null);
-  const failing = fail('npm test', 'not ok 1 - dates');
-  await r.routeStep(step([{ ...failing, runner: 'npm test', kind: 'check', cause: 'check-output', id: 'toolu_1' }], 'medium'));
-  assert.equal(issues(r).length, 1);
-  const before = jev.calls.length;
-  const suspect: ToolCallSummary = { tool: 'Bash', summary: 'python3 report.py', failed: false, suspect: true, kind: 'other', cause: 'output-text', result: 'FAILED x' };
-  const d = await r.routeStep(step([suspect], 'high'));
-  assert.equal(jev.calls.length, before + 1, 'the evaluator judges ambiguous evidence');
-  assert.match(jev.calls.at(-1)!, /output mentions failures/);
-  assert.equal(issues(r).length, 1, 'suspect output neither opens nor resolves an issue');
-  assert.deepEqual(d.evidence!.observed, [{ tool: 'Bash', kind: 'other', cause: 'output-text', outcome: 'suspect' }]);
-  assert.equal(d.evidence!.open[0]!.toolId, 'toolu_1');
 });

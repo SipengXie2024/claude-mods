@@ -1,7 +1,6 @@
 import { isEffort, type Effort } from './effort';
-import type { ConfidenceMode, JevClientOptions } from './jev';
+import { DEFAULT_DEADLINE_MS, type ConfidenceMode, type JevClientOptions } from './jev';
 import { DEEP_DEFAULTS, normalizeBounds, setAblations, setDeepThresholds, setDissatThreshold, type Bounds } from './policy';
-import { setStepStateMax, STEP_STATE_DEFAULT, STEP_STATE_MIN } from './router';
 
 /**
  * The mod's settings, read from jev-opus's own `.env` (same keys, same
@@ -20,10 +19,15 @@ export interface ModConfig {
   deep: { yes: number; no: number };
   followUp: { mode: 'on' | 'shadow' | null; yes: number; advisor: boolean };
   ablate: string[];
-  stepStateMax: number;
+  /** probability that a human prompt's start level moves one step for exploration (JEV_OPUS_EXPLORE) */
+  explore: number;
 }
 
-/** KEY=VALUE lines; `#` comments, `export ` prefixes and matching quotes allowed. */
+/** Default JEV_OPUS_EXPLORE. */
+export const EXPLORE_DEFAULT = 0.1;
+const FALLBACK_DEADLINE_MS = 2_500;
+
+/** KEY=VALUE lines; `#` comments, `export ` prefixes and matching quotes (an inline comment may follow them) allowed. */
 export function parseEnvFile(text: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const raw of text.split(/\r?\n/)) {
@@ -31,11 +35,8 @@ export function parseEnvFile(text: string): Record<string, string> {
     if (!line || line.startsWith('#')) continue;
     const m = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
     if (!m) continue;
-    let v = m[2]!;
-    const q = v[0];
-    if ((q === '"' || q === "'") && v.length >= 2 && v.endsWith(q)) v = v.slice(1, -1);
-    else v = v.replace(/\s+#.*$/, '').trim();
-    out[m[1]!] = v;
+    const quoted = /^(["'])(.*?)\1\s*(?:#.*)?$/.exec(m[2]!);
+    out[m[1]!] = quoted ? quoted[2]! : m[2]!.replace(/\s+#.*$/, '').trim();
   }
   return out;
 }
@@ -103,8 +104,8 @@ function endpoint(env: Record<string, string>, prefix: '' | 'FALLBACK_'): { opti
         apiKey,
         baseUrl,
         model: env[`JEV_${prefix}MODEL`] || 'jev-latest',
-        // Jev sits in the request path, so the budget is small.
-        deadlineMs: int(env[`JEV_${prefix}DEADLINE_MS`], 2_500),
+        // Jev sits in the request path, so the budget is small; the fallback is asked only after the primary failed.
+        deadlineMs: int(env[`JEV_${prefix}DEADLINE_MS`], prefix ? FALLBACK_DEADLINE_MS : DEFAULT_DEADLINE_MS),
         breakerThreshold: int(env.JEV_BREAKER_THRESHOLD, 3, 1),
         breakerCooldownMs: int(env.JEV_BREAKER_COOLDOWN_MS, 30_000),
         confidence: (env.JEV_CONFIDENCE === 'server' ? 'server' : 'recompute') as ConfidenceMode,
@@ -131,7 +132,7 @@ export function modConfig(env: Record<string, string>): ModConfig {
       advisor: env.JEV_OPUS_DISSAT_ADVISOR !== '0',
     },
     ablate: (env.JEV_OPUS_ABLATE || '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean),
-    stepStateMax: int(env.JEV_OPUS_STEP_STATE_MAX, STEP_STATE_DEFAULT, STEP_STATE_MIN),
+    explore: unit(env.JEV_OPUS_EXPLORE, EXPLORE_DEFAULT),
   };
 }
 
@@ -140,5 +141,4 @@ export function applyPolicyConfig(c: ModConfig): void {
   setDeepThresholds(c.deep);
   setDissatThreshold(c.followUp.yes);
   setAblations(c.ablate);
-  setStepStateMax(c.stepStateMax);
 }

@@ -1,11 +1,8 @@
-import type { Phase, TaskType } from './questions';
-import type { StepContext, TaskProfile, StepSignals } from './types';
-import { getDeepThresholds, isDeep } from './policy';
+import type { TaskType } from './questions';
+import type { TaskProfile } from './types';
+import { getDeepThresholds } from './policy';
 
-/**
- * Deterministic fallbacks used when Jev is disabled or unreachable, and the
- * hard signals (tool failures) that are blended into every Jev decision.
- */
+/** The task profile used when Jev is disabled or unreachable. */
 
 // Chinese alternatives sit outside the \b group: \b only sees ASCII word characters, so it never matches around CJK text.
 // Ordered by the task.v3 tie-break (research > code > write > operate > explain > chat): the first match wins.
@@ -40,43 +37,6 @@ export function heuristicTaskProfile(prompt: string): TaskProfile {
     taskType,
     typeConfidence: 0.5,
     deep: heuristicDeep(DEEP_WORDS.test(text)),
-    source: 'heuristic',
-  };
-}
-
-const READ_ONLY_TOOLS = /^(Read|Glob|Grep|LS|WebFetch|WebSearch|TodoWrite|NotebookRead|ToolSearch|Skill)$/;
-const WRITE_TOOLS = /^(Write|Edit|MultiEdit|NotebookEdit)$/;
-const VERIFY_CMD = /\b(test|jest|vitest|pytest|mocha|cargo (test|check|build)|go (test|build|vet)|tsc|lint|eslint|build|typecheck|make( |$)|npm run|pnpm|yarn)\b/i;
-
-export function heuristicStepSignals(ctx: StepContext, opts?: { ignoreFailures?: boolean }): StepSignals {
-  const calls = ctx.lastBatch;
-  // ignoreFailures: every failure in the batch was an environment blocker, so
-  // it must not steer the phase estimate toward diagnosing.
-  const failed = opts?.ignoreFailures ? 0 : calls.filter((c) => c.failed).length;
-  const consecutiveFailures = opts?.ignoreFailures ? 0 : ctx.consecutiveFailures;
-  const writes = calls.some((c) => WRITE_TOOLS.test(c.tool));
-  const verify = calls.some((c) => c.tool === 'Bash' && VERIFY_CMD.test(c.summary));
-
-  // Confidence below 0.5 marks genuine ambiguity and lets the router consult Jev.
-  let phase: Phase = 'exploring';
-  let phaseConfidence = 0.5;
-  if (calls.length === 0) { phase = 'finishing'; phaseConfidence = 0.4; }
-  else if (failed > 0) { phase = 'diagnosing'; phaseConfidence = 0.6; }
-  else if (writes && verify) { phase = 'implementing'; phaseConfidence = 0.4; }
-  else if (writes) { phase = 'implementing'; phaseConfidence = 0.6; }
-  else if (verify) { phase = 'verifying'; phaseConfidence = 0.6; }
-
-  const stepDifficulty =
-    phase === 'diagnosing' ? Math.min(4, 2.2 + 0.5 * consecutiveFailures)
-      : phase === 'implementing' ? (isDeep(ctx.profile) ? 2.5 : 1.5)
-        : phase === 'verifying' ? 1.0
-          : phase === 'finishing' ? 0.8
-            : 1.0;
-  return {
-    phase,
-    phaseConfidence,
-    stepDifficulty,
-    stuck: consecutiveFailures >= 3 ? 0.8 : consecutiveFailures === 2 ? 0.5 : 0.1,
     source: 'heuristic',
   };
 }

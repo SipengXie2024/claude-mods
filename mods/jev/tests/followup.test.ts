@@ -1,5 +1,5 @@
 import assert, { test } from './assert';
-import { followUpSummary, isHumanPrompt, previousPromptIndex, type Message } from '../src/followup';
+import { followUpSummary, isHumanPrompt, previousPromptIndex, unwrapChannel, type Message } from '../src/followup';
 import { FOLLOWUP_QUESTION_VARIANTS, FOLLOWUP_QUESTIONS, TASK_QUESTIONS } from '../src/questions';
 import { followUpState } from '../src/router';
 
@@ -64,7 +64,7 @@ test('followUpSummary reports the request, the last reply and the actions of the
   assert.equal(summary, [
     'PREVIOUS USER REQUEST: make the tests pass',
     "AGENT'S LAST REPLY (start): Looking at the code.",
-    'AGENT ACTIONS: 6 tool calls; edited a.ts, b.ts; ran 3 commands (2 failed); interrupted by user',
+    'AGENT ACTIONS: 6 tool calls; edited a.ts, b.ts; ran 3 commands (1 failed); interrupted by user',
   ].join('\n'));
   assert.doesNotMatch(summary, /secret plan/);
   assert.doesNotMatch(summary, EFFORT_WORDS);
@@ -130,4 +130,24 @@ test('previousPromptIndex skips harness wrappers and slash commands but keeps pa
   assert.equal(isHumanPrompt(user('<pasted_content>log</pasted_content> 看看这个')), true);
   assert.equal(isHumanPrompt(user('/home/ubuntu/sipeng 这个目录是什么')), true);
   assert.equal(isHumanPrompt(user('<task-notification>x</task-notification>')), false);
+});
+
+test('decision 8 (B6): a Telegram message is a human prompt, its words unwrapped from the channel wrapper', () => {
+  const tg = '<channel source="plugin:telegram:telegram" chat_id="1" message_id="2" user="u" ts="2026-10-26T00:00:00.000Z">\n不对，还是报错\n</channel>';
+  assert.equal(unwrapChannel(tg), '不对，还是报错');
+  assert.equal(unwrapChannel('不对'), '不对');
+  assert.equal(isHumanPrompt(user(tg)), true);
+  const messages = [user(tg), assistant(text('fixed')), user('<task-notification>done</task-notification>'), user('继续')];
+  assert.equal(previousPromptIndex(messages, 3), 0);
+  assert.match(followUpSummary(messages, 0, 3), /^PREVIOUS USER REQUEST: 不对，还是报错$/m);
+});
+
+test('decision 4: a command counts as failed in the summary by its exit status only, never by its output text', () => {
+  const messages: Message[] = [
+    user('fix it'),
+    assistant(use('b1', 'Bash', { command: 'npm test' }), use('b2', 'Bash', { command: 'cat notes.txt' })),
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'b1', content: 'Exit code 1\n# fail 1', is_error: true }, { type: 'tool_result', tool_use_id: 'b2', content: 'FAILED: 3 tests\nTraceback (most recent call last)' }] },
+    user('again'),
+  ];
+  assert.match(followUpSummary(messages, 0, 3), /ran 2 commands \(1 failed\)/);
 });

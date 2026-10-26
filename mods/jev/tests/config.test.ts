@@ -9,6 +9,8 @@ test('parseEnvFile: comments, export, quotes and trailing comments', () => {
     'export JEV_API_KEY="k-123"',
     "JEV_OPUS_ABLATE='r1, stuck'",
     'JEV_DEADLINE_MS=3500   # p50 1.6 s',
+    'JEV_FALLBACK_BASE_URL="http://127.0.0.1:18016/v1" # local',
+    "JEV_MODEL='lingdt-decision-1.0'   # the fallback's model",
     'not a line',
     '',
   ].join('\n'));
@@ -17,6 +19,8 @@ test('parseEnvFile: comments, export, quotes and trailing comments', () => {
     JEV_API_KEY: 'k-123',
     JEV_OPUS_ABLATE: 'r1, stuck',
     JEV_DEADLINE_MS: '3500',
+    JEV_FALLBACK_BASE_URL: 'http://127.0.0.1:18016/v1',
+    JEV_MODEL: 'lingdt-decision-1.0',
   });
 });
 
@@ -25,7 +29,10 @@ test('modConfig: jev-opus defaults; no key means heuristics only', () => {
   assert.equal(c.jev, null);
   assert.deepEqual(c.bounds, { min: 'low', max: 'high' });
   assert.deepEqual(c.followUp, { mode: 'on', yes: 0.75, advisor: true });
-  assert.equal(c.stepStateMax, 6000);
+  assert.equal(c.explore, 0.1);
+  const keyed = modConfig({ JEV_BASE_URL: 'http://127.0.0.1:18013/v1/systemone', JEV_API_KEY: 'k', JEV_FALLBACK_BASE_URL: 'http://127.0.0.1:18016/v1', JEV_FALLBACK_API_KEY: 'k2' });
+  assert.equal(keyed.jev?.deadlineMs, 6000, 'decision 6: the primary waits 6 s by default');
+  assert.equal(keyed.jevFallback?.deadlineMs, 2500);
 });
 
 test('modConfig: the live .env keys', () => {
@@ -33,7 +40,7 @@ test('modConfig: the live .env keys', () => {
     JEV_BASE_URL: 'http://127.0.0.1:18013/v1/systemone', JEV_API_KEY: 'k', JEV_DEADLINE_MS: '3500',
     JEV_OPUS_MIN_EFFORT: 'medium', JEV_OPUS_MAX_EFFORT: 'max', JEV_OPUS_DEEP_YES: '0.61', JEV_OPUS_DEEP_NO: '0.2',
     JEV_OPUS_DISSATISFACTION: 'shadow', JEV_OPUS_DISSAT_YES: '0.8', JEV_OPUS_DISSAT_ADVISOR: '0', JEV_OPUS_ABLATE: 'R1,stuck',
-    JEV_OPUS_STEP_STATE_MAX: '100',
+    JEV_OPUS_EXPLORE: '0.25',
   });
   assert.equal(c.jev?.baseUrl, 'http://127.0.0.1:18013/v1/systemone');
   assert.equal(c.jev?.deadlineMs, 3500);
@@ -41,7 +48,9 @@ test('modConfig: the live .env keys', () => {
   assert.deepEqual(c.deep, { yes: 0.61, no: 0.2 });
   assert.deepEqual(c.followUp, { mode: 'shadow', yes: 0.8, advisor: false });
   assert.deepEqual(c.ablate, ['r1', 'stuck']);
-  assert.equal(c.stepStateMax, 6000, 'below the 3000 minimum falls back to the default');
+  assert.equal(c.explore, 0.25);
+  assert.equal(modConfig({ JEV_OPUS_EXPLORE: '0' }).explore, 0);
+  assert.equal(modConfig({ JEV_OPUS_EXPLORE: '1.5' }).explore, 0.1, 'outside 0..1 falls back to the default');
   assert.equal(modConfig({ JEV_OPUS_DISSATISFACTION: '0' }).followUp.mode, null);
   assert.deepEqual(modConfig({ JEV_OPUS_MIN_EFFORT: 'max', JEV_OPUS_MAX_EFFORT: 'low' }).bounds, { min: 'low', max: 'max' }, 'misordered bounds swap');
 });

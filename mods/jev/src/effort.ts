@@ -51,6 +51,13 @@ export function effortTag(text: string): EffortTag | null {
   return { min: a, max: a };
 }
 
+const EFFORT_AUTO = /\[\s*effort\s+auto\s*\]/i;
+
+/** `[effort auto]` anywhere in the text: the person hands effort back to Jev, ending a /effort pin. */
+export function effortAuto(text: string): boolean {
+  return EFFORT_AUTO.test(text);
+}
+
 export function describeBounds(b: { min: Effort; max: Effort }): string {
   return b.min === b.max ? b.min : `${b.min}..${b.max}`;
 }

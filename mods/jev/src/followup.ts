@@ -1,4 +1,4 @@
-import { classifyToolResult, describeToolInput, stringifyResult } from './describe';
+import { describeToolInput, stringifyResult } from './describe';
 import { clip } from './router';
 
 /**
@@ -58,9 +58,18 @@ const COMPACTION = 'This session is being continued from a previous conversation
 const EDIT_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
 const MAX_FILES = 5;
 
-/** User text without interrupt markers (Claude Code may merge a marker into the next prompt's message). */
+/** A message relayed by a channel server (Telegram, Slack): `<channel source=… …>text</channel>`. */
+const CHANNEL = /^<channel\s[^>]*>\s*([\s\S]*?)\s*<\/channel>\s*$/;
+
+/** The person's own words of a channel message; any other text as given. */
+export function unwrapChannel(text: string): string {
+  const m = CHANNEL.exec(text.trim());
+  return m ? m[1]! : text;
+}
+
+/** User text without interrupt markers (Claude Code may merge a marker into the next prompt's message) or a channel wrapper. */
 function promptText(m: Message | undefined): string {
-  return userText(m).replace(INTERRUPT_LINE, '').trim();
+  return unwrapChannel(userText(m).replace(INTERRUPT_LINE, '').trim());
 }
 
 // A typed slash command ("/compact"); a path such as /home/... is a prompt.
@@ -132,7 +141,7 @@ export function followUpSummary(messages: readonly Message[], prevIdx: number, l
       if (name === 'Bash') {
         commands++;
         const r = b.id ? results.get(b.id) : undefined;
-        if (r && classifyToolResult(name, b.input, stringifyResult(r.content), r.is_error === true).failed) failed++;
+        if (r?.is_error === true) failed++;
       }
     }
   }

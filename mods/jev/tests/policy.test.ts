@@ -1,10 +1,10 @@
 import assert, { test } from './assert';
 import {
-  ABLATABLE, applyHysteresis, DISSAT_DEFAULT, followUpEffort, getAblations, getDeepThresholds, getDissatThreshold, policyVersion, setAblations, isDeep, normalizeBounds,
-  setDeepThresholds, setDissatThreshold, stepTarget, taskEffort, TYPE_PREFS, typePrefs, typeTrusted, type Bounds, type FollowUpInput, type StepEvidence,
+  ABLATABLE, DISSAT_DEFAULT, exploreStart, followUpEffort, getAblations, getDeepThresholds, getDissatThreshold, ladderRaise, MAX_RAISES, policyVersion, setAblations, isDeep,
+  normalizeBounds, setDeepThresholds, setDissatThreshold, taskEffort, TYPE_PREFS, typePrefs, typeTrusted, type Bounds, type FollowUpInput,
 } from '../src/policy';
 import { EFFORT_LEVELS, rank, type Effort } from '../src/effort';
-import type { StepSignals, TaskProfile } from '../src/types';
+import type { TaskProfile } from '../src/types';
 
 const ALL: Bounds = { min: 'low', max: 'max' };
 const UP_TO_HIGH: Bounds = { min: 'low', max: 'high' };
@@ -12,16 +12,6 @@ const UP_TO_HIGH: Bounds = { min: 'low', max: 'high' };
 const profile = (p: Partial<TaskProfile>): TaskProfile => ({
   taskType: 'code', typeConfidence: 0.8, deep: 0.2, source: 'jev', ...p,
 });
-const signals = (s: Partial<StepSignals>): StepSignals => ({
-  phase: 'implementing', phaseConfidence: 0.8, stepDifficulty: 1.5, stuck: 0.1, source: 'jev', ...s,
-});
-/** No open issues, nothing failed, routine next step — the quiet-step default. */
-const ev = (e: Partial<StepEvidence> = {}): StepEvidence => ({
-  unresolved: 0, repeated: false, triedOnFailure: [], xhighAttempts: 0, maxAttempts: 0, environmentOnly: false, routineOk: true, ...e,
-});
-const failing = (tried: Effort[], e: Partial<StepEvidence> = {}): StepEvidence =>
-  ev({ unresolved: 1, repeated: tried.length > 1, triedOnFailure: tried, maxAttempts: tried.length, ...e });
-
 test('task: each kind starts at its base (chat/operate low, explain/write medium, research/code high)', () => {
   const starts: Array<[TaskProfile['taskType'], Effort]> = [
     ['chat', 'low'], ['explain', 'medium'], ['operate', 'low'], ['write', 'medium'], ['research', 'high'], ['code', 'high'],
@@ -93,69 +83,6 @@ test('task: misordered bounds are swapped, not fatal', () => {
   assert.equal(taskEffort(profile({ taskType: 'chat', typeConfidence: 0.9, deep: 0.1 }), { min: 'high', max: 'low' }).effort, 'low');
 });
 
-test('step: no phase moves effort; a diagnosing step without a failed check stays at the task level', () => {
-  assert.equal(stepTarget('high', signals({ phase: 'exploring' }), ev(), 'high').effort, 'high');
-  assert.equal(stepTarget('high', signals({ phase: 'verifying' }), ev(), 'high').effort, 'high');
-  assert.equal(stepTarget('medium', signals({ phase: 'diagnosing' }), ev(), 'medium').effort, 'medium');
-  // the failure floor still raises a diagnosing step that follows a failed check
-  assert.equal(stepTarget('medium', signals({ phase: 'diagnosing' }), failing(['medium']), 'medium').effort, 'high');
-  assert.equal(stepTarget('medium', signals({ phase: 'implementing' }), ev(), 'medium').effort, 'medium');
-});
-
-test('step: finishing and trivial steps keep the task level', () => {
-  assert.equal(stepTarget('xhigh', signals({ phase: 'finishing', stepDifficulty: 1 }), ev(), 'xhigh').effort, 'xhigh');
-  assert.equal(stepTarget('medium', signals({ phase: 'exploring', stepDifficulty: 0.4 }), ev(), 'medium').effort, 'medium');
-});
-
-test('step: a hard next step lifts to high even while exploring', () => {
-  assert.equal(stepTarget('medium', signals({ phase: 'exploring', stepDifficulty: 3.6 }), ev(), 'medium').effort, 'high');
-});
-
-test('step: a new failure escalates one above the current attempt', () => {
-  const e = failing(['medium']);
-  assert.equal(stepTarget('medium', signals({}), e, 'medium').effort, 'high');
-  assert.equal(stepTarget('low', signals({}), failing(['low']), 'low').effort, 'medium');
-});
-
-test('step: a repeated failure escalates above the highest effort already tried', () => {
-  // not anchored to the base estimate: tried low+medium → high even though base is low
-  assert.equal(stepTarget('low', signals({}), failing(['low', 'medium']), 'medium').effort, 'high');
-  assert.equal(stepTarget('low', signals({}), failing(['low', 'medium', 'high']), 'high').effort, 'xhigh');
-  // one xhigh failure holds at xhigh; the second failure at xhigh on the same issue opens max
-  assert.equal(stepTarget('low', signals({}), failing(['low', 'medium', 'high', 'xhigh'], { xhighAttempts: 1 }), 'xhigh').effort, 'xhigh');
-  assert.equal(stepTarget('low', signals({}), failing(['low', 'medium', 'high', 'xhigh'], { xhighAttempts: 2 }), 'xhigh').effort, 'max');
-});
-
-test('step: unresolved issues block de-escalation; routine evidence is required', () => {
-  // exploring would normally drop a level — an open issue holds the effort
-  assert.equal(stepTarget('medium', signals({ phase: 'exploring' }), ev({ unresolved: 1 }), 'high').effort, 'high');
-  // and with no issues, a non-routine next step still cannot lower effort
-  assert.equal(stepTarget('medium', signals({ phase: 'diagnosing' }), ev({ routineOk: false }), 'high').effort, 'high');
-  assert.equal(stepTarget('medium', signals({ phase: 'implementing' }), ev({ routineOk: false }), 'high').effort, 'high');
-});
-
-test('step: environment blockers hold the current effort and never escalate', () => {
-  assert.equal(stepTarget('medium', signals({ phase: 'diagnosing', stepDifficulty: 3 }), ev({ environmentOnly: true }), 'medium').effort, 'medium');
-  assert.equal(stepTarget('high', signals({ phase: 'exploring' }), ev({ environmentOnly: true }), 'high').effort, 'high');
-});
-
-test('step: stuck escalates by two from the task level', () => {
-  assert.equal(stepTarget('low', signals({ phase: 'diagnosing', stuck: 0.8 }), ev({ unresolved: 1 }), 'low').effort, 'high');
-  assert.equal(stepTarget('medium', signals({ phase: 'diagnosing', stuck: 0.8 }), ev({ unresolved: 2, maxAttempts: 2 }), 'medium').effort, 'xhigh');
-});
-
-test('step: never below the task level', () => {
-  assert.equal(stepTarget('xhigh', signals({ phase: 'exploring', stepDifficulty: 0.2 }), ev(), 'medium').effort, 'xhigh');
-});
-
-test('step: every kind escalates past high on repeated failures, to max after xhigh fails twice', () => {
-  // confident, shallow research: no kind ceiling below xhigh
-  const d = stepTarget('medium', signals({}), failing(['medium', 'high']), 'high');
-  assert.equal(d.effort, 'xhigh');
-  assert.equal(stepTarget('medium', signals({}), failing(['medium', 'high', 'xhigh'], { xhighAttempts: 2 }), 'xhigh').effort, 'max');
-  assert.equal(stepTarget('high', signals({}), failing(['high', 'xhigh'], { xhighAttempts: 2 }), 'xhigh').effort, 'max');
-});
-
 test('kind trust: start follows the kind from 0.35', () => {
   assert.deepEqual(typePrefs(profile({ taskType: 'chat', typeConfidence: 0.8, deep: 0.1 })), { floor: 'low', base: 'low' });
   assert.deepEqual(typePrefs(profile({ taskType: 'chat', typeConfidence: 0.44, deep: 0.1 })), { floor: 'low', base: 'low' });
@@ -172,43 +99,8 @@ test('kind trust: start follows the kind from 0.35', () => {
   assert.deepEqual(typePrefs(profile({ taskType: 'chat', typeConfidence: 0.2 })), { floor: 'low', base: 'high' });
 });
 
-test('chat: a confident, shallow chat task escalates freely on repeated failures', () => {
-  const d = taskEffort(profile({ taskType: 'chat', typeConfidence: 0.9, deep: 0.1 }), ALL);
-  assert.equal(d.effort, 'low');
-  assert.equal(stepTarget(d.effort, signals({}), failing(['low', 'medium']), 'medium').effort, 'high');
-  assert.equal(stepTarget(d.effort, signals({}), failing(['low', 'medium', 'high']), 'high').effort, 'xhigh');
-  assert.equal(stepTarget(d.effort, signals({}), failing(['high', 'xhigh'], { xhighAttempts: 2 }), 'xhigh').effort, 'max');
-});
-
-test('step: low phase confidence keeps the task level', () => {
-  assert.equal(stepTarget('high', signals({ phase: 'exploring', phaseConfidence: 0.1 }), ev(), 'high').effort, 'high');
-});
-
-test('hysteresis: raise now, hold one step, then step down one level at a time', () => {
-  let h = applyHysteresis('low', 'high', 0, false);
-  assert.deepEqual([h.effort, h.hold], ['high', 1]);
-  h = applyHysteresis('high', 'low', h.hold, false);
-  assert.deepEqual([h.effort, h.hold], ['high', 0]);
-  h = applyHysteresis('high', 'low', h.hold, false);
-  assert.equal(h.effort, 'medium');
-  h = applyHysteresis('medium', 'low', h.hold, false);
-  assert.equal(h.effort, 'low');
-});
-
-test('hysteresis: finishing drops straight to target even during a hold', () => {
-  assert.equal(applyHysteresis('high', 'low', 1, true).effort, 'low');
-});
-
-/* ---------- per-kind {floor, base} ---------- */
 
 const KINDS = ['chat', 'explain', 'operate', 'write', 'research', 'code'] as const;
-
-test('v3 step: max needs xhigh already lost twice (or stuck ≥ 0.9)', () => {
-  assert.equal(stepTarget('high', signals({ phase: 'diagnosing' }), failing(['high', 'xhigh'], { xhighAttempts: 2 }), 'xhigh').effort, 'max');
-  // xhigh never tried: escalation stops at xhigh
-  assert.equal(stepTarget('high', signals({ phase: 'diagnosing' }), failing(['medium', 'high']), 'high').effort, 'xhigh');
-  assert.equal(stepTarget('high', signals({ phase: 'diagnosing', stuck: 0.95 }), ev({ unresolved: 1, maxAttempts: 1 }), 'xhigh').effort, 'max');
-});
 
 test('v4: bounds low..high clamp every kind, confidence and deep to ≤ high', () => {
   for (const taskType of KINDS) {
@@ -236,42 +128,60 @@ test('deep thresholds are per-backend and fall back to neutral defaults when inv
   }
 });
 
+
 test('ablations switch off exactly one rule each and are recorded in the policy version', () => {
   const deepResearch = profile({ taskType: 'research', typeConfidence: 0.9, deep: 0.95 });
-  const stuckFail = ev({ unresolved: 1, maxAttempts: 1 });
   try {
     setDeepThresholds({ yes: 0.88, no: 0.3 });
-    assert.deepEqual([...ABLATABLE], ['r1', 'r4', 'stuck', 'dissat']);
-    assert.equal(policyVersion(), 'policy.v9');
+    assert.deepEqual([...ABLATABLE], ['r1', 'dissat']);
+    assert.equal(policyVersion(), 'policy.v10');
     assert.equal(taskEffort(deepResearch, ALL).effort, 'xhigh');
-    assert.equal(stepTarget('medium', signals({ stepDifficulty: 3.5 }), ev(), 'medium').effort, 'high');
-    assert.equal(stepTarget('medium', signals({ phase: 'diagnosing', stuck: 0.8 }), stuckFail, 'medium').effort, 'xhigh');
 
     setAblations(['r1']);
     assert.equal(taskEffort(deepResearch, ALL).effort, 'high');
-    // r2 no longer exists: it is ignored like any unknown name
-    setAblations(['r2']);
+    // r2, r4 and stuck no longer exist: they are ignored like any unknown name
+    setAblations(['r2', 'r4', 'stuck']);
     assert.deepEqual(getAblations(), []);
-    assert.equal(policyVersion(), 'policy.v9');
-    setAblations(['r4']);
-    assert.equal(stepTarget('medium', signals({ stepDifficulty: 3.5 }), ev(), 'medium').effort, 'medium');
-    setAblations(['stuck']);
-    assert.equal(stepTarget('medium', signals({ phase: 'diagnosing', stuck: 0.8 }), stuckFail, 'medium').effort, 'medium');
-    assert.equal(stepTarget('high', signals({ phase: 'diagnosing', stuck: 0.95 }), ev({ unresolved: 1, maxAttempts: 1 }), 'xhigh').effort, 'xhigh');
+    assert.equal(policyVersion(), 'policy.v10');
 
-    setAblations(['stuck', 'bogus', 'r1']);
-    assert.deepEqual(getAblations(), ['r1', 'stuck']);
-    assert.equal(policyVersion(), 'policy.v9-ablate:r1,stuck');
+    setAblations(['dissat', 'bogus', 'r1']);
+    assert.deepEqual(getAblations(), ['r1', 'dissat']);
+    assert.equal(policyVersion(), 'policy.v10-ablate:r1,dissat');
   } finally {
     setAblations([]);
     setDeepThresholds({ yes: 0.5, no: 0.3 });
   }
 });
 
-test('step: an escalation stopped by the two-xhigh-failures gate says so', () => {
-  const d = stepTarget('medium', signals({ phase: 'diagnosing' }), ev({ unresolved: 1, repeated: true, triedOnFailure: ['xhigh'], xhighAttempts: 1 }), 'xhigh');
-  assert.equal(d.effort, 'xhigh');
-  assert.ok(d.reasons.includes('max only after xhigh fails twice → xhigh'), d.reasons.join('; '));
+test('decision 3: the ladder raises one level at a time, max only from xhigh, never past the bounds', () => {
+  assert.equal(ladderRaise('medium', ALL), 'high');
+  assert.equal(ladderRaise('high', ALL), 'xhigh');
+  assert.equal(ladderRaise('xhigh', ALL), 'max');
+  assert.equal(ladderRaise('max', ALL), null);
+  assert.equal(ladderRaise('high', UP_TO_HIGH), null);
+  assert.equal(ladderRaise('medium', { min: 'xhigh', max: 'max' }), 'xhigh', 'a raise lands inside the range');
+  for (const from of EFFORT_LEVELS) {
+    const to = ladderRaise(from, ALL);
+    if (to) assert.equal(rank(to), rank(from) + 1, from);
+  }
+  assert.equal(MAX_RAISES, 2);
+});
+
+test('decision 7: exploration moves the start one level up or down inside medium..max, with probability p', () => {
+  // roll < p explores; coin < 0.5 is down
+  assert.equal(exploreStart('high', ALL, 0.1, 0.05, 0.2), 'medium');
+  assert.equal(exploreStart('high', ALL, 0.1, 0.05, 0.7), 'xhigh');
+  assert.equal(exploreStart('high', ALL, 0.1, 0.1, 0.7), null, 'roll ≥ p: no exploration');
+  assert.equal(exploreStart('high', ALL, 0, 0, 0.7), null, 'p 0 never explores');
+  assert.equal(exploreStart('medium', ALL, 1, 0.5, 0.2), null, 'below medium is outside the range');
+  assert.equal(exploreStart('max', ALL, 1, 0.5, 0.7), null, 'above max does not exist');
+  assert.equal(exploreStart('xhigh', ALL, 1, 0.5, 0.7), 'max');
+  assert.equal(exploreStart('high', UP_TO_HIGH, 1, 0.5, 0.7), null, 'the configured bounds hold');
+  assert.equal(exploreStart('low', ALL, 1, 0.5, 0.7), 'medium');
+  // equal odds: over a uniform coin, half the moves go each way
+  const moves = Array.from({ length: 100 }, (_, i) => exploreStart('high', ALL, 1, 0, (i + 0.5) / 100));
+  assert.equal(moves.filter((m) => m === 'medium').length, 50);
+  assert.equal(moves.filter((m) => m === 'xhigh').length, 50);
 });
 
 /* ---------- follow-up fault signal ---------- */
@@ -408,7 +318,7 @@ test('follow-up: shadow mode and the dissat ablation record the signal but never
     assert.equal(shadow.effort, 'medium');
     assert.deepEqual(shadow.followUp, { p: 0.99, threshold: 0.98, yes: true, prevMax: 'max', streak: 1, hiLosses: 1, advisor: false, shadow: true });
     setAblations(['dissat']);
-    assert.equal(policyVersion(), 'policy.v9-ablate:dissat');
+    assert.equal(policyVersion(), 'policy.v10-ablate:dissat');
     const ablated = followUpEffort(fu());
     assert.equal(ablated.effort, 'medium');
     assert.equal(ablated.followUp.shadow, true);
