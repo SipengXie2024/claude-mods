@@ -1,0 +1,8 @@
+{
+  "name": "math-render",
+  "version": "0.1.0",
+  "description": "Draws the TeX math in assistant replies as Unicode in the terminal: inline formulas on one line, display formulas as character art.",
+  "author": {
+    "name": "sipeng"
+  }
+}

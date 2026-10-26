@@ -33,6 +33,11 @@
       "name": "html-plan",
       "source": "./mods/html-plan",
       "description": "html-plan with Chinese prose: CJK-aware linter, Chinese UI and response template under <html lang=\"zh\">."
+    },
+    {
+      "name": "math-render",
+      "source": "./mods/math-render",
+      "description": "Draws TeX math in assistant replies as Unicode in the terminal: inline formulas on one line, display formulas as character art."
     }
   ]
 }
