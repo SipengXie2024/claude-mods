@@ -533,6 +533,30 @@ describe('code changes by Bash', () => {
     expect(sent(w).at(-1)).toBe('xhigh')
   })
 
+  test('npm test fails, then `sed -i … && npm test` fails with add.js rewritten: the sed ran, so the failure is a repeat (high → xhigh)', async ($, on) => {
+    const w = world(on, { model: MYTHOS, tool: (e) => sedWrites(w, e) })
+    await failRunFail($, w, "sed -i 's/a - b/a * b/' add.js && npm test", MYTHOS, true)
+    expect(w.mtimes.get('/repo/add.js')).toBe(1_000)
+    // the plain rerun after it changed nothing more: no second raise
+    expect(rows(w, 'check').map((r) => r.outcome)).toEqual(['first-failure', 'repeat-failure', 'rerun-failure'])
+    expect(sent(w)).toEqual(['high', 'high', 'xhigh', 'xhigh'])
+  })
+
+  test('the same with add.js unchanged (the sed failed, npm test never ran): no change, a rerun', async ($, on) => {
+    const w = world(on, { model: MYTHOS })
+    await failRunFail($, w, "sed -i 's/a - b/a * b/' add.js && npm test", MYTHOS, true)
+    expect(w.stats).toEqual(['/repo/add.js'])
+    expect(rows(w, 'check').map((r) => r.outcome)).toEqual(['first-failure', 'rerun-failure', 'rerun-failure'])
+    expect(sent(w)).toEqual(['high', 'high', 'high', 'high'])
+  })
+
+  test('a failed `sed -i … && npm test` whose file cannot be named is no change: nothing tells who failed', async ($, on) => {
+    const w = world(on, { model: MYTHOS })
+    await failRunFail($, w, `sed -i 's/a - b/a * b/' "$F" && npm test`, MYTHOS, true)
+    expect(w.stats).toEqual([])
+    expect(rows(w, 'check').map((r) => r.outcome)).toEqual(['first-failure', 'rerun-failure', 'rerun-failure'])
+  })
+
   test('a check that writes its output to a file is no change', async ($, on) => {
     const w = world(on, { model: MYTHOS })
     await failRunFail($, w, 'npm run build > build.log 2>&1', MYTHOS)

@@ -610,23 +610,29 @@ interface BashCall {
 }
 
 /**
- * Whether a successful Bash command edited a file: some edit counts without a
- * look (remote, a file it cannot name, mv), or one of its files is missing,
- * not a regular file (a directory's time misses files changed inside it), or
- * modified since the call started. cp/mv/install count only into the
+ * Whether a Bash command edited a file. After a success: some edit counts
+ * without a look (remote, a file it cannot name, mv), or one of its files is
+ * missing, not a regular file (a directory's time misses files changed inside
+ * it), or modified since the call started. After a failure only the edits
+ * chained by `&&` into a check count (`sed -i … && npm test`: the failure is
+ * the edit's or the check's), and only when every one of their files is a
+ * regular file modified since the start; any it cannot look at leaves the
+ * failure unexplained, so nothing counts. cp/mv/install count only into the
  * session's project root or the directory the command ran in.
  */
-async function bashEdited($: $, call: BashCall): Promise<boolean> {
-  const plan = editPlan(call.targets, call.cwd, [call.root, call.cwd])
+async function bashEdited($: $, call: BashCall, failed: boolean): Promise<boolean> {
+  const plan = editPlan(failed ? call.targets.filter((t) => t.beforeCheck) : call.targets, call.cwd, [call.root, call.cwd])
   if (!plan) return false
-  if (plan.unchecked) return true
+  if (plan.unchecked) return !failed
   // Whole seconds: a file system that keeps only those, or the kernel's coarse clock, can stamp a write made after the start a little before it.
   const since = Math.floor(call.at / 1000) * 1000
   for (const path of plan.files) {
     const stat = await $.fs.stat(path).catch(() => null)
-    if (!stat || stat.kind !== 'file' || stat.mtimeMs >= since) return true
+    const changed = stat?.kind === 'file' && stat.mtimeMs >= since
+    if (!failed && (changed || stat?.kind !== 'file')) return true
+    if (failed && !changed) return false
   }
-  return false
+  return failed
 }
 
 /** Feed one finished tool call to the loop's ladder: code changes, and each check's exit code. */
@@ -643,8 +649,8 @@ async function noteToolResult($: $, loop: Loop, key: string, e: Record<string, u
   // No exit code to judge: interrupted, or moved to the background.
   if (out.interrupted === true || out.backgroundTaskId !== undefined || out.timedOutAfterMs !== undefined) return
   const failed = r.isError === true
-  // A failed command changed nothing that counts, even when it wrote a file before failing.
-  if (!failed && bash && (await bashEdited($, bash))) loop.ladder.noteEdit()
+  // The change comes before the check it was chained into: `npm test` failing, then `sed -i … && npm test` failing, is a repeat.
+  if (bash && (await bashEdited($, bash, failed))) loop.ladder.noteEdit()
   const id = checkId(e.command)
   if (!id) return
   const note = loop.ladder.noteCheck(id, failed)

@@ -116,6 +116,27 @@ test('no edit: a check writing its output, patch or git that only reads, cp/mv/i
   ]) assert.equal(plan(command), null, command);
 });
 
+test('an edit chained by && into a later check is marked; one after the check, or joined by ; or ||, is not', () => {
+  const marked = (command: string) => editTargets(command).map((t) => t.beforeCheck);
+  assert.deepEqual(marked("sed -i 's/a - b/a * b/' add.js && npm test"), [true]);
+  assert.deepEqual(marked("cd /repo && sed -i 's/a/b/' a.js && cat a.js && npm test"), [true]);
+  assert.deepEqual(marked("(sed -i 's/a/b/' a.js) && npm test"), [true]);
+  assert.deepEqual(marked("bash -lc \"sed -i 's/a/b/' a.js && npm test\""), [true]);
+  assert.deepEqual(marked("echo x > a.txt && sed -i 's/a/b/' a.js && npm test"), [true, true]);
+  for (const command of [
+    "npm test && sed -i 's/a/b/' a.js", "sed -i 's/a/b/' a.js; npm test", "sed -i 's/a/b/' a.js || npm test",
+    "sed -i 's/a/b/' a.js && echo done", "sed -i 's/a/b/' a.js",
+  ]) assert.deepEqual(marked(command), [false], command);
+});
+
+test('a check\'s identity leaves out the edits chained into it: `sed -i … && npm test` is `npm test`', () => {
+  assert.equal(checkId("sed -i 's/a - b/a * b/' add.js && npm test"), checkId('npm test'));
+  assert.equal(checkId("cd /repo && sed -i 's/a/b/' a.js && npm test"), checkId('cd /repo && npm test'));
+  assert.equal(checkId("cat > a.js <<'EOF' && npm test -- --grep add\nexport const a = 1;\nEOF"), checkId('npm test -- --grep add'));
+  assert.notEqual(checkId("sed -i 's/a/b/' a.js && cat a.js && npm test"), checkId('npm test'));
+  assert.notEqual(checkId('cd a && npm test'), checkId('cd b && npm test'));
+});
+
 test('a real session\'s heredoc writes and its BSD sed -i are edits', () => {
   assert.deepEqual(plan(dateDebugCommands[0]!), files('/repo/package.json', '/repo/dates.js', '/repo/dates.test.js'));
   assert.deepEqual(plan(dateDebugCommands[1]!), files('/repo/dates.js'));

@@ -416,11 +416,20 @@ function judged(command: string, depth: number): boolean {
 /**
  * The identity of a Bash command that is a check: a hash of the full command,
  * whitespace normalized, so a later run of the same command is the same
- * check. Null when the command is not a check, or its exit code is not the
- * check's.
+ * check. Edits chained into the check by `&&` are left out: `sed -i … &&
+ * npm test` is `npm test` run after a change. Null when the command is not a
+ * check, or its exit code is not the check's.
  */
 export function checkId(command: string): string | null {
-  return judged(command, 0) ? hash20(command.replace(/\s+/g, ' ').trim()) : null;
+  return judged(command, 0) ? hash20(checkText(command).replace(/\s+/g, ' ').trim()) : null;
+}
+
+/** The command without its edits chained into a later check; rebuilt from its pipelines only when one is left out. */
+function checkText(command: string): string {
+  const groups = editGroups(command, { dir: '', remote: false }, 0).filter((g) => !g.pipeline.captured);
+  const kept = groups.filter((g) => g.check || !g.targets.some((t) => t.beforeCheck));
+  if (kept.length === groups.length) return command;
+  return kept.map((g) => `${g.pipeline.stages.join(' | ')} ${g.pipeline.seps.join(' ')}`).join(' ');
 }
 
 // ── Edits ──────────────────────────────────────────────────────────────────
@@ -442,6 +451,15 @@ export interface EditTarget {
   treeOnly: boolean;
   /** mv and `cp -p` keep the source's modification time: the file's own says nothing */
   keepsMtime: boolean;
+  /** chained by `&&` into a later check (`sed -i … && npm test`): when the command fails, the failure may be the edit's own */
+  beforeCheck: boolean;
+}
+
+/** One pipeline of a command and the edits it makes; `check` when it runs a check. */
+interface EditGroup {
+  pipeline: Pipeline;
+  check: boolean;
+  targets: EditTarget[];
 }
 
 /** Where a command's relative paths land: `dir` relative to the starting directory ('' itself, null unknown); nothing local behind ssh or exec. */
@@ -467,7 +485,7 @@ function named(word: string, at: Where): string | null {
 }
 
 const target = (word: string | null, at: Where, extra: Partial<EditTarget> = {}): EditTarget => ({
-  path: word === null ? null : named(word, at), treeOnly: false, keepsMtime: false, ...extra,
+  path: word === null ? null : named(word, at), treeOnly: false, keepsMtime: false, beforeCheck: false, ...extra,
 });
 
 /** A redirection or tee into a device (`/dev/null`, `/dev/stderr`) writes no file. */
@@ -692,18 +710,21 @@ function programEdits(w: readonly string[], at: Where, out: EditTarget[]): void 
   }
 }
 
-function editsIn(command: string, at: Where, depth: number, out: EditTarget[]): void {
+function editGroups(command: string, at: Where, depth: number): EditGroup[] {
+  const groups: EditGroup[] = [];
   // A `cd` moves the relative paths after it; one inside a subshell leaks past it, which can only leave a path unknown or wrong.
   let dir = at.dir;
   for (const p of parsePipelines(command.replace(ARITH_COMMAND, '$1:'))) {
     const check = p.stages.some((s) => runsCheck(s, depth));
+    const out: EditTarget[] = [];
+    groups.push({ pipeline: p, check, targets: out });
     for (const s of p.stages) {
       const w = program(s);
       const here: Where = { dir, remote: at.remote };
       const inner = w.length ? nested(w) : null;
       if (inner) {
         const remote = at.remote || inner.remote;
-        if (inner.command !== null && depth < MAX_DEPTH) editsIn(inner.command, { dir: remote ? null : dir, remote }, depth + 1, out);
+        if (inner.command !== null && depth < MAX_DEPTH) out.push(...editGroups(inner.command, { dir: remote ? null : dir, remote }, depth + 1).flatMap((g) => g.targets));
       } else if (check) continue;
       else if (w[0] === 'cd' || w[0] === 'pushd' || w[0] === 'popd') {
         const to = w[0] === 'popd' ? undefined : argWords(w.slice(1)).find((x) => !/^-[LPe@]+$/.test(x));
@@ -714,13 +735,22 @@ function editsIn(command: string, at: Where, depth: number, out: EditTarget[]): 
       for (const r of redirections(s)) if (r && !device(r)) out.push(target(r, here));
     }
   }
+  // Edits joined to a later check by `&&` alone (parentheses aside): a failure of the whole command may be theirs.
+  const top = groups.filter((g) => !g.pipeline.captured);
+  const chained = top.map((g) => g.pipeline.seps.includes('&&') && g.pipeline.seps.every((s) => s === '&&' || s === '(' || s === ')'));
+  top.forEach((g, k) => {
+    for (let m = k + 1; m < top.length && chained[m - 1]; m++) {
+      if (!top[m]!.check) continue;
+      for (const t of g.targets) t.beforeCheck = true;
+      break;
+    }
+  });
+  return groups;
 }
 
 /** The files a Bash command edits in place, as it names them (see the section comment); empty when it edits none. */
 export function editTargets(command: string): EditTarget[] {
-  const out: EditTarget[] = [];
-  editsIn(command, { dir: '', remote: false }, 0, out);
-  return out;
+  return editGroups(command, { dir: '', remote: false }, 0).flatMap((g) => g.targets);
 }
 
 /** A path made absolute against `cwd`, `.` and `..` folded. */
