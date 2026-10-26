@@ -47,6 +47,10 @@ interface World {
   clock: ReturnType<typeof mock.clock>
   /** the next Bash call's outcome */
   fail: boolean
+  /** files on disk, by absolute path: their modification time */
+  mtimes: Map<string, number>
+  /** the paths `$.fs.stat` was asked about */
+  stats: string[]
 }
 
 interface Opts {
@@ -77,12 +81,19 @@ export function stubJev(questions: string[], state: string): Answers {
 }
 
 function world(on: On, o: Opts = {}): World {
-  const w: World = { files: new Map(), appends: [], asks: [], steps: [], contexts: [], status: [], toasts: [], invalidates: 0, messages: [], clock: mock.clock(on, { now: 1_000 }), fail: false }
+  const w: World = { files: new Map(), appends: [], asks: [], steps: [], contexts: [], status: [], toasts: [], invalidates: 0, messages: [], clock: mock.clock(on, { now: 1_000 }), fail: false, mtimes: new Map(), stats: [] }
   if (o.env !== null) w.files.set(`${DIR}/.env`, o.env ?? ENV)
   mock.env(on, { HOME: '/home/u', JEV_OPUS_CONFIG_DIR: DIR })
   mock.store(on, o.store ?? {})
   on('fs.read', ($, e) => (w.files.has(e.path) ? { value: w.files.get(e.path)! } : { deny: `ENOENT ${e.path}` }))
   on('fs.write', ($, e) => (w.files.set(e.path, e.text), { value: undefined }))
+  on('fs.stat', ($, e) => {
+    w.stats.push(e.path)
+    const mtimeMs = w.mtimes.get(e.path)
+    return mtimeMs === undefined ? { deny: `ENOENT ${e.path}` } : { value: { kind: 'file' as const, size: 1, mtimeMs, isLink: false } }
+  })
+  on('session.cwd', () => ({ value: '/repo' }))
+  on('session.root', () => ({ value: '/repo' }))
   // The journal's append: `sh -c 'mkdir -p "$1" && cat >> "$2"' sh <dir> <file>` with the row on stdin.
   on('process.run', ($, e) => {
     w.appends.push({ argv: e.argv })
@@ -446,6 +457,88 @@ describe('the ladder', () => {
     await step($, 2, 'high', { model: MYTHOS })
     expect(sent(w)).toEqual(['high', 'high', 'high'])
     expect(rows(w, 'check').map((r) => r.outcome)).toEqual(['first-failure', 'rerun-failure'])
+  })
+})
+
+describe('code changes by Bash', () => {
+  const SED = "sed -i 's/return a - b;/return a * b;/' add.js"
+  /** sed rewrites add.js whenever it runs, as `sed -i … add.js missing.js` does before it fails on the missing file. */
+  const sedWrites = (w: World, e: any) => {
+    if (e.tool === 'Bash' && e.command.startsWith('sed -i')) w.mtimes.set('/repo/add.js', w.clock.now())
+    return undefined
+  }
+
+  /** A prompt, then npm test failing, the command, and npm test failing again, each followed by the next request. */
+  async function failRunFail($: any, w: World, command: string, model: string, fail = false): Promise<void> {
+    w.mtimes.set('/repo/add.js', 0)
+    await submit($, 'fix add() so its test passes')
+    await step($, 0, 'high', { model })
+    await bash(w, $, 'npm test', true)
+    await step($, 1, 'high', { model })
+    await bash(w, $, command, fail)
+    await step($, 2, 'high', { model })
+    await bash(w, $, 'npm test', true)
+    await step($, 3, 'high', { model })
+  }
+
+  test('npm test fails, a sed -i rewrites add.js, npm test fails again: on Mythos the next request raises high → xhigh', async ($, on) => {
+    const w = world(on, { model: MYTHOS, tool: (e) => sedWrites(w, e) })
+    await failRunFail($, w, SED, MYTHOS)
+    expect(sent(w)).toEqual(['high', 'high', 'high', 'xhigh'])
+    expect(rows(w, 'check').map((r) => r.outcome)).toEqual(['first-failure', 'repeat-failure'])
+    expect(w.stats).toEqual(['/repo/add.js'])
+    // A code change writes no journal row, from the Edit tool or from Bash.
+    expect(journal(w).map((r) => r.event)).toEqual(['prompt', 'step', 'check', 'check', 'step'])
+  })
+
+  test('the same on Opus: nothing moves mid-loop, the turn ends carrying the check, and the next "继续" starts at xhigh', async ($, on) => {
+    const w = world(on, { tool: (e) => sedWrites(w, e) })
+    await failRunFail($, w, SED, OPUS)
+    expect(sent(w)).toEqual(['high', 'high', 'high', 'high'])
+    await complete($)
+    expect(rows(w, 'outcome')[0]).toMatchObject({ carry: 1, checks: { run: 2, passed: 0, failed: 2 } })
+    say(w, 'user', 'fix add() so its test passes'); say(w, 'assistant', 'still failing')
+    await submit($, '继续')
+    expect(rows(w, 'prompt').at(-1)).toMatchObject({ effort: 'xhigh', carry: { from: 'high', to: 'xhigh', checks: 1 } })
+  })
+
+  test('a sed that exits non-zero is no change, though it rewrote add.js before failing', async ($, on) => {
+    const w = world(on, { model: MYTHOS, tool: (e) => sedWrites(w, e) })
+    await failRunFail($, w, `${SED} missing.js`, MYTHOS, true)
+    expect(w.mtimes.get('/repo/add.js')).toBe(1_000)
+    expect(sent(w)).toEqual(['high', 'high', 'high', 'high'])
+    expect(rows(w, 'check').map((r) => r.outcome)).toEqual(['first-failure', 'rerun-failure'])
+    expect(w.stats).toEqual([])
+  })
+
+  test('a successful command whose files kept their old time is no change', async ($, on) => {
+    const w = world(on, { model: MYTHOS })
+    await failRunFail($, w, 'git checkout -- add.js', MYTHOS)
+    expect(w.stats).toEqual(['/repo/add.js'])
+    expect(sent(w)).toEqual(['high', 'high', 'high', 'high'])
+    expect(rows(w, 'check').map((r) => r.outcome)).toEqual(['first-failure', 'rerun-failure'])
+  })
+
+  test('a file the stat cannot find (moved by the same command) counts; relative paths follow the command\'s cd', async ($, on) => {
+    const w = world(on, { model: MYTHOS })
+    await failRunFail($, w, "cd lib && sed -i 's/x/y/' old.js && git mv old.js add.js", MYTHOS)
+    expect(w.stats).toEqual(['/repo/lib/old.js'])
+    expect(sent(w).at(-1)).toBe('xhigh')
+  })
+
+  test('a remote edit counts with no stat', async ($, on) => {
+    const w = world(on, { model: MYTHOS })
+    await failRunFail($, w, `ssh box "sed -i 's/return a - b;/return a * b;/' /srv/app/add.js"`, MYTHOS)
+    expect(w.stats).toEqual([])
+    expect(sent(w).at(-1)).toBe('xhigh')
+  })
+
+  test('a check that writes its output to a file is no change', async ($, on) => {
+    const w = world(on, { model: MYTHOS })
+    await failRunFail($, w, 'npm run build > build.log 2>&1', MYTHOS)
+    expect(w.stats).toEqual([])
+    expect(sent(w)).toEqual(['high', 'high', 'high', 'high'])
+    expect(rows(w, 'check').map((r) => r.outcome)).toEqual(['first-failure', 'pass', 'rerun-failure'])
   })
 })
 

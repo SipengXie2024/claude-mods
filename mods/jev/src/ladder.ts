@@ -16,7 +16,7 @@ export type CheckOutcome =
   | 'pass';
 
 interface CheckRecord {
-  /** an Edit/Write/MultiEdit/NotebookEdit succeeded since the last failure */
+  /** a code change (an Edit/Write/MultiEdit/NotebookEdit, or a Bash command that edited files) succeeded since the last failure */
   editedSince: boolean;
   failures: number;
   repeats: number;

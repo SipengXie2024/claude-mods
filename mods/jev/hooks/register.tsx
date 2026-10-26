@@ -1,6 +1,6 @@
 import type { EngineInterface, Register } from 'claude-code'
 import { applyPolicyConfig, modConfig, parseEnvFile, type ModConfig } from '../src/config'
-import { checkId } from '../src/describe'
+import { checkId, editPlan, editTargets, type EditTarget } from '../src/describe'
 import { clampEffort, describeBounds, effortAuto, effortTag, isEffort, maxEffort, rank, shift, type Effort } from '../src/effort'
 import { followUpSummary, isHumanPrompt, previousPromptIndex, unwrapChannel, userText, type Message } from '../src/followup'
 import { JevClient, JevFallback, type JevIo, type JevSource } from '../src/jev'
@@ -601,8 +601,36 @@ async function decideStep($: $, e: { index: number; model: string; effort?: unkn
   return pinned ? undefined : loop.effort ?? undefined
 }
 
+/** A Bash call that may edit files: what it names, and its start time and directory, read before it ran. */
+interface BashCall {
+  targets: EditTarget[]
+  at: number
+  cwd: string
+  root: string
+}
+
+/**
+ * Whether a successful Bash command edited a file: some edit counts without a
+ * look (remote, a file it cannot name, mv), or one of its files is missing,
+ * not a regular file (a directory's time misses files changed inside it), or
+ * modified since the call started. cp/mv/install count only into the
+ * session's project root or the directory the command ran in.
+ */
+async function bashEdited($: $, call: BashCall): Promise<boolean> {
+  const plan = editPlan(call.targets, call.cwd, [call.root, call.cwd])
+  if (!plan) return false
+  if (plan.unchecked) return true
+  // Whole seconds: a file system that keeps only those, or the kernel's coarse clock, can stamp a write made after the start a little before it.
+  const since = Math.floor(call.at / 1000) * 1000
+  for (const path of plan.files) {
+    const stat = await $.fs.stat(path).catch(() => null)
+    if (!stat || stat.kind !== 'file' || stat.mtimeMs >= since) return true
+  }
+  return false
+}
+
 /** Feed one finished tool call to the loop's ladder: code changes, and each check's exit code. */
-async function noteToolResult($: $, loop: Loop, key: string, e: Record<string, unknown>, r: Record<string, unknown>): Promise<void> {
+async function noteToolResult($: $, loop: Loop, key: string, e: Record<string, unknown>, r: Record<string, unknown>, bash: BashCall | null): Promise<void> {
   // A denied call ran nothing.
   if (typeof r.deny === 'string') return
   const tool = String(e.tool)
@@ -611,12 +639,14 @@ async function noteToolResult($: $, loop: Loop, key: string, e: Record<string, u
     return
   }
   if (tool !== 'Bash' || typeof e.command !== 'string') return
-  const id = checkId(e.command)
-  if (!id) return
   const out = (r.result ?? {}) as { interrupted?: unknown; backgroundTaskId?: unknown; timedOutAfterMs?: unknown }
   // No exit code to judge: interrupted, or moved to the background.
   if (out.interrupted === true || out.backgroundTaskId !== undefined || out.timedOutAfterMs !== undefined) return
   const failed = r.isError === true
+  // A failed command changed nothing that counts, even when it wrote a file before failing.
+  if (!failed && bash && (await bashEdited($, bash))) loop.ladder.noteEdit()
+  const id = checkId(e.command)
+  if (!id) return
   const note = loop.ladder.noteCheck(id, failed)
   loop.tally.checks += 1
   if (failed) loop.tally.failed += 1
@@ -671,12 +701,16 @@ export const register: Register = (on) => {
   }).catch(($, e, next) => next(e))
 
   on('tool.call', async ($, e, next) => {
-    const r = await next(e)
     const key = e.agentId ?? MAIN
+    const command = (e as { command?: unknown }).command
+    const targets = e.tool === 'Bash' && typeof command === 'string' && loops.get(key)?.effort ? editTargets(command) : []
+    // Read before the call runs: what it edits is modified after its start, and a `cd` in it moves the session's directory.
+    const bash = targets.length ? { targets, at: await $.clock.now(), cwd: await $.session.cwd(), root: await $.session.root() } : null
+    const r = await next(e)
     const loop = loops.get(key)
     if (loop && loop.effort !== null) {
       try {
-        await noteToolResult($, loop, key, e as unknown as Record<string, unknown>, r as unknown as Record<string, unknown>)
+        await noteToolResult($, loop, key, e as unknown as Record<string, unknown>, r as unknown as Record<string, unknown>, bash)
       } catch (err) {
         $.ui.log(`jev: tool result not noted (${(err as Error)?.name ?? 'error'})`, { to: 'debug' })
       }
