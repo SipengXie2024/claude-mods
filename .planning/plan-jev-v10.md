@@ -38,10 +38,17 @@ Decisions settled with the user in a /grill-me session on 2026-10-26. Evidence: 
    that is a whole word test|build|lint|check|typecheck|verify|ci, or that word before
    `:`), including the remote command inside `ssh … '<cmd>'` and `docker exec … <cmd>`.
    Failure = non-zero exit code only; output text never counts. A command with a pipe or
-   `|| true` / `|| :` is not judged. Identity = hash of the full normalized command, never
-   the clipped summary. Denied calls, WebFetch, lookups and one-off scripts never affect
-   effort. "Changed code since" = an Edit/Write/MultiEdit/NotebookEdit succeeded after the
-   failure.
+   `|| true` / `|| :` is not judged. Identity = hash of the full normalized command with
+   any file-edit segments chained by `&&` before the check removed (so `sed -i … && npm test`
+   is the same check as `npm test`), never the clipped summary. Denied calls, WebFetch,
+   lookups and one-off scripts never affect effort. "Changed code since" = after the failure,
+   an Edit/Write/MultiEdit/NotebookEdit succeeded, or a successful Bash command edited files
+   (`sed -i`, `perl -i`, redirection or `tee` into a file, heredoc into a file, `patch`,
+   `git apply`/`am`, `git checkout -- <path>`, `git restore`, `cp`/`mv`/`install` into the
+   work tree, also inside `sh -c`, `ssh`, `docker exec`, `xargs`, `find -exec`), with local
+   target paths confirmed by `$.fs.stat` mtime at or after the call's start. An edit chained
+   by `&&` into a failing check counts only when every named local target's mtime confirms
+   it. Inline interpreter scripts that write files are not recognized.
 5. **/effort pins until cancelled.** A hand-set /effort holds for the session until the
    person changes it again or writes `[effort auto]`. A /model switch is not a hand-set
    effort: re-baseline the session effort on model change (PostModelSwitch and whenever the
