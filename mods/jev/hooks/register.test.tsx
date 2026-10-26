@@ -407,6 +407,17 @@ describe('the ladder', () => {
     expect(rows(w, 'check').map((r) => r.outcome)).toEqual(['pass'])
   })
 
+  test('B9: words in a failing check\'s command or output ("invalid credentials", "connection refused") do not make it an environment blocker', async ($, on) => {
+    const w = world(on, { model: MYTHOS, tool: (e) => (e.tool === 'Bash' && w.fail
+      ? { isError: true, result: 'Exit code 1', text: 'not ok 1 - rejects a bad password: connection refused\n# fail 1\nExit code 1' }
+      : undefined) })
+    await submit($, 'fix the login test')
+    await step($, 0, 'high', { model: MYTHOS })
+    await failEditFail($, w, 1, MYTHOS, 'npm test -- --grep "invalid credentials"')
+    expect(rows(w, 'check').map((r) => r.outcome)).toEqual(['first-failure', 'repeat-failure'])
+    expect(sent(w).at(-1)).toBe('xhigh')
+  })
+
   test('B1: WebFetch never counts, whatever its HTTP status', async ($, on) => {
     const w = world(on, { model: MYTHOS, tool: (e) => (e.tool === 'WebFetch'
       ? { result: { bytes: 4, code: 200, codeText: 'OK', result: 'docs', durationMs: 5, url: e.url }, text: 'docs' }
