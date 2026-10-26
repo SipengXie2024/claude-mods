@@ -199,6 +199,10 @@ export interface JevClientOptions {
 }
 
 const TIMEOUT = 'timeout' as const;
+const SLEEP_REJECTED = 'sleep-rejected' as const;
+
+/** The primary endpoint's deadline (JEV_DEADLINE_MS): StartLux answers 89% of asks within 4 s, 95.5% within 8 s. */
+export const DEFAULT_DEADLINE_MS = 6_000;
 
 function hostOf(url: string): string {
   try {
@@ -232,7 +236,7 @@ export class JevClient {
     this.baseUrl = opts.baseUrl;
     this.label = opts.label ?? hostOf(opts.baseUrl);
     this.model = opts.model ?? 'jev-latest';
-    this.deadlineMs = opts.deadlineMs ?? 2_500;
+    this.deadlineMs = opts.deadlineMs ?? DEFAULT_DEADLINE_MS;
     this.breakerThreshold = Math.max(1, opts.breakerThreshold ?? 3);
     this.breakerCooldownMs = opts.breakerCooldownMs ?? 30_000;
     this.confidenceMode = opts.confidence ?? 'recompute';
@@ -263,23 +267,33 @@ export class JevClient {
   }
 
   async ask(state: string, questions: Record<string, JevQuestion>, io: JevIo): Promise<JevResult> {
-    const start = await io.now();
     if (!this.enabled) {
       return { answers: {}, signals: missingSignals(questions), failed: true, error: 'JEV_API_KEY not set', latencyMs: 0, inputTokens: 0, provider: this.label };
     }
+    const start = await io.now();
     // Circuit breaker: while open, fail without fetching. After the cooldown,
     // the first real call becomes the single recovery probe.
     if (this.breakerOpenUntil > 0 && (start < this.breakerOpenUntil || this.probing)) {
       return { answers: {}, signals: missingSignals(questions), failed: true, error: 'circuit open', circuitOpen: true, latencyMs: 0, inputTokens: 0, provider: this.label };
     }
-    if (this.breakerOpenUntil > 0) this.probing = true;
+    const probe = this.breakerOpenUntil > 0;
+    if (probe) this.probing = true;
+    // A probe that ends without noteSuccess or noteFailure (its hook's clock
+    // rejected) must not leave the breaker probing, and so open, for good.
+    try {
+      return await this.attempt(state, questions, io, start);
+    } finally {
+      if (probe) this.probing = false;
+    }
+  }
 
+  private async attempt(state: string, questions: Record<string, JevQuestion>, io: JevIo, start: number): Promise<JevResult> {
     let lastError = 'request failed';
     let signals = missingSignals(questions);
     // $.http.fetch takes no signal: the deadline is a race, and a fetch that
     // loses it is left to finish on its own, its answer unused.
     const stop = new AbortController();
-    const deadline: Promise<typeof TIMEOUT | null> = io.sleep(this.deadlineMs, stop.signal).then(() => TIMEOUT, () => null);
+    const deadline: Promise<typeof TIMEOUT | typeof SLEEP_REJECTED> = io.sleep(this.deadlineMs, stop.signal).then(() => TIMEOUT, () => SLEEP_REJECTED);
     try {
       const fetched = io.fetch(this.baseUrl, {
         method: 'POST',
@@ -288,8 +302,10 @@ export class JevClient {
       });
       fetched.catch(() => {});
       const res = await Promise.race([fetched, deadline]);
-      if (res === TIMEOUT || res === null) {
+      if (res === TIMEOUT) {
         lastError = 'deadline exceeded';
+      } else if (res === SLEEP_REJECTED) {
+        lastError = 'clock sleep rejected';
       } else if (res.status === 429 || res.status >= 500) {
         lastError = `Jev HTTP ${res.status}`;
       } else if (!res.ok) {

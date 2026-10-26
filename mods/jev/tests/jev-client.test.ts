@@ -1,6 +1,13 @@
 import assert, { test } from './assert';
-import { JevClient, JevFallback, parseAnswers, validateAnswers, type JevIo } from '../src/jev';
-import { STEP_QUESTIONS, TASK_QUESTIONS } from '../src/questions';
+import { DEFAULT_DEADLINE_MS, JevClient, JevFallback, parseAnswers, validateAnswers, type JevIo, type JevQuestion } from '../src/jev';
+import { TASK_QUESTIONS } from '../src/questions';
+
+/** A question set with one question of each type (choice, score, noul), the shape the step questions of policy.v9 had. */
+const STEP_QUESTIONS = {
+  phase: { type: 'choice', instructions: 'Which phase?', criteria: { exploring: 'e', implementing: 'i', diagnosing: 'd', verifying: 'v', finishing: 'f' } },
+  step_difficulty: { type: 'score', instructions: 'How hard?', criteria: ['0', '1', '2', '3', '4'] },
+  stuck: { type: 'noul', instructions: 'Stuck?' },
+} satisfies Record<string, JevQuestion>;
 
 // Legacy lenient parser — still exported for scripted JevLike stubs elsewhere.
 test('parseAnswers clamps values and rejects unknown choices', () => {
@@ -326,4 +333,37 @@ test('JevFallback: when both fail the result is the fallback failure, its error 
   assert.equal(r.fallbackFrom, 'Jev HTTP 500');
   assert.equal(r.provider, '127.0.0.1:18016');
   assert.deepEqual(r.signals, { stuck: 'missing' });
+});
+
+test('the breaker resets its probe even when the probing hook\'s clock rejects', async () => {
+  const io = fakeIo(() => (io.hits <= 1 ? { status: 503, text: 'down' } : { body: { answers: { stuck: { noul: 0.1 } } } }));
+  const jev = new JevClient({ apiKey: 'k', baseUrl: 'http://jev.test', breakerThreshold: 1, breakerCooldownMs: 30_000 });
+  assert.equal((await jev.ask('s', STUCK, io)).failed, true);
+  io.t += 31_000;
+  // The probe's hook ends while it waits: its clock rejects after the first read.
+  let reads = 0;
+  const dying: JevIo = { fetch: (url, init) => io.fetch(url, init), sleep: (ms, signal) => io.sleep(ms, signal), now: async () => { if (++reads > 1) throw new Error('hook ended'); return io.t; } };
+  const probe = await jev.ask('s', STUCK, dying).then(() => 'answered', (e: Error) => e.message);
+  assert.equal(probe, 'hook ended');
+  for (const later of [62_000, 3_600_000]) {
+    io.t = 10_000 + later;
+    const r = await jev.ask('s', STUCK, io);
+    assert.equal(r.circuitOpen, undefined, `t+${later}`);
+    assert.equal(r.failed, false, `t+${later}`);
+  }
+});
+
+test('a rejected clock sleep is its own error, never a deadline', async () => {
+  const io = fakeIo(() => 'hang');
+  const rejecting: JevIo = { fetch: (url, init) => io.fetch(url, init), now: () => io.now(), sleep: () => Promise.reject(new Error('hook ended')) };
+  const r = await new JevClient({ apiKey: 'k', baseUrl: 'http://jev.test' }).ask('s', STUCK, rejecting);
+  assert.equal(r.failed, true);
+  assert.equal(r.error, 'clock sleep rejected');
+});
+
+test('decision 6: the primary deadline defaults to 6000 ms', async () => {
+  assert.equal(DEFAULT_DEADLINE_MS, 6_000);
+  const r = await new JevClient({ apiKey: 'k', baseUrl: 'http://jev.test' }).ask('s', STUCK, fakeIo(() => 'hang', { deadlineFires: true }));
+  assert.equal(r.latencyMs, 6_000);
+  assert.equal(r.error, 'deadline exceeded');
 });
