@@ -38,6 +38,11 @@
       "name": "math-render",
       "source": "./mods/math-render",
       "description": "Draws TeX math in assistant replies as Unicode in the terminal: inline formulas on one line, display formulas as character art."
+    },
+    {
+      "name": "reply-language",
+      "source": "./mods/reply-language",
+      "description": "Restate the settings' reply language beside every prompt, so long English context does not pull replies into English."
     }
   ]
 }

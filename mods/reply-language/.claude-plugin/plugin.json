@@ -1,0 +1,8 @@
+{
+  "name": "reply-language",
+  "version": "0.1.0",
+  "description": "Restate the settings' reply language beside every prompt, so long English context does not pull replies into English.",
+  "author": {
+    "name": "sipeng"
+  }
+}
