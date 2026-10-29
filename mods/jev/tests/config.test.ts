@@ -87,6 +87,18 @@ test('hash20: stable 20-hex identities that differ for nearby inputs', () => {
   assert.notEqual(hash20('测试'), hash20('测验'));
 });
 
+test('modConfig: JEV_FALLBACK_FORMAT=openai-decisions selects the Decisions wire format', () => {
+  const c = modConfig({
+    JEV_API_KEY: 'k1', JEV_BASE_URL: 'http://127.0.0.1:18016/v1/systemone',
+    JEV_ALLOWED_HOSTS: 'api.openai.com',
+    JEV_FALLBACK_API_KEY: 'k2', JEV_FALLBACK_BASE_URL: 'https://api.openai.com/v1/decisions', JEV_FALLBACK_MODEL: 'gpt-6-luna', JEV_FALLBACK_FORMAT: 'openai-decisions',
+  });
+  assert.equal(c.jev?.format, 'systemone');
+  assert.equal(c.jevFallback?.format, 'openai-decisions');
+  assert.equal(c.jevFallback?.model, 'gpt-6-luna');
+  assert.equal(modConfig({ JEV_API_KEY: 'k1', JEV_BASE_URL: 'http://127.0.0.1:1/v1', JEV_FORMAT: 'openai' }).jev?.format, 'systemone', 'only the exact name selects it');
+});
+
 test('modConfig: JEV_FALLBACK_* names a second endpoint under the same host rule', () => {
   const both = modConfig({
     JEV_API_KEY: 'k1', JEV_BASE_URL: 'https://maas-api.antdigital.com/v1/systemone', JEV_MODEL: 'lingdt-decision-1.0', JEV_DEADLINE_MS: '3000',

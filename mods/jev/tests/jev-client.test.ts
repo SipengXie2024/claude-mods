@@ -1,5 +1,5 @@
 import assert, { test } from './assert';
-import { DEFAULT_DEADLINE_MS, JevClient, JevFallback, parseAnswers, validateAnswers, type JevIo, type JevQuestion } from '../src/jev';
+import { DEFAULT_DEADLINE_MS, JevClient, JevFallback, decisionsAnswers, decisionsRequest, parseAnswers, validateAnswers, type JevIo, type JevQuestion } from '../src/jev';
 import { TASK_QUESTIONS } from '../src/questions';
 
 /** A question set with one question of each type (choice, score, noul), the shape the step questions of policy.v9 had. */
@@ -103,6 +103,33 @@ test('validateAnswers keeps server confidence without probabilities or in server
     { confidence: 'server' },
   );
   assert.equal(server.answers.phase?.kind === 'choice' && server.answers.phase.confidence, 0.7);
+});
+
+// A response api.openai.com/v1/decisions (gpt-6-luna) returned on 2026-10-29 to
+// decisionsRequest(state, 'gpt-6-luna', TASK_QUESTIONS), recorded as is.
+const DECISIONS_TASK_RESPONSE = {"model":"gpt-6-luna","answers":[{"type":"choice","name":"task_type","choice":"code","probabilities":[{"value":"chat","probability":0.0},{"value":"explain","probability":0.0},{"value":"operate","probability":0.0},{"value":"write","probability":0.0},{"value":"code","probability":1.0},{"value":"research","probability":0.0}],"confidence":1.0},{"type":"predicate","name":"deep","probability":0.9}],"usage":{"input_tokens":996,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens":0,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":996}};
+
+test('decisionsRequest: noul as predicate, choice criteria as choices in the question set order, score criteria as levels', () => {
+  const req = decisionsRequest('USER REQUEST:\nfix it', 'gpt-6-luna', { ...TASK_QUESTIONS, step_difficulty: STEP_QUESTIONS.step_difficulty }) as {
+    model: string; input: string; questions: Array<Record<string, unknown>>;
+  };
+  assert.equal(req.model, 'gpt-6-luna');
+  assert.equal(req.input, 'USER REQUEST:\nfix it');
+  assert.deepEqual(req.questions.map((q) => [q.name, q.type]), [['task_type', 'choice'], ['deep', 'predicate'], ['step_difficulty', 'score']]);
+  const choices = req.questions[0]!.choices as Array<{ value: string; description: string }>;
+  assert.deepEqual(choices.map((c) => c.value), ['chat', 'explain', 'operate', 'write', 'code', 'research']);
+  assert.equal(choices[4]!.description, TASK_QUESTIONS.task_type.criteria.code);
+  assert.equal(req.questions[1]!.instructions, TASK_QUESTIONS.deep.instructions);
+  assert.deepEqual(req.questions[2]!.levels, ['0', '1', '2', '3', '4'].map((c) => ({ label: c, description: c })));
+});
+
+test('decisionsAnswers: a recorded Decisions response validates as System One answers', () => {
+  const { answers, signals } = validateAnswers(decisionsAnswers(DECISIONS_TASK_RESPONSE.answers), TASK_QUESTIONS);
+  assert.deepEqual(signals, { task_type: 'valid', deep: 'valid' });
+  assert.equal(answers.task_type?.kind === 'choice' && answers.task_type.choice, 'code');
+  assert.equal(answers.task_type?.kind === 'choice' && answers.task_type.probabilities.code, 1);
+  assert.deepEqual(answers.deep, { kind: 'noul', p: 0.9 });
+  assert.deepEqual(decisionsAnswers(undefined), {}, 'no answers array: every question missing');
 });
 
 // The client's network and clock come from the hook that asks (JevIo); these

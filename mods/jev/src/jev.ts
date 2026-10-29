@@ -4,6 +4,9 @@
  * Wire format:
  *   POST { state, model, questions: { name: { type, instructions, criteria? } } }
  *   →   { model, answers: { name: {...} }, usage: { input_tokens, output_tokens } }
+ * An endpoint with format 'openai-decisions' speaks OpenAI's Decisions API
+ * (POST /v1/decisions) instead; decisionsRequest and decisionsAnswers
+ * translate at the wire, so everything above the client sees System One.
  *
  * Never throws: any transport/validation failure yields `failed: true` with
  * per-question `signals`, so callers can fall back to heuristics. One overall
@@ -170,6 +173,48 @@ export function validateAnswers(
   return { answers, signals };
 }
 
+/** The request and response shape an endpoint speaks (JEV_FORMAT / JEV_FALLBACK_FORMAT). */
+export type WireFormat = 'systemone' | 'openai-decisions';
+
+/**
+ * A System One ask as an OpenAI Decisions request: noul becomes a predicate,
+ * a choice's criteria become its choices in the order the question set lists
+ * them (the order shifts the probabilities), a score's criteria its levels.
+ */
+export function decisionsRequest(state: string, model: string, questions: Record<string, JevQuestion>): unknown {
+  return {
+    model,
+    input: state,
+    questions: Object.entries(questions).map(([name, q]) =>
+      q.type === 'noul' ? { name, type: 'predicate', instructions: q.instructions }
+        : q.type === 'choice' ? { name, type: 'choice', instructions: q.instructions, choices: Object.entries(q.criteria).map(([value, description]) => ({ value, description })) }
+          : { name, type: 'score', instructions: q.instructions, levels: q.criteria.map((c) => ({ label: c, description: c })) }),
+  };
+}
+
+/** `[{ value, probability }]` as `{ value: probability }`; anything else is passed on for validateAnswers to reject. */
+function probabilityMap(raw: unknown): unknown {
+  if (!Array.isArray(raw)) return raw;
+  return Object.fromEntries(raw.map((p: { value?: unknown; probability?: unknown }) => [String(p?.value), p?.probability]));
+}
+
+/**
+ * OpenAI Decisions answers (an array, one entry per question) in System
+ * One's shape, for validateAnswers. A refusal or an unknown answer type is
+ * left out, so its question counts as missing.
+ */
+export function decisionsAnswers(raw: unknown): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (!Array.isArray(raw)) return out;
+  for (const a of raw as Array<Record<string, unknown> | null>) {
+    if (!a || typeof a.name !== 'string') continue;
+    if (a.type === 'predicate') out[a.name] = { noul: a.probability };
+    else if (a.type === 'choice') out[a.name] = { choice: a.choice, confidence: a.confidence, probabilities: probabilityMap(a.probabilities) };
+    else if (a.type === 'score') out[a.name] = { score: a.score, confidence: a.confidence, probabilities: probabilityMap(a.probabilities) };
+  }
+  return out;
+}
+
 function missingSignals(questions: Record<string, JevQuestion>): Record<string, JevSignal> {
   return Object.fromEntries(Object.keys(questions).map((k) => [k, 'missing' as const]));
 }
@@ -196,6 +241,8 @@ export interface JevClientOptions {
   breakerCooldownMs?: number;
   /** Where answer confidence comes from (JEV_CONFIDENCE). */
   confidence?: ConfidenceMode;
+  /** The wire format the endpoint speaks (default 'systemone'). */
+  format?: WireFormat;
 }
 
 const TIMEOUT = 'timeout' as const;
@@ -227,6 +274,7 @@ export class JevClient {
   private readonly breakerThreshold: number;
   private readonly breakerCooldownMs: number;
   private readonly confidenceMode: ConfidenceMode;
+  private readonly format: WireFormat;
   private consecutiveFailures = 0;
   private breakerOpenUntil = 0;
   private probing = false;
@@ -240,6 +288,7 @@ export class JevClient {
     this.breakerThreshold = Math.max(1, opts.breakerThreshold ?? 3);
     this.breakerCooldownMs = opts.breakerCooldownMs ?? 30_000;
     this.confidenceMode = opts.confidence ?? 'recompute';
+    this.format = opts.format ?? 'systemone';
   }
 
   get enabled(): boolean {
@@ -298,7 +347,7 @@ export class JevClient {
       const fetched = io.fetch(this.baseUrl, {
         method: 'POST',
         headers: { Authorization: `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ state, model: this.model, questions }),
+        body: JSON.stringify(this.format === 'openai-decisions' ? decisionsRequest(state, this.model, questions) : { state, model: this.model, questions }),
       });
       fetched.catch(() => {});
       const res = await Promise.race([fetched, deadline]);
@@ -312,7 +361,8 @@ export class JevClient {
         lastError = `Jev HTTP ${res.status}: ${res.text.slice(0, 200)}`;
       } else {
         const data = JSON.parse(res.text) as { answers?: unknown; usage?: { input_tokens?: number } };
-        const parsed = validateAnswers(data.answers, questions, { confidence: this.confidenceMode });
+        const raw = this.format === 'openai-decisions' ? decisionsAnswers(data.answers) : data.answers;
+        const parsed = validateAnswers(raw, questions, { confidence: this.confidenceMode });
         signals = parsed.signals;
         const inputTokens = data.usage?.input_tokens ?? 0;
         const latencyMs = Math.max(0, (await io.now()) - start);

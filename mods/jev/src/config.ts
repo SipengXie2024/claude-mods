@@ -1,5 +1,5 @@
 import { isEffort, type Effort } from './effort';
-import { DEFAULT_DEADLINE_MS, type ConfidenceMode, type JevClientOptions } from './jev';
+import { DEFAULT_DEADLINE_MS, type ConfidenceMode, type JevClientOptions, type WireFormat } from './jev';
 import { DEEP_DEFAULTS, normalizeBounds, setAblations, setDeepThresholds, setDissatThreshold, type Bounds } from './policy';
 
 /**
@@ -90,7 +90,8 @@ function endpointHost(url: string): string {
 
 /**
  * One endpoint's client options from its key set: JEV_BASE_URL / JEV_API_KEY /
- * JEV_MODEL / JEV_DEADLINE_MS for the primary, the same names with a
+ * JEV_MODEL / JEV_DEADLINE_MS / JEV_FORMAT (`openai-decisions` for OpenAI's
+ * Decisions API, anything else System One) for the primary, the same names with a
  * JEV_FALLBACK_ prefix for the stand-in. Breaker and confidence settings are
  * shared. `refusedHost` is set when a key exists but the URL is not allowed.
  */
@@ -109,6 +110,7 @@ function endpoint(env: Record<string, string>, prefix: '' | 'FALLBACK_'): { opti
         breakerThreshold: int(env.JEV_BREAKER_THRESHOLD, 3, 1),
         breakerCooldownMs: int(env.JEV_BREAKER_COOLDOWN_MS, 30_000),
         confidence: (env.JEV_CONFIDENCE === 'server' ? 'server' : 'recompute') as ConfidenceMode,
+        format: (env[`JEV_${prefix}FORMAT`] === 'openai-decisions' ? 'openai-decisions' : 'systemone') as WireFormat,
       }
       : null,
     refusedHost: apiKey && !allowed ? endpointHost(baseUrl) : null,
