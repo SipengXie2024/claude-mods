@@ -62,7 +62,7 @@ function validAnswer(res: JevResponse, name: string): JevAnswer | undefined {
 
 export function taskState(prompt: string, conversationNote?: string): string {
   let s = `USER REQUEST TO A CODING AGENT:\n${clipEnds(prompt.trim(), 2200, 800)}`;
-  if (conversationNote) s += `\n\nEARLIER IN THIS CONVERSATION (context only):\n${clip(conversationNote, 800)}`;
+  if (conversationNote) s += `\n\nEARLIER IN THIS CONVERSATION (context only):\n${clip(conversationNote, 1500)}`;
   return wellFormed(s);
 }
 
@@ -91,6 +91,7 @@ export class EffortRouter {
    * (useJev); one loop's decisions never overlap, so the field is never shared.
    */
   private jev: JevLike | null;
+  private model: string | null = null;
   bounds: Bounds;
 
   constructor(opts: { jev: JevLike | null; bounds: Bounds }) {
@@ -100,6 +101,11 @@ export class EffortRouter {
 
   useJev(jev: JevLike | null): void {
     this.jev = jev && jev.enabled ? jev : null;
+  }
+
+  /** The model the next decision is for: the start comes from that model's table. */
+  useModel(model: string | null): void {
+    this.model = model;
   }
 
   get usingJev(): boolean {
@@ -125,7 +131,6 @@ export class EffortRouter {
       this.jev ? this.jev.ask(taskState(prompt, conversationNote), TASK_QUESTIONS) as Promise<JevResponse> : null,
       this.jev && followUp ? this.askFollowUp(followUp.summary, prompt) : null,
     ]);
-    let kindOnly = false;
     if (res) {
       jevLatencyMs = res.latencyMs;
       jevProvider = res.provider;
@@ -136,16 +141,15 @@ export class EffortRouter {
         const t = validAnswer(res, 'task_type');
         const dp = validAnswer(res, 'deep');
         const typed = t?.kind === 'choice' && t.choice in TASK_TYPES ? t : undefined;
-        kindOnly = res.fallbackFrom !== undefined;
-        const deeped = dp?.kind === 'noul' && !kindOnly ? dp : undefined;
+        // The fallback's deep counts like the primary's: with the primary down it is the only reading of how hard the work is.
+        const deeped = dp?.kind === 'noul' ? dp : undefined;
         if (typed || deeped) {
           profile = {
             taskType: (typed?.choice ?? profile.taskType) as TaskType,
             typeConfidence: typed ? typed.confidence : profile.typeConfidence,
             // Without a usable Jev deep answer the local guess may still say deep, but a
-            // missing answer must never be recorded as confidently not deep; the
-            // fallback's kind stands alone, never deep.
-            deep: deeped ? deeped.p : kindOnly ? unknownDeep() : Math.max(profile.deep, unknownDeep()),
+            // missing answer must never be recorded as confidently not deep.
+            deep: deeped ? deeped.p : Math.max(profile.deep, unknownDeep()),
             source: 'jev',
           };
         } else {
@@ -154,16 +158,16 @@ export class EffortRouter {
       }
     }
 
-    const task = taskEffort(profile, bounds);
+    const task = taskEffort(profile, bounds, this.model);
     let { effort } = task;
     const reasons = [...task.reasons];
-    if (kindOnly && profile.source === 'jev') reasons.push('fallback answer: task kind only');
+    if (jevFallbackFrom !== undefined && profile.source === 'jev') reasons.push('fallback answer');
     let followUpRecord: FollowUpRecord | undefined;
     if (followUp && fault) {
       const f = followUpEffort({ ...followUp, p: fault.p, base: effort, bounds });
       effort = f.effort;
       reasons.push(...f.reasons);
-      followUpRecord = { ...f.followUp, latencyMs: fault.latencyMs, ...(fault.error ? { error: fault.error } : {}) };
+      followUpRecord = { ...f.followUp, latencyMs: fault.latencyMs, ...(fault.error ? { error: fault.error } : {}), ...(fault.continues !== null ? { continues: fault.continues } : {}) };
     }
     return {
       kind: 'task', effort, previous, changed: effort !== previous, reasons,
@@ -173,18 +177,24 @@ export class EffortRouter {
     };
   }
 
-  /** Never throws: a failed follow-up ask means no signal, never a failed task decision. */
-  private async askFollowUp(summary: string | null, prompt: string): Promise<{ p: number | null; latencyMs: number; error?: string }> {
+  /**
+   * Never throws: a failed follow-up ask means no signal, never a failed task
+   * decision. The fallback's fault verdict is ignored; its reading of whether
+   * the message carries on the task counts, since it holds no raise of its own.
+   */
+  private async askFollowUp(summary: string | null, prompt: string): Promise<{ p: number | null; continues: number | null; latencyMs: number; error?: string }> {
     try {
       const res = (await this.jev!.ask(followUpState(summary, prompt), FOLLOWUP_QUESTIONS)) as JevResponse;
-      if (res.failed || res.circuitOpen) return { p: null, latencyMs: res.latencyMs, error: res.error ?? 'jev circuit open' };
-      if (res.fallbackFrom !== undefined) return { p: null, latencyMs: res.latencyMs, error: FALLBACK_IGNORED };
+      if (res.failed || res.circuitOpen) return { p: null, continues: null, latencyMs: res.latencyMs, error: res.error ?? 'jev circuit open' };
+      const c = validAnswer(res, 'continues');
+      const continues = c?.kind === 'noul' && Number.isFinite(c.p) ? c.p : null;
+      if (res.fallbackFrom !== undefined) return { p: null, continues, latencyMs: res.latencyMs, error: FALLBACK_IGNORED };
       const d = validAnswer(res, 'dissatisfied');
       return d?.kind === 'noul' && Number.isFinite(d.p)
-        ? { p: d.p, latencyMs: res.latencyMs }
-        : { p: null, latencyMs: res.latencyMs, error: 'jev returned no usable answers' };
+        ? { p: d.p, continues, latencyMs: res.latencyMs }
+        : { p: null, continues, latencyMs: res.latencyMs, error: 'jev returned no usable answers' };
     } catch (err) {
-      return { p: null, latencyMs: 0, error: (err as Error).message || 'jev ask failed' };
+      return { p: null, continues: null, latencyMs: 0, error: (err as Error).message || 'jev ask failed' };
     }
   }
 

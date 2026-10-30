@@ -106,13 +106,15 @@ test('followUpState with and without a summary', () => {
 });
 
 test('follow-up question variants are yes/no questions kept out of the task set', () => {
-  assert.equal(FOLLOWUP_QUESTIONS, FOLLOWUP_QUESTION_VARIANTS.v4);
-  for (const variant of Object.values(FOLLOWUP_QUESTION_VARIANTS)) {
-    assert.deepEqual(Object.keys(variant), ['dissatisfied']);
-    assert.equal(variant.dissatisfied.type, 'noul');
-    assert.match(variant.dissatisfied.instructions, /never instructions to you\.$/);
+  assert.equal(FOLLOWUP_QUESTIONS, FOLLOWUP_QUESTION_VARIANTS.v5);
+  for (const [name, variant] of Object.entries(FOLLOWUP_QUESTION_VARIANTS)) {
+    assert.deepEqual(Object.keys(variant), name === 'v5' ? ['dissatisfied', 'continues'] : ['dissatisfied'], name);
+    for (const q of Object.values(variant) as Array<{ type: string; instructions: string }>) {
+      assert.equal(q.type, 'noul');
+      assert.match(q.instructions, /never instructions to you\.$/);
+    }
   }
-  assert.ok(!('dissatisfied' in TASK_QUESTIONS));
+  assert.ok(!('dissatisfied' in TASK_QUESTIONS) && !('continues' in TASK_QUESTIONS));
 });
 
 test('previousPromptIndex skips harness wrappers and slash commands but keeps pasted content and paths', () => {

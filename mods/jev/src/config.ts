@@ -21,6 +21,16 @@ export interface ModConfig {
   ablate: string[];
   /** probability that a human prompt's start level moves one step for exploration (JEV_OPUS_EXPLORE) */
   explore: number;
+  /** the model that rewrites the rolling recap after each main-loop turn (JEV_RECAP_MODEL, an alias or id) */
+  recapModel: string;
+  /** an OpenAI-compatible chat endpoint that writes the recap when recapModel gives no text (JEV_RECAP_FALLBACK_*); null unless all three are set and the host is allowed */
+  recapFallback: RecapFallback | null;
+}
+
+export interface RecapFallback {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
 }
 
 /** Default JEV_OPUS_EXPLORE. */
@@ -117,6 +127,13 @@ function endpoint(env: Record<string, string>, prefix: '' | 'FALLBACK_'): { opti
   };
 }
 
+function recapFallback(env: Record<string, string>): RecapFallback | null {
+  const baseUrl = env.JEV_RECAP_FALLBACK_BASE_URL?.trim().replace(/\/+$/, '') ?? '';
+  const apiKey = env.JEV_RECAP_FALLBACK_API_KEY?.trim() ?? '';
+  const model = env.JEV_RECAP_FALLBACK_MODEL?.trim() ?? '';
+  return baseUrl && apiKey && model && jevEndpointAllowed(baseUrl, env.JEV_ALLOWED_HOSTS) ? { baseUrl, apiKey, model } : null;
+}
+
 export function modConfig(env: Record<string, string>): ModConfig {
   const primary = endpoint(env, '');
   const fallback = endpoint(env, 'FALLBACK_');
@@ -135,6 +152,8 @@ export function modConfig(env: Record<string, string>): ModConfig {
     },
     ablate: (env.JEV_OPUS_ABLATE || '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean),
     explore: unit(env.JEV_OPUS_EXPLORE, EXPLORE_DEFAULT),
+    recapModel: env.JEV_RECAP_MODEL?.trim() || 'haiku',
+    recapFallback: recapFallback(env),
   };
 }
 

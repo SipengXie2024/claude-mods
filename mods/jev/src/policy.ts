@@ -3,13 +3,21 @@ import type { TaskType } from './questions';
 import type { FollowUpRecord, TaskProfile } from './types';
 
 /**
- * Pure mapping from evidence and Jev signals to an effort level, for Opus and
- * Mythos alike (policy.v10, 2026-10-26).
+ * Pure mapping from evidence and Jev signals to an effort level
+ * (policy.v12, 2026-10-30).
  *
- * Task starts follow Anthropic's five-level effort guidance as the user
- * applies it: `low` for simple edits and operations, `medium` for everyday
- * questions and documents, `high` (the Claude Code default) for coding and
- * research, `xhigh` for work that needs something worked out on top of that.
+ * The start comes from the task kind, read from a table per model: a level
+ * name is not the same amount of thinking on every model, and Opus 5.5
+ * (default medium) and Mythos 5.1 / earlier Opus (default high) have their
+ * own published per-level results. The tables follow Anthropic's cost
+ * guidance, start low and raise on failure, where a failure shows itself (a
+ * check fails, the person says it is wrong); work whose mistakes look like
+ * right answers (explanations, prose, research) starts a step higher, since
+ * nothing would raise it. A kind that needs something worked out (deep)
+ * starts at its own deeper level. Sources and numbers:
+ * ~/.config/jev-opus/eval/effort-sources.md. A prompt whose kind is not
+ * trusted starts at high: such prompts are mostly short or lean on earlier
+ * context, and the person's own labels put most of them at high or above.
  * Every task starts at or above its kind's floor; bounds apply after that.
  * The start is decided once per prompt. After it only the ladder moves the
  * level, and only up: a check that fails again after the model changed code
@@ -23,7 +31,7 @@ export interface Bounds {
 }
 
 /** Version of this policy, recorded on every decision for provenance. */
-export const POLICY_VERSION = 'policy.v10';
+export const POLICY_VERSION = 'policy.v12';
 
 /**
  * Rules an A/B run can switch off to measure them:
@@ -43,7 +51,7 @@ export function getAblations(): Ablation[] {
   return ABLATABLE.filter((x) => ablated.has(x));
 }
 
-/** POLICY_VERSION plus any switched-off rules, e.g. "policy.v10-ablate:r1,dissat". */
+/** POLICY_VERSION plus any switched-off rules, e.g. "policy.v11-ablate:r1,dissat". */
 export function policyVersion(): string {
   const off = getAblations();
   return off.length ? `${POLICY_VERSION}-ablate:${off.join(',')}` : POLICY_VERSION;
@@ -59,26 +67,50 @@ const XHIGH = 3, MAX = 4;
 export interface TypePrefs {
   floor: Effort;
   base: Effort;
+  /** the start when the task needs something worked out */
+  deep: Effort;
+}
+
+/** Which table a model follows: Opus, Sonnet and Haiku 5.5 default to medium; Mythos, Fable and earlier Opus models to high. */
+export type ModelScale = 'medium-default' | 'high-default';
+
+export function modelScale(model: string | null): ModelScale {
+  return model !== null && /claude-(opus|sonnet|haiku)-5-5|^(opus|sonnet|haiku)(\[1m\])?$/i.test(model) ? 'medium-default' : 'high-default';
 }
 
 /**
- * Per-kind start and floor, from the effort table the user keeps (Anthropic's
- * guidance for the 5.x models): simple edits and operations low; everyday
- * questions and document work medium; coding (PRs, tests) and research
- * (surveys, comparisons, anything that must look things up, which low
- * tends to skip) high. Not yet fitted to measured outcomes.
+ * Start levels per kind, for each model scale. Opus 5.5: coding starts low
+ * (SWE-bench Pro subset: low 87.4%, and low then high on the failures about
+ * 97%), research at medium (DRACO: low 13.3 points below medium), reading and
+ * shaping visuals low (its low reads charts better than Opus 5 at its
+ * highest); bug hunts and deep research go to high and xhigh. Mythos 5.1
+ * (Fable 5.1's numbers) and earlier Opus: research and visuals at high
+ * (DeepResearch Bench II, Chartography), coding from medium up to xhigh, where
+ * Fable 5.1 scores best on FrontierCode and Terminal-Bench.
  */
-export const TYPE_PREFS: Record<TaskType, TypePrefs> = {
-  chat: { floor: 'low', base: 'low' },
-  explain: { floor: 'low', base: 'medium' },
-  operate: { floor: 'low', base: 'low' },
-  write: { floor: 'low', base: 'medium' },
-  research: { floor: 'medium', base: 'high' },
-  code: { floor: 'medium', base: 'high' },
+export const TYPE_PREFS: Record<ModelScale, Record<TaskType, TypePrefs>> = {
+  'medium-default': {
+    chat: { floor: 'low', base: 'low', deep: 'low' },
+    operate: { floor: 'low', base: 'low', deep: 'medium' },
+    explain: { floor: 'low', base: 'medium', deep: 'high' },
+    write: { floor: 'low', base: 'medium', deep: 'high' },
+    design: { floor: 'low', base: 'low', deep: 'medium' },
+    code: { floor: 'low', base: 'low', deep: 'high' },
+    research: { floor: 'medium', base: 'medium', deep: 'xhigh' },
+  },
+  'high-default': {
+    chat: { floor: 'low', base: 'low', deep: 'low' },
+    operate: { floor: 'low', base: 'low', deep: 'medium' },
+    explain: { floor: 'low', base: 'medium', deep: 'high' },
+    write: { floor: 'low', base: 'medium', deep: 'high' },
+    design: { floor: 'medium', base: 'medium', deep: 'high' },
+    code: { floor: 'medium', base: 'medium', deep: 'xhigh' },
+    research: { floor: 'medium', base: 'high', deep: 'xhigh' },
+  },
 };
 
-/** Start and floor used when the task kind itself is not trusted: the general default level. */
-export const UNTRUSTED_TYPE: TypePrefs = { floor: 'low', base: 'high' };
+/** Start and floor used when the task kind itself is not trusted. */
+export const UNTRUSTED_TYPE: TypePrefs = { floor: 'low', base: 'high', deep: 'high' };
 
 /** Start and floor follow the kind when heuristics decided or Jev is reasonably sure. */
 const TYPE_TRUST = 0.35;
@@ -113,31 +145,22 @@ function deepOf(p: TaskProfile): number {
 }
 
 export function typeTrusted(p: TaskProfile): boolean {
-  return (p.source === 'heuristic' || p.typeConfidence >= TYPE_TRUST) && Object.hasOwn(TYPE_PREFS, p.taskType);
+  return (p.source === 'heuristic' || p.typeConfidence >= TYPE_TRUST) && Object.hasOwn(TYPE_PREFS['medium-default'], p.taskType);
 }
 
 export function isDeep(p: TaskProfile): boolean {
   return deepOf(p) >= deepThresholds.yes;
 }
 
-export function typePrefs(p: TaskProfile): TypePrefs {
-  let prefs = typeTrusted(p) ? TYPE_PREFS[p.taskType] : UNTRUSTED_TYPE;
-  if (isDeep(p) && !ablated.has('r1')) {
-    // Working something out costs one level over the kind's start, at least
-    // high: a bug traced across files or an architecture rewrite is xhigh
-    // work, a document that needs a design decision is high. An untrusted
-    // kind only reaches high: xhigh needs to know what the work is. Max is
-    // never a task start; it comes from the ladder alone.
-    const trusted = typeTrusted(p);
-    const base = trusted ? maxEffort(fromRank(rank(prefs.base) + 1), 'high') : maxEffort(prefs.base, 'high');
-    prefs = { ...prefs, base: minEffort(base, 'xhigh') };
-  }
-  return prefs;
+/** The kind's start and floor on this model, the deep start when the task needs something worked out (ablation r1 drops that). */
+export function typePrefs(p: TaskProfile, model: string | null = null): TypePrefs {
+  const prefs = typeTrusted(p) ? TYPE_PREFS[modelScale(model)][p.taskType] : UNTRUSTED_TYPE;
+  return isDeep(p) && !ablated.has('r1') ? { ...prefs, base: prefs.deep } : prefs;
 }
 
-export function taskEffort(p: TaskProfile, bounds: Bounds): { effort: Effort; reasons: string[] } {
+export function taskEffort(p: TaskProfile, bounds: Bounds, model: string | null = null): { effort: Effort; reasons: string[] } {
   const reasons: string[] = [];
-  const prefs = typePrefs(p);
+  const prefs = typePrefs(p, model);
   const trusted = typeTrusted(p);
   let r = rank(prefs.base);
   const label = trusted ? p.taskType : 'untyped';

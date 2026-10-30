@@ -1,7 +1,7 @@
 {
   "name": "jev",
   "version": "0.1.0",
-  "description": "Jev effort routing for Opus and Mythos (policy.v10): start effort per prompt from the five-level effort table, follow-up fault raise, a raise when a check fails again after a code change (mid-loop on Mythos, carried into the next prompt on Opus).",
+  "description": "Jev effort routing for Opus and Mythos (policy.v12): start effort per prompt from per-model kind tables that start low and hold a raised level while the task goes on, judged with the conversation's recent turns and a Haiku-written rolling recap, follow-up fault raise, a raise when a check fails again after a code change (mid-loop on Mythos, carried into the next prompt on Opus).",
   "author": {
     "name": "sipeng"
   }

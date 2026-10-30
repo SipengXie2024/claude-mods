@@ -68,7 +68,7 @@ export function unwrapChannel(text: string): string {
 }
 
 /** User text without interrupt markers (Claude Code may merge a marker into the next prompt's message) or a channel wrapper. */
-function promptText(m: Message | undefined): string {
+export function promptText(m: Message | undefined): string {
   return unwrapChannel(userText(m).replace(INTERRUPT_LINE, '').trim());
 }
 
@@ -96,28 +96,19 @@ export function previousPromptIndex(messages: readonly Message[], before: number
   return -1;
 }
 
-function assistantText(m: Message): string {
+export function assistantText(m: Message): string {
   return blocks(m.content).filter((b) => b.type === 'text' && typeof b.text === 'string').map((b) => b.text!.trim()).filter(Boolean).join('\n');
 }
 
 /**
- * Three-line summary of the turn between the previous prompt and the latest
- * user message: the previous request, the start of the agent's last reply, and
- * what the agent did (tool calls, edited files, commands and failures).
+ * What the agent did across `span`: tool calls, edited files, commands and
+ * their failures, and whether the user interrupted. Tool results may sit in
+ * `also` too (the latest user message, e.g. an interrupted tool call).
  */
-export function followUpSummary(messages: readonly Message[], prevIdx: number, lastUser: number): string {
-  const span = messages.slice(prevIdx + 1, lastUser);
-
-  const nearest = lastIndexOfRole(span, 'assistant');
-  let reply = nearest >= 0 ? assistantText(span[nearest]!) : '';
-  if (!reply) {
-    for (let i = span.length - 1; i >= 0 && !reply; i--) if (span[i]!.role === 'assistant') reply = assistantText(span[i]!);
-  }
-
-  // Results may sit in the latest user message too (e.g. an interrupted tool call).
+export function turnActions(span: readonly Message[], also?: Message): string {
   const results = new Map<string, Block>();
   let interrupted = false;
-  for (const m of [...span, messages[lastUser]]) {
+  for (const m of [...span, also]) {
     if (m?.role !== 'user') continue;
     for (const b of blocks(m.content)) {
       if (b.type === 'tool_result' && b.tool_use_id) results.set(b.tool_use_id, b);
@@ -153,10 +144,26 @@ export function followUpSummary(messages: readonly Message[], prevIdx: number, l
   }
   if (commands) actions.push(`ran ${commands} commands (${failed} failed)`);
   if (interrupted) actions.push('interrupted by user');
+  return actions.join('; ');
+}
+
+/**
+ * Three-line summary of the turn between the previous prompt and the latest
+ * user message: the previous request, the start of the agent's last reply, and
+ * what the agent did (tool calls, edited files, commands and failures).
+ */
+export function followUpSummary(messages: readonly Message[], prevIdx: number, lastUser: number): string {
+  const span = messages.slice(prevIdx + 1, lastUser);
+
+  const nearest = lastIndexOfRole(span, 'assistant');
+  let reply = nearest >= 0 ? assistantText(span[nearest]!) : '';
+  if (!reply) {
+    for (let i = span.length - 1; i >= 0 && !reply; i--) if (span[i]!.role === 'assistant') reply = assistantText(span[i]!);
+  }
 
   return [
     `PREVIOUS USER REQUEST: ${clip(promptText(messages[prevIdx]), 300)}`,
     `AGENT'S LAST REPLY (start): ${reply ? clip(reply, 500) : '(no text)'}`,
-    `AGENT ACTIONS: ${actions.join('; ')}`,
+    `AGENT ACTIONS: ${turnActions(span, messages[lastUser])}`,
   ].join('\n');
 }

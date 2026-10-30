@@ -1,6 +1,7 @@
 import type { On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 import { ADVISOR_NOTE } from './register'
+import { hash20 } from '../src/hash'
 
 // The world beneath the mod: config file, journal, Jev, session and model are
 // answered by the test's own hooks; the engine's $ drives the mod's hooks.
@@ -23,11 +24,15 @@ const ENV = [
   `JEV_FALLBACK_BASE_URL=${FALLBACK_URL}`,
   'JEV_FALLBACK_API_KEY=mac-key',
   'JEV_FALLBACK_DEADLINE_MS=1500',
-  'JEV_OPUS_MIN_EFFORT=medium',
+  // Starts at high or above: these tests drive the ladder, carry-over and pins from a fixed start; the per-model tables have tests of their own.
+  'JEV_OPUS_MIN_EFFORT=high',
   'JEV_OPUS_MAX_EFFORT=max',
   'JEV_OPUS_DISSAT_YES=0.75',
   'JEV_OPUS_EXPLORE=0',
 ].join('\n')
+
+/** No Jev endpoint and default bounds; exploration off, so a heuristic start is what the test sees. */
+const NO_JEV = 'JEV_OPUS_EXPLORE=0'
 
 type Answers = Record<string, unknown>
 type Msg = { role: string; content: unknown }
@@ -51,6 +56,10 @@ interface World {
   mtimes: Map<string, number>
   /** the paths `$.fs.stat` was asked about */
   stats: string[]
+  /** `$.model.complete` requests: the recap updates */
+  recaps: Array<{ model: string; prompt: string; system: string }>
+  /** requests to the recap fallback endpoint */
+  chats: Array<{ url: string; body: any; auth: string | undefined }>
 }
 
 interface Opts {
@@ -68,11 +77,15 @@ interface Opts {
   model?: string
   /** answers a tool call before the world's own handler; undefined falls through */
   tool?: (e: any) => any
+  /** the recap model's reply to a prompt; null = an API error. Without it `$.model.complete` is denied. */
+  recap?: (prompt: string) => string | null
+  /** the recap fallback endpoint's reply (`/chat/completions`): its text, or an HTTP status */
+  chat?: (body: any) => string | number
 }
 
 /** Peaked answers, so the recomputed confidence clears every gate. */
 const choice = (c: string, keys: string[]) => ({ choice: c, confidence: 0.9, probabilities: Object.fromEntries(keys.map((k) => [k, k === c ? 0.92 : 0.08 / (keys.length - 1)])) })
-const TYPES = ['chat', 'explain', 'operate', 'write', 'code', 'research']
+const TYPES = ['chat', 'explain', 'operate', 'write', 'design', 'code', 'research']
 
 /** Deterministic Jev: a code task, a fault on 不对 or wrong. */
 export function stubJev(questions: string[], state: string): Answers {
@@ -81,7 +94,7 @@ export function stubJev(questions: string[], state: string): Answers {
 }
 
 function world(on: On, o: Opts = {}): World {
-  const w: World = { files: new Map(), appends: [], asks: [], steps: [], contexts: [], status: [], toasts: [], invalidates: 0, messages: [], clock: mock.clock(on, { now: 1_000 }), fail: false, mtimes: new Map(), stats: [] }
+  const w: World = { files: new Map(), appends: [], asks: [], steps: [], contexts: [], status: [], toasts: [], invalidates: 0, messages: [], clock: mock.clock(on, { now: 1_000 }), fail: false, mtimes: new Map(), stats: [], recaps: [], chats: [] }
   if (o.env !== null) w.files.set(`${DIR}/.env`, o.env ?? ENV)
   mock.env(on, { HOME: '/home/u', JEV_OPUS_CONFIG_DIR: DIR })
   mock.store(on, o.store ?? {})
@@ -103,6 +116,14 @@ function world(on: On, o: Opts = {}): World {
   })
   const jev = o.jev ?? stubJev
   on('http.fetch', async ($, e) => {
+    if (e.url.endsWith('/chat/completions')) {
+      const body = JSON.parse(e.init?.body ?? '{}')
+      w.chats.push({ url: e.url, body, auth: e.init?.headers?.authorization })
+      const out = o.chat?.(body) ?? 500
+      return { value: typeof out === 'number'
+        ? { status: out, ok: false, headers: {}, text: 'error' }
+        : { status: 200, ok: true, headers: {}, text: JSON.stringify({ choices: [{ message: { content: out } }] }) } }
+    }
     const body = JSON.parse(e.init?.body ?? '{}') as { state: string; questions: Record<string, unknown> }
     const questions = Object.keys(body.questions)
     w.asks.push({ url: e.url, questions, state: body.state, auth: e.init?.headers?.Authorization })
@@ -121,6 +142,15 @@ function world(on: On, o: Opts = {}): World {
     return { value: w.messages as never }
   })
   on('settings.read', () => ({ value: (o.settings ?? {}) as never }))
+  on('model.complete', ($, e) => {
+    if (!o.recap) return { deny: 'no recap model in this test' }
+    const system = Array.isArray(e.system) ? e.system.map((b: { text: string }) => b.text).join('') : String(e.system ?? '')
+    w.recaps.push({ model: e.model, prompt: e.prompt, system })
+    const text = o.recap(e.prompt)
+    return { value: text === null
+      ? { isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded_error' } as never
+      : { isAnswered: true, text, usage: { input_tokens: 900, output_tokens: 80 } } as never }
+  })
   on('tool.list', () => ({ value: [] }))
   on('ui.status', ($, e) => (w.status.push(e.text ?? ''), { value: undefined }))
   on('ui.toast', ($, e) => (w.toasts.push(e.text), { value: undefined }))
@@ -201,7 +231,7 @@ describe('task routing', () => {
     expect(sent(w)).toEqual(['high', 'high', 'high', 'high', 'high'])
     expect(journal(w).map((r) => r.event)).toEqual(['prompt', 'step', 'check', 'check', 'check'])
     expect(rows(w, 'check').map((r) => r.outcome)).toEqual(['first-failure', 'repeat-failure', 'pass'])
-    expect(rows(w, 'step')[0]).toMatchObject({ model: OPUS, sessionEffort: 'high', effort: 'high', policy: 'policy.v10' })
+    expect(rows(w, 'step')[0]).toMatchObject({ model: OPUS, sessionEffort: 'high', effort: 'high', policy: 'policy.v12' })
     // Jev is asked once, for the task: no step questions.
     expect(w.asks.map((a) => a.questions)).toEqual([['task_type', 'deep']])
     expect(w.status).toEqual([])
@@ -231,14 +261,14 @@ describe('task routing', () => {
   })
 
   test('no config: heuristics only, no network', async ($, on) => {
-    const w = world(on, { env: null })
+    const w = world(on, { env: NO_JEV })
     await submit($, 'fix the crash in parser.ts')
     await step($, 0)
     await bash(w, $, 'npm test', true)
     await step($, 1)
     expect(w.asks.length).toBe(0)
-    // default bounds low..high: code → high
-    expect(sent(w)).toEqual(['high', 'high'])
+    // default bounds low..high: code on Opus 5.5 starts low
+    expect(sent(w)).toEqual(['low', 'low'])
     expect(journal(w)[0]!.source).toBe('heuristic')
   })
 
@@ -292,18 +322,34 @@ describe('task routing', () => {
     expect(journal(w)[0]!.jevError).toBeUndefined()
   })
 
-  test('decision 6 control: the primary\'s deep 0.95 starts code at xhigh', async ($, on) => {
+  test('decision 6 control: the primary\'s deep 0.95 starts code at xhigh on Mythos', async ($, on) => {
     const deep = (q: string[]) => (q.includes('task_type') ? { task_type: choice('code', TYPES), deep: { noul: 0.95 } } : stubJev(q, ''))
-    const healthy = world(on, { jev: deep })
+    const healthy = world(on, { jev: deep, model: MYTHOS })
     await submit($, 'rewrite the scheduler')
     expect(journal(healthy)[0]!.effort).toBe('xhigh')
   })
 
-  test('decision 6: a fallback answer with deep 0.95 starts code at high', async ($, on) => {
-    const w = world(on, { primaryDown: true, jev: (q) => (q.includes('task_type') ? { task_type: choice('code', TYPES), deep: { noul: 0.95 } } : stubJev(q, '')) })
+  test('an unsure kind starts at high on Opus 5.5 and on Mythos alike', async ($, on) => {
+    const flat = { choice: 'explain', confidence: 0.2, probabilities: Object.fromEntries(TYPES.map((k) => [k, k === 'explain' ? 0.25 : 0.75 / (TYPES.length - 1)])) }
+    const unsure = (q: string[]) => (q.includes('task_type') ? { task_type: flat, deep: { noul: 0.3 } } : stubJev(q, ''))
+    const opus = world(on, { jev: unsure })
+    await submit($, 'what about the other one')
+    expect(journal(opus)[0]).toMatchObject({ model: OPUS, effort: 'high' })
+    expect(journal(opus)[0]!.reasons[0]).toMatch(/^kind unsure \(0\.\d\d\) → high$/)
+  })
+
+  test('an unsure kind on Mythos starts at high too', async ($, on) => {
+    const flat = { choice: 'explain', confidence: 0.2, probabilities: Object.fromEntries(TYPES.map((k) => [k, k === 'explain' ? 0.25 : 0.75 / (TYPES.length - 1)])) }
+    const w = world(on, { model: MYTHOS, jev: (q) => (q.includes('task_type') ? { task_type: flat, deep: { noul: 0.3 } } : stubJev(q, '')) })
+    await submit($, 'what about the other one')
+    expect(journal(w)[0]).toMatchObject({ model: MYTHOS, effort: 'high' })
+  })
+
+  test('decision 6: a fallback answer with deep 0.95 starts code at xhigh on Mythos, its deep counted like the primary\'s', async ($, on) => {
+    const w = world(on, { primaryDown: true, model: MYTHOS, jev: (q) => (q.includes('task_type') ? { task_type: choice('code', TYPES), deep: { noul: 0.95 } } : stubJev(q, '')) })
     await submit($, 'rewrite the scheduler')
-    expect(journal(w)[0]).toMatchObject({ effort: 'high', jevFallbackFrom: 'http-503' })
-    expect(journal(w)[0]!.reasons).toContain('fallback answer: task kind only')
+    expect(journal(w)[0]).toMatchObject({ effort: 'xhigh', jevFallbackFrom: 'http-503' })
+    expect(journal(w)[0]!.reasons).toContain('fallback answer')
   })
 
   test('a healthy primary Jev is the only endpoint asked', async ($, on) => {
@@ -849,10 +895,13 @@ describe('non-human turns', () => {
 })
 
 describe('exploration', () => {
-  const EXPLORE = ENV.replace('JEV_OPUS_EXPLORE=0', 'JEV_OPUS_EXPLORE=1')
+  // Floor medium, so a high start can move either way.
+  const EXPLORE = ENV.replace('JEV_OPUS_EXPLORE=0', 'JEV_OPUS_EXPLORE=1').replace('JEV_OPUS_MIN_EFFORT=high', 'JEV_OPUS_MIN_EFFORT=medium')
+  const deepCode = (q: string[]) => (q.includes('task_type') ? { task_type: choice('code', TYPES), deep: { noul: 0.95 } } : stubJev(q, ''))
 
   test('decision 7: with p 1 every human prompt\'s start moves one level, journaled with the policy\'s own choice', async ($, on) => {
-    const w = world(on, { env: EXPLORE })
+    // A deep code task starts at high on Opus 5.5.
+    const w = world(on, { env: EXPLORE, jev: deepCode })
     for (let i = 0; i < 6; i++) await submit($, 'fix the crash in parser.ts')
     for (const p of rows(w, 'prompt')) {
       expect(p.explore.p).toBe(1)
@@ -1063,11 +1112,11 @@ describe('band above the prompt', () => {
   })
 
   test('heuristic routing says so; a long trail of /effort changes shows its last five levels', async ($, on) => {
-    const w = world(on, { env: null })
+    const w = world(on, { env: NO_JEV })
     await submit($, 'fix the crash in parser.ts')
     await step($, 0)
-    expect(await bandText($)).toBe('Opus 5.5 · ◆ Jev · HIGH · code · local routing')
-    for (const effort of ['low', 'medium', 'high', 'xhigh', 'max', 'low']) await step($, w.steps.length, effort)
+    expect(await bandText($)).toBe('Opus 5.5 · ◆ Jev · LOW · code · local routing')
+    for (const effort of ['high', 'low', 'medium', 'high', 'xhigh', 'max', 'low']) await step($, w.steps.length, effort)
     expect(await bandText($)).toBe('Opus 5.5 · ◆ Jev · … → medium → high → xhigh → max → LOW · code · /effort')
   })
 })
@@ -1084,7 +1133,259 @@ describe('outcome rows', () => {
     expect(rows(w, 'outcome')).toEqual([{
       at: 1_000, session: 'sess-1', agent: 'main', event: 'outcome', turnId: 'turn-1', prompt: 1, model: OPUS, effort: 'high', trail: ['high'],
       reason: 'answer', durationMs: 42_000, jevWaitMs: 0, outputTokens: 900, inputTokens: 10, cacheReadTokens: 5_000, cacheCreationTokens: 300,
-      checks: { run: 2, passed: 1, failed: 1 }, raises: 0, raisesPassed: 0, carry: 0, unfinished: false, policy: 'policy.v10',
+      checks: { run: 2, passed: 1, failed: 1 }, raises: 0, raisesPassed: 0, carry: 0, unfinished: false, policy: 'policy.v12',
     }])
+  })
+})
+
+describe('rolling recap', () => {
+  // The recap is written after the turn is handed on: wait for its journal row,
+  // or, where none may come, let the queued work run out first.
+  const tick = () => new Promise((r) => setTimeout(r, 0))
+  const recapRows = async (w: World, n: number) => {
+    for (let i = 0; i < 500 && rows(w, 'recap').length < n; i++) await tick()
+    expect(rows(w, 'recap')).toHaveLength(n)
+  }
+  const idle = async () => { for (let i = 0; i < 200; i++) await tick() }
+  const taskState = (w: World, n = 0) => w.asks.filter((a) => a.questions.includes('task_type'))[n]!.state
+  const ASK = '要我现在把这个 mod 写出来并接上吗？'
+
+  test('a short approval after a proposal reaches Jev with the end of the reply that proposed it', async ($, on) => {
+    const w = world(on)
+    say(w, 'user', '咱能怎么做到减少这种偏离 language 设置的行为吗？')
+    say(w, 'assistant', `方案是新建一个 reply-language mod，每一轮把语言要求放到上下文末尾。\n\n${ASK}`)
+    await submit($, '我觉得可以.')
+    expect(taskState(w)).toContain('EARLIER IN THIS CONVERSATION (context only)')
+    expect(taskState(w)).toContain('PREVIOUS USER REQUEST: 咱能怎么做到减少这种偏离 language 设置的行为吗？')
+    expect(taskState(w)).toContain(ASK)
+    expect(taskState(w)).toContain('LAST TURN: 0 tool calls')
+    expect(rows(w, 'prompt')[0]).toMatchObject({ context: 'tail' })
+  })
+
+  test('each main turn rewrites the recap from the previous one and that turn in full; the next prompt reads it with the last reply\'s end and the last turn', async ($, on) => {
+    const first = 'GOAL: 减少英文回复\nNOW: 提出了 reply-language mod\nLAST AGENT MESSAGE ENDS WITH: 要我现在开始写吗？'
+    const replies = [first, 'GOAL: 减少英文回复\nNOW: mod 已写好\nLAST AGENT MESSAGE ENDS WITH: (nothing pending)']
+    const w = world(on, { recap: () => replies.shift()! })
+    const long = `${'先说原因：英文出现在任务通知之后。'.repeat(120)}要我现在开始写吗？`
+    await submit($, '咱能怎么做到减少英文回复？')
+    say(w, 'user', '咱能怎么做到减少英文回复？'); say(w, 'assistant', long)
+    await complete($, undefined, { answer: long })
+    await recapRows(w, 1)
+
+    expect(w.recaps).toHaveLength(1)
+    expect(w.recaps[0]!.model).toBe('haiku')
+    // A request without the CLI's identity comes back 429 on a subscription when the attribution header is off.
+    expect(w.recaps[0]!.system.startsWith("You are Claude Code, Anthropic's official CLI for Claude.")).toBe(true)
+    expect(w.recaps[0]!.system).toContain('running recap')
+    expect(w.recaps[0]!.prompt).toContain('CURRENT RECAP:\n(empty: this is the first one)')
+    expect(w.recaps[0]!.prompt).toContain('PERSON: 咱能怎么做到减少英文回复？')
+    expect(w.recaps[0]!.prompt).toContain(`AGENT: ${long}`) // the whole reply, uncut
+    expect(w.recaps[0]!.prompt).toContain('AGENT ACTIONS: 0 tool calls')
+    expect(rows(w, 'recap')[0]).toMatchObject({ ok: true, model: 'haiku', outputTokens: 80 })
+
+    await submit($, '我觉得可以.')
+    expect(taskState(w, 1)).toContain(`RECAP:\n${first}`)
+    expect(taskState(w, 1)).toContain("AGENT'S LAST REPLY (end): …")
+    expect(taskState(w, 1)).toContain('要我现在开始写吗？')
+    expect(taskState(w, 1)).toContain('LAST TURN: 0 tool calls')
+    expect(rows(w, 'prompt')[1]).toMatchObject({ context: 'recap+tail' })
+
+    // The next update reads the recap and this turn only.
+    say(w, 'user', '我觉得可以.'); say(w, 'assistant', 'mod 写好了，测试都通过。')
+    await complete($, undefined, { answer: 'mod 写好了，测试都通过。' })
+    await recapRows(w, 2)
+    expect(w.recaps).toHaveLength(2)
+    expect(w.recaps[1]!.prompt).toContain(`CURRENT RECAP:\n${first}`)
+    expect(w.recaps[1]!.prompt).toContain('PERSON: 我觉得可以.')
+    expect(w.recaps[1]!.prompt).toContain('AGENT: mod 写好了，测试都通过。')
+    expect(w.recaps[1]!.prompt).not.toContain('咱能怎么做到减少英文回复')
+  })
+
+  test('a prompt that comes before the recap has read the last reply gets the recap and that reply\'s end all the same', async ($, on) => {
+    const w = world(on, { store: { 'recap:sess-1': { text: 'GOAL: 改 jev', coversHash: hash20('旧的回复'), at: 1 } } })
+    say(w, 'user', '先看看日志'); say(w, 'assistant', '旧的回复')
+    say(w, 'user', '那就改吧'); say(w, 'assistant', `改法有两种。${ASK}`)
+    await submit($, '可以')
+    expect(taskState(w)).toContain('RECAP:\nGOAL: 改 jev')
+    expect(taskState(w)).toContain(`AGENT'S LAST REPLY (end): 改法有两种。${ASK}`)
+    expect(rows(w, 'prompt')[0]).toMatchObject({ context: 'recap+tail' })
+  })
+
+  test('the last turn says what the agent did and, when the record carries it, that a check still fails after a change; never the level it ran at', async ($, on) => {
+    const record = { max: 'xhigh', last: 'xhigh', followUp: null, at: 1, prompt: 1, carry: true, unfinished: false, pinned: false }
+    const w = world(on, { store: { 'session:sess-1': record } })
+    say(w, 'user', '修一下 parser 的测试')
+    w.messages.push({ role: 'assistant', content: [{ type: 'text', text: '改了一版' }, { type: 'tool_use', id: 't1', name: 'Edit', input: { file_path: '/repo/src/parser.ts', old_string: 'a', new_string: 'b' } }, { type: 'tool_use', id: 't2', name: 'Bash', input: { command: 'npm test' } }] })
+    w.messages.push({ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }, { type: 'tool_result', tool_use_id: 't2', content: 'Exit code 1', is_error: true }] })
+    say(w, 'assistant', '测试还是没过，要我继续查吗？')
+    await submit($, '继续')
+    const state = taskState(w)
+    expect(state).toContain('LAST TURN: 2 tool calls; edited parser.ts; ran 1 commands (1 failed); a check still fails after the agent changed code')
+    expect(state).not.toMatch(/xhigh|effort/i)
+  })
+
+  test('a recap model that fails leaves the recap as it was and is journaled; the next increment spans every turn since', async ($, on) => {
+    let fail = true
+    const w = world(on, { recap: () => (fail ? null : 'GOAL: 两轮都在'), store: { 'recap:sess-1': { text: 'GOAL: 旧摘要', coversHash: hash20('第零轮'), at: 1 } } })
+    say(w, 'user', '第零问'); say(w, 'assistant', '第零轮')
+    await submit($, '第一问')
+    say(w, 'user', '第一问'); say(w, 'assistant', '第一轮回复')
+    await complete($, undefined, { answer: '第一轮回复' })
+    await recapRows(w, 1)
+    expect(rows(w, 'recap')[0]).toMatchObject({ ok: false, recapError: { error: 'api-error', status: 529, apiError: 'overloaded_error' } })
+
+    await submit($, '第二问')
+    expect(taskState(w, 1)).toContain('RECAP:\nGOAL: 旧摘要')
+    expect(taskState(w, 1)).toContain('第一轮回复')
+    expect(rows(w, 'prompt')[1]).toMatchObject({ context: 'recap+tail' })
+
+    fail = false
+    say(w, 'user', '第二问'); say(w, 'assistant', '第二轮回复')
+    await complete($, undefined, { answer: '第二轮回复' })
+    await recapRows(w, 2)
+    const prompt = w.recaps[1]!.prompt
+    expect(prompt).toContain('CURRENT RECAP:\nGOAL: 旧摘要')
+    expect(prompt).toContain('PERSON: 第一问')
+    expect(prompt).toContain('AGENT: 第二轮回复')
+    expect(prompt).not.toContain('第零问')
+  })
+
+  const FALLBACK = `${ENV}\nJEV_RECAP_FALLBACK_BASE_URL=http://127.0.0.1:7234/v1/\nJEV_RECAP_FALLBACK_API_KEY=sk-test\nJEV_RECAP_FALLBACK_MODEL=DeepSeek-V4.1-Flash`
+
+  test('when Haiku gives no recap the fallback endpoint writes it, with thinking off, and the journal names both', async ($, on) => {
+    const w = world(on, { env: FALLBACK, recap: () => null, chat: () => 'GOAL: 写 README\nLAST AGENT MESSAGE ENDS WITH: 要我写进去吗？' })
+    await submit($, '写个 README')
+    say(w, 'user', '写个 README'); say(w, 'assistant', '要我写进去吗？')
+    await complete($, undefined, { answer: '要我写进去吗？' })
+    await recapRows(w, 1)
+    expect(w.chats).toHaveLength(1)
+    expect(w.chats[0]!.url).toBe('http://127.0.0.1:7234/v1/chat/completions')
+    expect(w.chats[0]!.auth).toBe('Bearer sk-test')
+    expect(w.chats[0]!.body).toMatchObject({ model: 'DeepSeek-V4.1-Flash', reasoning_effort: 'none', max_tokens: 1024 })
+    expect(w.chats[0]!.body.messages[0]).toMatchObject({ role: 'system' })
+    expect(w.chats[0]!.body.messages[0].content.startsWith('You are Claude Code')).toBe(false)
+    expect(w.chats[0]!.body.messages[1].content).toBe(w.recaps[0]!.prompt)
+    expect(rows(w, 'recap')[0]).toMatchObject({ ok: true, model: 'DeepSeek-V4.1-Flash', fallbackModel: 'DeepSeek-V4.1-Flash', recapError: { error: 'api-error', status: 529 } })
+
+    await submit($, '可以')
+    expect(taskState(w, 1)).toContain('RECAP:\nGOAL: 写 README')
+  })
+
+  test('when Haiku and the fallback both fail the recap stays as it was', async ($, on) => {
+    const w = world(on, { env: FALLBACK, recap: () => null, chat: () => 503, store: { 'recap:sess-1': { text: 'GOAL: 旧摘要', coversHash: 'x', at: 1 } } })
+    await submit($, '写个 README')
+    say(w, 'user', '写个 README'); say(w, 'assistant', '要我写进去吗？')
+    await complete($, undefined, { answer: '要我写进去吗？' })
+    await recapRows(w, 1)
+    expect(rows(w, 'recap')[0]).toMatchObject({ ok: false, model: 'haiku', fallbackModel: 'DeepSeek-V4.1-Flash', fallbackError: 'http-503' })
+    await submit($, '可以')
+    expect(taskState(w, 1)).toContain('RECAP:\nGOAL: 旧摘要')
+  })
+
+  test('a fallback endpoint that is not local or allowed is never asked', async ($, on) => {
+    const w = world(on, { env: `${ENV}\nJEV_RECAP_FALLBACK_BASE_URL=https://sub2api.example.com/v1\nJEV_RECAP_FALLBACK_API_KEY=sk-test\nJEV_RECAP_FALLBACK_MODEL=m`, recap: () => null, chat: () => 'GOAL: x' })
+    await submit($, '写个 README')
+    say(w, 'user', '写个 README'); say(w, 'assistant', '要我写进去吗？')
+    await complete($, undefined, { answer: '要我写进去吗？' })
+    await recapRows(w, 1)
+    expect(w.chats).toHaveLength(0)
+    expect(rows(w, 'recap')[0]).toMatchObject({ ok: false, model: 'haiku' })
+  })
+
+  test('a subagent\'s turn and a turn on a model Jev leaves alone write no recap', async ($, on) => {
+    const w = world(on, { recap: () => 'GOAL: x' })
+    say(w, 'user', '查一下'); say(w, 'assistant', '查完了')
+    await complete($, 'agent-1', { answer: '查完了' })
+    await idle()
+    expect(w.recaps).toHaveLength(0)
+  })
+
+  test('on a Fable session no recap is written', async ($, on) => {
+    const w = world(on, { model: 'claude-fable-5-1', recap: () => 'GOAL: x' })
+    say(w, 'user', '查一下'); say(w, 'assistant', '查完了')
+    await complete($, undefined, { answer: '查完了' })
+    await idle()
+    expect(w.recaps).toHaveLength(0)
+  })
+
+  test('the recap model is JEV_RECAP_MODEL when set', async ($, on) => {
+    const w = world(on, { env: `${ENV}\nJEV_RECAP_MODEL=claude-haiku-5-5`, recap: () => 'GOAL: x' })
+    await submit($, '查一下')
+    say(w, 'user', '查一下'); say(w, 'assistant', '查完了')
+    await complete($, undefined, { answer: '查完了' })
+    await recapRows(w, 1)
+    expect(w.recaps[0]!.model).toBe('claude-haiku-5-5')
+  })
+})
+
+describe('task continuation', () => {
+  // Jev's follow-up answers: the fault question says no; the same-task question says `continues`.
+  const reads = (continues: number) => (q: string[], state: string) =>
+    q.includes('task_type') ? stubJev(q, state) : { dissatisfied: { noul: 0.1 }, continues: { noul: continues } }
+  const record = (taskMax: string) => ({ 'session:sess-1': { max: 'high', last: 'high', followUp: null, at: 1, prompt: 3, carry: false, unfinished: false, pinned: false, taskMax } })
+  const turn = (w: World) => {
+    w.messages = [
+      { role: 'user', content: 'fix the crash in parser.ts' },
+      { role: 'assistant', content: [{ type: 'text', text: '改了一版，第三个函数还没看。要我继续看第三个函数吗？' }] },
+    ]
+  }
+
+  test('a prompt that carries on the task starts at the highest level the task reached, and the record keeps it', async ($, on) => {
+    const w = world(on, { jev: reads(0.9), store: record('xhigh') })
+    turn(w)
+    await submit($, '再看看第三个函数')
+    await step($, 0)
+    expect(sent(w)).toEqual(['xhigh'])
+    const prompt = rows(w, 'prompt').at(-1)!
+    expect(prompt.followUp).toMatchObject({ continues: 0.9, yes: false })
+    expect(prompt.reasons).toContain('same task (0.90) → stays at xhigh')
+    expect(w.asks.some((a) => a.questions.includes('continues') && a.questions.includes('dissatisfied'))).toBe(true)
+    // The next message on the same task still holds it.
+    await submit($, '那第四个呢')
+    await step($, 0)
+    expect(sent(w)).toEqual(['xhigh', 'xhigh'])
+  })
+
+  test('a new task starts from the table, and the level it reached no longer holds', async ($, on) => {
+    let continues = 0.1
+    const w = world(on, { jev: (q, s) => reads(continues)(q, s), store: record('xhigh') })
+    turn(w)
+    await submit($, '换个事：README 里加一段安装说明')
+    await step($, 0)
+    // code on Opus 5.5 starts low; these tests' floor is high
+    expect(sent(w)).toEqual(['high'])
+    expect(rows(w, 'prompt').at(-1)!.reasons.some((r: string) => r.startsWith('same task'))).toBe(false)
+    continues = 0.9
+    await submit($, '再补一句 bun 的装法')
+    await step($, 0)
+    expect(sent(w)).toEqual(['high', 'high'])
+  })
+
+  test('the fallback\'s same-task reading counts, while its fault verdict stays ignored', async ($, on) => {
+    const w = world(on, { primaryDown: true, jev: (q, s) => (q.includes('task_type') ? stubJev(q, s) : { dissatisfied: { noul: 0.99 }, continues: { noul: 0.9 } }), store: record('xhigh') })
+    turn(w)
+    await submit($, '不对，再看看第三个函数')
+    await step($, 0)
+    expect(sent(w)).toEqual(['xhigh'])
+    expect(rows(w, 'prompt').at(-1)!.followUp).toMatchObject({ continues: 0.9, yes: false, error: 'fallback-ignored' })
+  })
+
+  test('on Mythos a level raised mid-loop becomes the task\'s level for its next prompt', async ($, on) => {
+    let continues = 0.9
+    const w = world(on, { model: MYTHOS, jev: (q, s) => reads(continues)(q, s) })
+    await submit($, 'fix the crash in parser.ts')
+    await step($, 0, 'high', { model: MYTHOS })
+    const n = await failEditFail($, w, 1, MYTHOS)
+    await step($, n, 'high', { model: MYTHOS })
+    expect(sent(w).at(-1)).toBe('xhigh')
+    await complete($)
+    turn(w)
+    await submit($, '继续看第三个函数')
+    await step($, 0, 'high', { model: MYTHOS })
+    expect(sent(w).at(-1)).toBe('xhigh')
+    continues = 0.1
+    await submit($, '另一个问题：CI 为什么这么慢')
+    await step($, 0, 'high', { model: MYTHOS })
+    expect(sent(w).at(-1)).toBe('high')
   })
 })

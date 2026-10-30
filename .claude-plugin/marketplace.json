@@ -22,7 +22,7 @@
     {
       "name": "jev",
       "source": "./mods/jev",
-      "description": "Jev effort routing for Opus and Mythos (policy.v10): start effort per prompt, follow-up fault raise, check-failure ladder."
+      "description": "Jev effort routing for Opus and Mythos (policy.v12): start effort per prompt, follow-up fault raise, check-failure ladder."
     },
     {
       "name": "mode",

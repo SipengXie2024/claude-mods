@@ -1,10 +1,11 @@
 import assert, { test } from './assert';
 import {
   ABLATABLE, DISSAT_DEFAULT, exploreStart, followUpEffort, getAblations, getDeepThresholds, getDissatThreshold, ladderRaise, MAX_RAISES, policyVersion, setAblations, isDeep,
-  normalizeBounds, setDeepThresholds, setDissatThreshold, taskEffort, TYPE_PREFS, typePrefs, typeTrusted, type Bounds, type FollowUpInput,
+  modelScale, normalizeBounds, setDeepThresholds, setDissatThreshold, taskEffort, TYPE_PREFS, typePrefs, typeTrusted, type Bounds, type FollowUpInput,
 } from '../src/policy';
 import { EFFORT_LEVELS, rank, type Effort } from '../src/effort';
 import type { TaskProfile } from '../src/types';
+import type { TaskType } from '../src/questions';
 
 const ALL: Bounds = { min: 'low', max: 'max' };
 const UP_TO_HIGH: Bounds = { min: 'low', max: 'high' };
@@ -12,44 +13,57 @@ const UP_TO_HIGH: Bounds = { min: 'low', max: 'high' };
 const profile = (p: Partial<TaskProfile>): TaskProfile => ({
   taskType: 'code', typeConfidence: 0.8, deep: 0.2, source: 'jev', ...p,
 });
-test('task: each kind starts at its base (chat/operate low, explain/write medium, research/code high)', () => {
-  const starts: Array<[TaskProfile['taskType'], Effort]> = [
-    ['chat', 'low'], ['explain', 'medium'], ['operate', 'low'], ['write', 'medium'], ['research', 'high'], ['code', 'high'],
+const OPUS55 = 'claude-opus-5-5';
+const HIGH_DEFAULT_MODELS = ['claude-mythos-5-1', 'claude-opus-4-8', null] as const;
+
+test('model scale: the 5.5 models read the default-medium table; Mythos, Fable, earlier Opus and an unknown model the default-high one', () => {
+  for (const m of ['claude-opus-5-5', 'claude-opus-5-5[1m]', 'claude-sonnet-5-5', 'opus']) assert.equal(modelScale(m), 'medium-default', m);
+  for (const m of ['claude-mythos-5-1', 'claude-fable-5-1', 'claude-opus-5', 'claude-opus-4-8', null]) assert.equal(modelScale(m), 'high-default', String(m));
+});
+
+test('task: each kind starts at its base on its model\'s table (Opus 5.5 low where failures show, Mythos a step up)', () => {
+  const opus55: Array<[TaskType, Effort]> = [
+    ['chat', 'low'], ['operate', 'low'], ['explain', 'medium'], ['write', 'medium'], ['design', 'low'], ['code', 'low'], ['research', 'medium'],
   ];
-  for (const [taskType, effort] of starts) {
-    assert.equal(taskEffort(profile({ taskType }), ALL).effort, effort, taskType);
-    assert.equal(taskEffort(profile({ taskType, source: 'heuristic', typeConfidence: 0.5 }), ALL).effort, effort, `heuristic ${taskType}`);
+  const highDefault: Array<[TaskType, Effort]> = [
+    ['chat', 'low'], ['operate', 'low'], ['explain', 'medium'], ['write', 'medium'], ['design', 'medium'], ['code', 'medium'], ['research', 'high'],
+  ];
+  for (const [taskType, effort] of opus55) {
+    assert.equal(taskEffort(profile({ taskType }), ALL, OPUS55).effort, effort, `Opus 5.5 ${taskType}`);
+    assert.equal(taskEffort(profile({ taskType, source: 'heuristic', typeConfidence: 0.5 }), ALL, OPUS55).effort, effort, `Opus 5.5 heuristic ${taskType}`);
+  }
+  for (const model of HIGH_DEFAULT_MODELS) {
+    for (const [taskType, effort] of highDefault) assert.equal(taskEffort(profile({ taskType }), ALL, model).effort, effort, `${model} ${taskType}`);
   }
 });
 
-test('task: without deep reasoning the task level never exceeds its base, whatever the kind', () => {
-  for (const taskType of ['chat', 'explain', 'operate', 'write', 'research', 'code'] as const) {
-    for (const deep of [0, 0.3, 0.49]) {
-      assert.equal(taskEffort(profile({ taskType, deep }), ALL).effort, TYPE_PREFS[taskType].base, `${taskType} ${deep}`);
+test('task: without deep reasoning the task level never exceeds its base, whatever the kind and model', () => {
+  for (const [model, scale] of [[OPUS55, 'medium-default'], ['claude-mythos-5-1', 'high-default']] as const) {
+    for (const taskType of ['chat', 'explain', 'operate', 'write', 'design', 'research', 'code'] as const) {
+      for (const deep of [0, 0.3, 0.49]) {
+        assert.equal(taskEffort(profile({ taskType, deep }), ALL, model).effort, TYPE_PREFS[scale][taskType].base, `${model} ${taskType} ${deep}`);
+      }
     }
   }
 });
 
-test('task: deep ≥ 0.5 starts a task one level above its base, at least high (research and code reach xhigh)', () => {
-  for (const taskType of ['chat', 'explain', 'operate', 'write'] as const) {
-    const p = profile({ taskType, typeConfidence: 0.9, deep: 0.6 });
-    assert.equal(taskEffort(p, ALL).effort, 'high', taskType);
-  }
-  const deepCode = profile({ taskType: 'code', typeConfidence: 0.9, deep: 0.99 });
-  assert.equal(taskEffort(deepCode, ALL).effort, 'xhigh');
-  assert.deepEqual(typePrefs(profile({ taskType: 'research', typeConfidence: 0.9, deep: 0.6 })), { floor: 'medium', base: 'xhigh' });
-  assert.deepEqual(typePrefs(profile({ taskType: 'write', typeConfidence: 0.9, deep: 0.5 })), { floor: 'low', base: 'high' });
-  assert.deepEqual(typePrefs(profile({ taskType: 'explain', typeConfidence: 0.9, deep: 0.9 })), { floor: 'low', base: 'high' });
-  const d = taskEffort(profile({ taskType: 'write', typeConfidence: 0.9, deep: 0.62 }), ALL);
+test('task: a task that needs something worked out starts at its kind\'s deep level, never at max', () => {
+  const opus55: Array<[TaskType, Effort]> = [
+    ['chat', 'low'], ['operate', 'medium'], ['explain', 'high'], ['write', 'high'], ['design', 'medium'], ['code', 'high'], ['research', 'xhigh'],
+  ];
+  const highDefault: Array<[TaskType, Effort]> = [
+    ['chat', 'low'], ['operate', 'medium'], ['explain', 'high'], ['write', 'high'], ['design', 'high'], ['code', 'xhigh'], ['research', 'xhigh'],
+  ];
+  for (const [taskType, effort] of opus55) assert.equal(taskEffort(profile({ taskType, typeConfidence: 0.9, deep: 0.99 }), ALL, OPUS55).effort, effort, `Opus 5.5 ${taskType}`);
+  for (const [taskType, effort] of highDefault) assert.equal(taskEffort(profile({ taskType, typeConfidence: 0.9, deep: 0.99 }), ALL, 'claude-mythos-5-1').effort, effort, `Mythos ${taskType}`);
+  const d = taskEffort(profile({ taskType: 'write', typeConfidence: 0.9, deep: 0.62 }), ALL, OPUS55);
   assert.ok(d.reasons.some((r) => r.includes('deep reasoning')), d.reasons.join('; '));
-  // deep never starts a task at max: max only comes from step escalation
-  assert.equal(taskEffort(profile({ taskType: 'research', deep: 1 }), ALL).effort, 'xhigh');
-  assert.equal(taskEffort(profile({ taskType: 'code', deep: 1 }), ALL).effort, 'xhigh');
+  assert.deepEqual(typePrefs(profile({ taskType: 'research', typeConfidence: 0.9, deep: 0.6 }), OPUS55), { floor: 'medium', base: 'xhigh', deep: 'xhigh' });
 });
 
-test('task: code starts at high, floored at medium', () => {
-  assert.deepEqual(typePrefs(profile({ taskType: 'code' })), { floor: 'medium', base: 'high' });
-  assert.equal(taskEffort(profile({ taskType: 'code', deep: 0 }), ALL).effort, 'high');
+test('task: code on Opus 5.5 starts low (raised when a check fails again), on the default-high table at medium', () => {
+  assert.deepEqual(typePrefs(profile({ taskType: 'code' }), OPUS55), { floor: 'low', base: 'low', deep: 'high' });
+  assert.deepEqual(typePrefs(profile({ taskType: 'code' })), { floor: 'medium', base: 'medium', deep: 'xhigh' });
 });
 
 test('task: low kind confidence skips the kind range for the untrusted one (the general default, high; deep adds nothing)', () => {
@@ -61,13 +75,13 @@ test('task: an old journaled profile without deep (task.v2 fields) is an untrust
   const old = { taskType: 'analysis', typeConfidence: 0.9, difficulty: 2, stakes: 0.1, source: 'jev' } as unknown as TaskProfile;
   assert.equal(typeTrusted(old), false);
   assert.equal(isDeep(old), false, 'missing deep counts as 0.4: neither deep nor confidently shallow');
-  assert.deepEqual(typePrefs(old), { floor: 'low', base: 'high' });
+  assert.deepEqual(typePrefs(old), { floor: 'low', base: 'high', deep: 'high' });
   const d = taskEffort(old, ALL);
   assert.equal(d.effort, 'high');
   // a known v3 kind with a missing or non-finite deep keeps its start and does not throw
   const noDeep = { taskType: 'chat', typeConfidence: 0.9, source: 'jev' } as unknown as TaskProfile;
-  assert.deepEqual(typePrefs(noDeep), { floor: 'low', base: 'low' });
-  assert.deepEqual(typePrefs(profile({ taskType: 'chat', typeConfidence: 0.9, deep: Number.NaN })), { floor: 'low', base: 'low' });
+  assert.deepEqual(typePrefs(noDeep), { floor: 'low', base: 'low', deep: 'low' });
+  assert.deepEqual(typePrefs(profile({ taskType: 'chat', typeConfidence: 0.9, deep: Number.NaN })), { floor: 'low', base: 'low', deep: 'low' });
 });
 
 test('task: bounds clamp the task level', () => {
@@ -84,19 +98,20 @@ test('task: misordered bounds are swapped, not fatal', () => {
 });
 
 test('kind trust: start follows the kind from 0.35', () => {
-  assert.deepEqual(typePrefs(profile({ taskType: 'chat', typeConfidence: 0.8, deep: 0.1 })), { floor: 'low', base: 'low' });
-  assert.deepEqual(typePrefs(profile({ taskType: 'chat', typeConfidence: 0.44, deep: 0.1 })), { floor: 'low', base: 'low' });
-  // not deep (deep < 0.5): no deep lift
-  assert.deepEqual(typePrefs(profile({ taskType: 'chat', typeConfidence: 0.9, deep: 0.4 })), { floor: 'low', base: 'low' });
-  assert.deepEqual(typePrefs(profile({ taskType: 'research', typeConfidence: 0.6, deep: 0.2 })), { floor: 'medium', base: 'high' });
-  assert.deepEqual(typePrefs(profile({ taskType: 'write', typeConfidence: 0.9, deep: 0.35 })), { floor: 'low', base: 'medium' });
-  assert.deepEqual(typePrefs(profile({ taskType: 'code', typeConfidence: 0.4 })), { floor: 'medium', base: 'high' });
-  assert.deepEqual(typePrefs(profile({ taskType: 'write', typeConfidence: 0.5, deep: 0.3, source: 'heuristic' })), { floor: 'low', base: 'medium' });
-  assert.deepEqual(typePrefs(profile({ taskType: 'chat', typeConfidence: 0.5, deep: 0.1, source: 'heuristic' })), { floor: 'low', base: 'low' });
+  const chat = { floor: 'low', base: 'low', deep: 'low' };
+  assert.deepEqual(typePrefs(profile({ taskType: 'chat', typeConfidence: 0.8, deep: 0.1 })), chat);
+  assert.deepEqual(typePrefs(profile({ taskType: 'chat', typeConfidence: 0.44, deep: 0.1 })), chat);
+  // not deep (deep < 0.5): the kind's base
+  assert.deepEqual(typePrefs(profile({ taskType: 'chat', typeConfidence: 0.9, deep: 0.4 })), chat);
+  assert.deepEqual(typePrefs(profile({ taskType: 'research', typeConfidence: 0.6, deep: 0.2 })), { floor: 'medium', base: 'high', deep: 'xhigh' });
+  assert.deepEqual(typePrefs(profile({ taskType: 'write', typeConfidence: 0.9, deep: 0.35 })), { floor: 'low', base: 'medium', deep: 'high' });
+  assert.deepEqual(typePrefs(profile({ taskType: 'code', typeConfidence: 0.4 })), { floor: 'medium', base: 'medium', deep: 'xhigh' });
+  assert.deepEqual(typePrefs(profile({ taskType: 'write', typeConfidence: 0.5, deep: 0.3, source: 'heuristic' })), { floor: 'low', base: 'medium', deep: 'high' });
+  assert.deepEqual(typePrefs(profile({ taskType: 'chat', typeConfidence: 0.5, deep: 0.1, source: 'heuristic' })), chat);
   assert.equal(typeTrusted(profile({ taskType: 'chat', typeConfidence: 0.2, source: 'heuristic' })), true);
   // below 0.35 a Jev kind is not trusted at all
   assert.equal(typeTrusted(profile({ taskType: 'chat', typeConfidence: 0.2 })), false);
-  assert.deepEqual(typePrefs(profile({ taskType: 'chat', typeConfidence: 0.2 })), { floor: 'low', base: 'high' });
+  assert.deepEqual(typePrefs(profile({ taskType: 'chat', typeConfidence: 0.2 })), { floor: 'low', base: 'high', deep: 'high' });
 });
 
 
@@ -134,7 +149,7 @@ test('ablations switch off exactly one rule each and are recorded in the policy 
   try {
     setDeepThresholds({ yes: 0.88, no: 0.3 });
     assert.deepEqual([...ABLATABLE], ['r1', 'dissat']);
-    assert.equal(policyVersion(), 'policy.v10');
+    assert.equal(policyVersion(), 'policy.v12');
     assert.equal(taskEffort(deepResearch, ALL).effort, 'xhigh');
 
     setAblations(['r1']);
@@ -142,11 +157,11 @@ test('ablations switch off exactly one rule each and are recorded in the policy 
     // r2, r4 and stuck no longer exist: they are ignored like any unknown name
     setAblations(['r2', 'r4', 'stuck']);
     assert.deepEqual(getAblations(), []);
-    assert.equal(policyVersion(), 'policy.v10');
+    assert.equal(policyVersion(), 'policy.v12');
 
     setAblations(['dissat', 'bogus', 'r1']);
     assert.deepEqual(getAblations(), ['r1', 'dissat']);
-    assert.equal(policyVersion(), 'policy.v10-ablate:r1,dissat');
+    assert.equal(policyVersion(), 'policy.v12-ablate:r1,dissat');
   } finally {
     setAblations([]);
     setDeepThresholds({ yes: 0.5, no: 0.3 });
@@ -318,7 +333,7 @@ test('follow-up: shadow mode and the dissat ablation record the signal but never
     assert.equal(shadow.effort, 'medium');
     assert.deepEqual(shadow.followUp, { p: 0.99, threshold: 0.98, yes: true, prevMax: 'max', streak: 1, hiLosses: 1, advisor: false, shadow: true });
     setAblations(['dissat']);
-    assert.equal(policyVersion(), 'policy.v10-ablate:dissat');
+    assert.equal(policyVersion(), 'policy.v12-ablate:dissat');
     const ablated = followUpEffort(fu());
     assert.equal(ablated.effort, 'medium');
     assert.equal(ablated.followUp.shadow, true);

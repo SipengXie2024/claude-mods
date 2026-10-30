@@ -32,12 +32,14 @@ test('task heuristics: unmatched requests default to research', () => {
   }
 });
 
-test('task heuristics: priority research > code > write > operate > explain, first match wins (chat only matches a whole social reply)', () => {
+test('task heuristics: priority research > code > design > write > operate > explain, first match wins (chat only matches a whole social reply)', () => {
   const cases: Array<[string, string]> = [
     ['review the fix for the crash', 'research'], // research beats code
     ['分析一下这个报错', 'research'],
     ['fix the typo in the README', 'code'], // code beats write
     ['写一个脚本批量重命名图片', 'code'],
+    ['fix the chart script that crashes', 'code'], // code beats design
+    ['把讲稿写进这页 PPT', 'design'], // design beats write
     ['write the deploy notes', 'write'], // write beats operate
     ['总结一下怎么部署', 'write'],
     ['what does it take to restart the server', 'operate'], // operate beats explain
@@ -71,6 +73,10 @@ test('task heuristics classify Chinese requests', () => {
     ['帮我设计一个多租户系统的架构方案', 'research'],
     ['证明这个算法的时间复杂度是 O(n log n)', 'research'],
     ['为什么要和 Octopus 比？？', 'research'],
+    ['做个 PPT 讲一下这个协议', 'design'],
+    ['做一个讲解视频，配音用克隆的声音', 'design'],
+    ['美化一下这个页面', 'design'],
+    ['这张图配色太难看了', 'design'],
   ];
   for (const [prompt, type] of cases) assert.equal(heuristicTaskProfile(prompt).taskType, type, prompt);
 });

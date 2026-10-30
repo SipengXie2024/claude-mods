@@ -47,6 +47,8 @@ export interface FollowUpRecord {
   advisor: boolean;
   /** recorded but not acted on (JEV_OPUS_DISSATISFACTION=shadow or the dissat ablation) */
   shadow: boolean;
+  /** Jev's probability that the message carries on the previous turn's task; absent when unavailable */
+  continues?: number;
   error?: string;
   latencyMs: number;
 }

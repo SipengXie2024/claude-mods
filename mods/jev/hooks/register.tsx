@@ -3,15 +3,17 @@ import { applyPolicyConfig, modConfig, parseEnvFile, type ModConfig } from '../s
 import { checkId, editPlan, editTargets, type EditTarget } from '../src/describe'
 import { clampEffort, describeBounds, effortAuto, effortTag, isEffort, maxEffort, rank, shift, type Effort } from '../src/effort'
 import { followUpSummary, isHumanPrompt, previousPromptIndex, unwrapChannel, userText, type Message } from '../src/followup'
+import { hash20 } from '../src/hash'
 import { JevClient, JevFallback, type JevIo, type JevSource } from '../src/jev'
 import { Ladder } from '../src/ladder'
 import { modelLabel } from '../src/model'
 import { exploreStart, ladderRaise, MAX_RAISES, normalizeBounds, policyVersion, taskEffort, type Bounds } from '../src/policy'
+import { chatRecap, CLI_IDENTITY, conversationContext, lastAgentText, RECAP_SYSTEM, recapIncrement, recapPrompt, type Recap } from '../src/recap'
 import { EffortRouter, FALLBACK_IGNORED, type FollowUpAsk } from '../src/router'
 import type { EffortDecision, TaskProfile } from '../src/types'
 
 /**
- * Jev effort routing per prompt (policy.v10). `prompt.submit` decides a
+ * Jev effort routing per prompt (policy.v11). `prompt.submit` decides a
  * human prompt's start level: the task level from Jev (or heuristics), the
  * follow-up fault raise, a short acknowledgement's floor, the carry-over of a
  * check that kept failing, and exploration. `turn.step` sends that level on
@@ -44,6 +46,8 @@ const SLASH_COMMAND = /^\/[A-Za-z][\w:-]*(\s|$)/
 /** A short acknowledgement starts at the previous prompt's level (borrowed from jev-pilot). */
 const ACK = /^(继续|接着|接着做|继续吧|go on|go ahead|continue|proceed|keep going)[\s!！。.~]*$/i
 const ACK_MAX_CHARS = 20
+/** Jev's probability at or above which a prompt carries on the previous turn's task. */
+const CONTINUE_YES = 0.5
 /** Stop reasons that leave the work unfinished. */
 const UNFINISHED_STOPS = new Set(['max_tokens', 'model_context_window_exceeded'])
 /** Fixed text, as jev-opus NOTES['advisor.v1']. */
@@ -104,6 +108,8 @@ interface SessionRecord {
   unfinished: boolean
   /** a /effort pin holds */
   pinned: boolean
+  /** the highest level the task in hand has reached, across its prompts: a continuing prompt starts no lower */
+  taskMax: Effort
 }
 
 /** What the band draws for one loop; a subagent's stays after its loop ends, marked done. */
@@ -223,6 +229,7 @@ async function readRecord($: $, session: string): Promise<SessionRecord | null> 
   return {
     max: v.max, last: v.last, followUp: v.followUp ?? null, at: v.at ?? 0,
     prompt: typeof v.prompt === 'number' ? v.prompt : 0, carry: v.carry === true, unfinished: v.unfinished === true, pinned: v.pinned === true,
+    taskMax: isEffort(v.taskMax) ? v.taskMax : v.max,
   }
 }
 
@@ -232,9 +239,23 @@ async function writeRecord($: $, session: string, rec: SessionRecord): Promise<v
   for (const k of keys.slice(0, Math.max(0, keys.length - STORE_SESSIONS))) await $.store.delete(k)
 }
 
-/** A fresh record for a new prompt that starts at `effort`. */
-const freshRecord = (prev: SessionRecord | null, effort: Effort, at: number, followUp: SessionRecord['followUp']): SessionRecord => ({
-  max: effort, last: effort, followUp, at, prompt: (prev?.prompt ?? 0) + 1, carry: false, unfinished: false, pinned: pinned === true,
+const recapKey = (session: string) => `recap:${session}`
+
+/** The session's rolling recap; its own store entry, since it is written after the turn while the next prompt may be rewriting the record. */
+async function readRecap($: $, session: string): Promise<Recap | null> {
+  const v = (await $.store.get(recapKey(session))) as Partial<Recap> | undefined
+  return v && typeof v.text === 'string' && typeof v.coversHash === 'string' ? { text: v.text, coversHash: v.coversHash, at: v.at ?? 0 } : null
+}
+
+async function writeRecap($: $, session: string, recap: Recap): Promise<void> {
+  await $.store.set(recapKey(session), recap)
+  const keys = (await $.store.keys()).filter((k) => k.startsWith('recap:'))
+  for (const k of keys.slice(0, Math.max(0, keys.length - STORE_SESSIONS))) await $.store.delete(k)
+}
+
+/** A fresh record for a new prompt that starts at `effort`; `taskMax` carries a continuing task's highest level, else the start. */
+const freshRecord = (prev: SessionRecord | null, effort: Effort, at: number, followUp: SessionRecord['followUp'], taskMax: Effort = effort): SessionRecord => ({
+  max: effort, last: effort, followUp, at, prompt: (prev?.prompt ?? 0) + 1, carry: false, unfinished: false, pinned: pinned === true, taskMax: maxEffort(taskMax, effort),
 })
 
 /** The session's pin as the store holds it, read once per module load. */
@@ -356,15 +377,19 @@ function routed(model: string): boolean {
   return ROUTED_MODEL.test(model) && !GATEWAY_MODEL.test(model)
 }
 
-/** The follow-up ask for a human prompt after a turn in which the agent replied; undefined otherwise. */
-async function followUpAsk($: $, text: string, prev: SessionRecord, cfg: ModConfig): Promise<FollowUpAsk | undefined> {
-  const messages = (await $.session.messages({ as: 'api' })) as Message[]
+/**
+ * The follow-up ask for a human prompt after a turn in which the agent replied;
+ * undefined otherwise. `messages` is the transcript before the prompt; the
+ * recap, when there is one, leads the summary of the previous turn.
+ */
+async function followUpAsk($: $, messages: readonly Message[], recap: Recap | null, text: string, prev: SessionRecord, cfg: ModConfig): Promise<FollowUpAsk | undefined> {
   const all: Message[] = [...messages, { role: 'user', content: text }]
   const lastUser = all.length - 1
   const prevIdx = previousPromptIndex(all, lastUser)
   if (prevIdx < 0 || !all.slice(prevIdx + 1, lastUser).some((m) => m.role === 'assistant')) return undefined
+  const turn = followUpSummary(all, prevIdx, lastUser)
   return {
-    summary: followUpSummary(all, prevIdx, lastUser),
+    summary: recap ? `RECAP:\n${recap.text.trim()}\n${turn}` : turn,
     prevMax: prev.max,
     prevDissatisfied: prev.followUp?.yes === true,
     prevStreak: prev.followUp?.streak ?? 0,
@@ -413,25 +438,41 @@ async function routePrompt($: $, raw: string, origin: string): Promise<{ advisor
     return null
   }
 
-  const followUp = human && cfg.followUp.mode && prev ? await followUpAsk($, text, prev, cfg) : undefined
+  const messages = (await $.session.messages({ as: 'api' })) as Message[]
+  const recap = await readRecap($, session)
+  const context = conversationContext(messages, recap, prev?.carry === true)
+  const followUp = human && cfg.followUp.mode && prev ? await followUpAsk($, messages, recap, text, prev, cfg) : undefined
   loop.router.useJev(client ? client.bind(io($)) : null)
-  const decision = await loop.router.routeTask(text || '(continuing an earlier task)', loop.effort, undefined, followUp)
+  loop.router.useModel(model)
+  const decision = await loop.router.routeTask(text || '(continuing an earlier task)', loop.effort, context.text || undefined, followUp)
   noteTag(loop, decision)
   loop.profile = decision.profile ?? loop.router.lastProfileFallback(text)
   const bounds = loop.router.bounds
   const f = decision.followUp
 
+  // The level a continuing task has reached, handed to the new record; null for a new task.
+  let taskCarry: Effort | null = null
   if (human && prev) {
     const trimmed = text.trim()
     // A short acknowledgement continues the work at hand: never start it below where the previous prompt ended.
     const ack = trimmed.length <= ACK_MAX_CHARS && (loop.profile.taskType === 'chat' || ACK.test(trimmed))
-    let level = taskEffort(loop.profile, bounds).effort
+    let level = taskEffort(loop.profile, bounds, model).effort
     if (ack && rank(level) < rank(prev.last)) {
       level = clampEffort(prev.last, bounds.min, bounds.max)
       if (rank(level) > rank(decision.effort)) moveTo(decision, level, `short acknowledgement → stays at ${level}`)
     }
-    const continues = ack || (f?.yes === true && !f.shadow) || (prev.unfinished && trimmed.length <= ACK_MAX_CHARS)
-    if (continues) loop.ladder = continued
+    // Start low, raise on failure: a level a task was raised to holds while the task goes on, so the next
+    // message does not drop back and fail its way up again. Jev reads whether the message carries on the task.
+    const sameTask = f?.continues !== undefined && f.continues >= CONTINUE_YES
+    if (sameTask && rank(level) < rank(prev.taskMax)) {
+      level = clampEffort(prev.taskMax, bounds.min, bounds.max)
+      if (rank(level) > rank(decision.effort)) moveTo(decision, level, `same task (${f!.continues!.toFixed(2)}) → stays at ${level}`)
+    }
+    const continues = sameTask || ack || (f?.yes === true && !f.shadow) || (prev.unfinished && trimmed.length <= ACK_MAX_CHARS)
+    if (continues) {
+      loop.ladder = continued
+      taskCarry = prev.taskMax
+    }
     // Opus did not act on the failing check mid-loop: the prompt that continues the work starts one rung up.
     if (continues && prev.carry && !MID_LOOP_MODEL.test(model)) {
       const to = clampEffort(shift(level, 1), bounds.min, bounds.max)
@@ -455,7 +496,7 @@ async function routePrompt($: $, raw: string, origin: string): Promise<{ advisor
   }
 
   const at = await $.clock.now()
-  const rec = freshRecord(prev, decision.effort, at, f ? { yes: f.yes, streak: f.streak, hiLosses: f.hiLosses } : null)
+  const rec = freshRecord(prev, decision.effort, at, f ? { yes: f.yes, streak: f.streak, hiLosses: f.hiLosses } : null, taskCarry ?? decision.effort)
   await writeRecord($, session, rec)
   loop.next = { kind: 'prompt', task: decision }
   const advisor = f?.advisor === true
@@ -467,7 +508,7 @@ async function routePrompt($: $, raw: string, origin: string): Promise<{ advisor
   if (decision.carry) $.ui.toast(`Jev: a check still fails after a change → ${decision.effort}`)
   if (advisor) $.ui.toast('Jev: asking the model to consult the advisor')
   await journal($, dir, record(decision, {
-    at, session, agent: MAIN, event: 'prompt', prompt: rec.prompt, origin, model, ...taggedField(loop),
+    at, session, agent: MAIN, event: 'prompt', prompt: rec.prompt, origin, model, context: context.source, ...taggedField(loop),
     ...(f ? { correction: f.yes, advisorAvailable: followUp?.advisorAvailable } : {}),
     ...(cfg.jevRefusedHost ? { jevRefusedHost: cfg.jevRefusedHost } : {}),
   }))
@@ -519,6 +560,7 @@ async function startOfTurn($: $, loop: Loop, key: string, cfg: ModConfig, client
   if (key === MAIN && next?.kind === 'command') mainTag = tagBounds(text, cfg)
   startPrompt(loop, text, cfg)
   loop.router.useJev(client ? client.bind(io($)) : null)
+  loop.router.useModel(loop.model)
   const d = await loop.router.routeTask(text || '(continuing an earlier task)', loop.effort)
   noteTag(loop, d)
   loop.profile = d.profile ?? loop.router.lastProfileFallback(text)
@@ -591,7 +633,7 @@ async function decideStep($: $, e: { index: number; model: string; effort?: unkn
     noteBand($, key, e.model, loop, decision)
     if (key === MAIN && decision.kind === 'step') {
       const rec = await readRecord($, session)
-      if (rec) await writeRecord($, session, { ...rec, max: maxEffort(rec.max, decision.effort), last: decision.effort })
+      if (rec) await writeRecord($, session, { ...rec, max: maxEffort(rec.max, decision.effort), last: decision.effort, taskMax: maxEffort(rec.taskMax, decision.effort) })
     }
     await journal($, dir, record(decision, {
       at: await $.clock.now(), session, agent: key, event: 'step', step: e.index, turnId: e.turnId,
@@ -688,6 +730,56 @@ async function endTurn($: $, e: { turnId: string; agentId?: string; reason: stri
   })
 }
 
+let recapChain: Promise<void> = Promise.resolve()
+
+/**
+ * Rewrites the session's recap from the previous recap and what happened since
+ * the reply it covers: the person's prompts and the agent's replies in full,
+ * and a line of what the agent did. `answer` is the turn's final reply, added
+ * when the transcript does not hold it yet. A model that does not answer
+ * leaves the recap as it was; the journal says why.
+ */
+async function updateRecap($: $, answer: string): Promise<void> {
+  if (!routed(await $.session.model())) return
+  const { cfg, dir } = await load($)
+  const session = await $.session.id()
+  const recap = await readRecap($, session)
+  const messages = (await $.session.messages({ as: 'api' })) as Message[]
+  const final = answer.trim()
+  const all: Message[] = final && lastAgentText(messages) !== final ? [...messages, { role: 'assistant', content: final }] : messages
+  const increment = recapIncrement(all, recap?.coversHash ?? null)
+  if (!increment) return
+  const started = await $.clock.now()
+  const prompt = recapPrompt(recap?.text ?? null, increment)
+  const r = await $.model.complete({
+    model: cfg.recapModel,
+    system: [{ text: CLI_IDENTITY }, { text: RECAP_SYSTEM, cache: true }],
+    prompt,
+    maxTokens: 1024,
+    effort: 'low',
+  })
+  let text = r.isAnswered ? r.text.trim() : ''
+  let model = cfg.recapModel
+  const failed = r.isAnswered ? (text ? null : { error: 'empty-reply' }) : r.reason === 'api-error' ? { error: r.reason, status: r.status, apiError: r.error } : { error: r.reason }
+  let fallbackError: string | undefined
+  if (failed && cfg.recapFallback) {
+    const f = await chatRecap((url, init) => $.http.fetch(url, init), cfg.recapFallback, prompt)
+    if ('text' in f) {
+      text = f.text
+      model = cfg.recapFallback.model
+    } else fallbackError = f.error
+  }
+  const at = await $.clock.now()
+  if (text) await writeRecap($, session, { text, coversHash: hash20(lastAgentText(all)), at })
+  await journal($, dir, {
+    at, session, agent: MAIN, event: 'recap', model, ok: text !== '', ms: at - started, inputChars: increment.length,
+    ...(text ? { outputChars: text.length } : {}),
+    ...(r.isAnswered ? { outputTokens: r.usage.output_tokens, inputTokens: r.usage.input_tokens } : {}),
+    ...(failed ? { recapError: failed } : {}),
+    ...(failed && cfg.recapFallback ? { fallbackModel: cfg.recapFallback.model, ...(fallbackError ? { fallbackError } : {}) } : {}),
+  })
+}
+
 export const register: Register = (on) => {
   on('prompt.submit', async ($, e, next) => {
     // A prompt delivered into a running turn joins that turn's steps.
@@ -780,7 +872,15 @@ export const register: Register = (on) => {
         $.ui.invalidate('ui.render')
       }
     }
-    return next(e)
+    const done = await next(e)
+    // The main loop's recap is rewritten after the turn is handed on, off the
+    // path of the next prompt; updates run one at a time, in turn order.
+    if (!e.agentId) {
+      recapChain = recapChain
+        .then(() => updateRecap($, e.answer))
+        .catch((err) => $.ui.log(`jev: recap not updated (${(err as Error)?.name ?? 'error'})`, { to: 'debug' }))
+    }
+    return done
   })
 
   on('session.end', ($, e, next) => {

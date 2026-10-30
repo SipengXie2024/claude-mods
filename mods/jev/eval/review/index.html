@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>jev 标注复核</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="shell">
+  <div class="shell-inner">
+    <h1>jev 标注复核</h1>
+    <label class="set-pick">数据集
+      <select id="set">
+        <option value="batch2">第二批：新抽样（两个模型标注）</option>
+        <option value="recheck">复查：你之前标的</option>
+        <option value="batch1">第一批：jev 日志</option>
+      </select>
+    </label>
+    <div class="progress" aria-live="polite">
+      <span id="count">载入中</span>
+      <span class="bar" aria-hidden="true"><span id="bar-fill"></span></span>
+    </div>
+    <nav class="tabs" role="tablist" aria-label="筛选">
+      <button role="tab" data-filter="todo" aria-selected="true">待复核</button>
+      <button role="tab" data-filter="done" aria-selected="false">已复核</button>
+      <button role="tab" data-filter="all" aria-selected="false">全部</button>
+    </nav>
+    <button id="legend-toggle" class="ghost" aria-expanded="false" aria-controls="legend">类型说明与快捷键</button>
+  </div>
+</header>
+
+<section id="legend" class="legend" hidden>
+  <div class="legend-inner">
+    <dl id="kind-defs"></dl>
+    <div class="keys">
+      <h2>快捷键</h2>
+      <p>先点一下某条（或按 <kbd>j</kbd> / <kbd>k</kbd> 上下移动），再按：</p>
+      <ul>
+        <li><kbd>1</kbd>–<kbd>7</kbd> 选类型，顺序同上表</li>
+        <li><kbd>a</kbd> <kbd>s</kbd> <kbd>d</kbd> <kbd>f</kbd> 选档位 low、medium、high、xhigh</li>
+        <li><kbd>Enter</kbd> 确认并跳到下一条</li>
+      </ul>
+      <p>每条上方的“前文”是你上一句话和 Claude 上一轮回复的结尾，判断“可以”“继续”这类短句时先看它。</p>
+      <p>虚线框是模型给的标注，还没被你确认。“之后做了什么”是这句话之后 Claude 实际做的事和你的下一句话，用来判断这句话最后变成了什么工作。确认后这一条记为你的标注，评分时和模型标注分开统计。</p>
+    </div>
+  </div>
+</section>
+
+<main id="list" aria-label="标注列表"></main>
+<p id="empty" class="empty" hidden>这个筛选下没有条目。</p>
+
+<template id="row-tpl">
+  <article class="row" tabindex="-1">
+    <div class="meta">
+      <span class="num"></span>
+      <span class="when"></span>
+      <span class="model"></span>
+    </div>
+    <div class="text-col">
+      <details class="before" hidden>
+        <summary>前文</summary>
+        <div class="before-user"><span class="who">你上一句</span><p></p></div>
+        <div class="before-agent"><span class="who">Claude 上一轮回复的结尾</span><p></p></div>
+      </details>
+      <div class="text"></div>
+      <button class="more ghost" hidden>展开全文</button>
+      <div class="opinions" hidden></div>
+      <details class="after" hidden>
+        <summary>之后做了什么</summary>
+        <dl class="after-body"></dl>
+      </details>
+    </div>
+    <div class="controls">
+      <fieldset class="kinds">
+        <legend>类型</legend>
+        <div class="seg"></div>
+      </fieldset>
+      <fieldset class="levels">
+        <legend>起始档位</legend>
+        <div class="ladder"></div>
+      </fieldset>
+      <p class="draft-why"></p>
+      <div class="note-row">
+        <input class="note" type="text" maxlength="500" placeholder="备注（可选）" aria-label="备注">
+        <button class="confirm primary">确认</button>
+      </div>
+      <div class="actions"><span class="status"></span></div>
+    </div>
+  </article>
+</template>
+
+<script src="app.js"></script>
+</body>
+</html>

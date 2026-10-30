@@ -72,12 +72,12 @@ test('validateAnswers snaps float noise at the score bounds but still rejects re
 });
 
 test('validateAnswers recomputes confidence from probabilities: (n·pmax − 1)/(n − 1)', () => {
-  // 6 task kinds; unnormalized map (sums to 2) → pmax 0.5 → (6·0.5 − 1)/5 = 2/5
+  // 7 task kinds; unnormalized map (sums to 2) → pmax 0.5 → (7·0.5 − 1)/6 = 5/12
   const { answers } = validateAnswers(
     { task_type: { choice: 'code', confidence: 0.99, probabilities: { code: 1, research: 0.6, chat: 0.4 } } },
     TASK_QUESTIONS,
   );
-  assert.ok(answers.task_type?.kind === 'choice' && Math.abs(answers.task_type.confidence - 2 / 5) < 1e-12);
+  assert.ok(answers.task_type?.kind === 'choice' && Math.abs(answers.task_type.confidence - 5 / 12) < 1e-12);
   const certain = validateAnswers(
     { step_difficulty: { score: 2, confidence: 0.1, probabilities: { '2': 1 } } }, // certain → 1 despite server 0.1
     STEP_QUESTIONS,
@@ -117,8 +117,8 @@ test('decisionsRequest: noul as predicate, choice criteria as choices in the que
   assert.equal(req.input, 'USER REQUEST:\nfix it');
   assert.deepEqual(req.questions.map((q) => [q.name, q.type]), [['task_type', 'choice'], ['deep', 'predicate'], ['step_difficulty', 'score']]);
   const choices = req.questions[0]!.choices as Array<{ value: string; description: string }>;
-  assert.deepEqual(choices.map((c) => c.value), ['chat', 'explain', 'operate', 'write', 'code', 'research']);
-  assert.equal(choices[4]!.description, TASK_QUESTIONS.task_type.criteria.code);
+  assert.deepEqual(choices.map((c) => c.value), ['chat', 'explain', 'operate', 'write', 'design', 'code', 'research']);
+  assert.equal(choices.find((c) => c.value === 'code')!.description, TASK_QUESTIONS.task_type.criteria.code);
   assert.equal(req.questions[1]!.instructions, TASK_QUESTIONS.deep.instructions);
   assert.deepEqual(req.questions[2]!.levels, ['0', '1', '2', '3', '4'].map((c) => ({ label: c, description: c })));
 });

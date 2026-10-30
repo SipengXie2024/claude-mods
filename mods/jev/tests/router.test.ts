@@ -47,7 +47,7 @@ test('the evaluator gets the full request', () => {
 test('decisions carry policy and question-set versions', async () => {
   const t = await lowTask().routeTask('hi', null);
   assert.equal(t.policyVersion, POLICY_VERSION);
-  assert.equal(POLICY_VERSION, 'policy.v10');
+  assert.equal(POLICY_VERSION, 'policy.v12');
   assert.deepEqual(t.questionVersions, { task: TASK_SET_VERSION, followup: FOLLOWUP_SET_VERSION });
 });
 
@@ -55,7 +55,7 @@ test('a stub Jev returning {} keeps the local estimate', async () => {
   const d = await lowTask(stubJev(() => ({}))).routeTask('fix the crash in parser.ts', null);
   assert.equal(d.source, 'heuristic');
   assert.equal(d.jevError, 'jev returned no usable answers');
-  assert.equal(d.effort, 'high');
+  assert.equal(d.effort, 'medium');
 });
 
 test('invalid signals keep the local estimate; present answers on old clients count as valid', async () => {
@@ -81,7 +81,7 @@ test('circuitOpen is treated as Jev unavailable', async () => {
   assert.equal(d.jevError, 'jev circuit open');
 });
 
-test('decision 6: a fallback answer sets the task kind only; its deep never raises the start', async () => {
+test('decision 6: a fallback answer counts like the primary\'s, deep included, and says it came from the fallback', async () => {
   setDeepThresholds({ yes: 0.72, no: 0.38 });
   try {
     const answer = (fallbackFrom?: string) => stubJev((_s, q) => ({
@@ -90,11 +90,11 @@ test('decision 6: a fallback answer sets the task kind only; its deep never rais
     const primary = await lowTask(answer()).routeTask('rewrite the scheduler', null);
     assert.equal(primary.effort, 'xhigh', 'the primary\'s deep raises code to xhigh');
     const fallback = await lowTask(answer('deadline exceeded')).routeTask('rewrite the scheduler', null);
-    assert.equal(fallback.effort, 'high', 'the fallback\'s deep is ignored');
+    assert.equal(fallback.effort, 'xhigh', 'the fallback\'s deep raises code the same way');
     assert.equal(fallback.profile?.taskType, 'code');
     assert.equal(fallback.source, 'jev');
-    assert.ok(fallback.reasons.includes('fallback answer: task kind only'), fallback.reasons.join('; '));
-    assert.ok(fallback.profile!.deep < 0.72);
+    assert.ok(fallback.reasons.includes('fallback answer'), fallback.reasons.join('; '));
+    assert.equal(fallback.profile!.deep, 0.95);
   } finally {
     setDeepThresholds({ ...DEEP_DEFAULTS });
   }
@@ -192,7 +192,7 @@ test('follow-up: the task ask is byte-identical with and without the follow-up s
     assert.deepEqual(a1.profile, a2.profile);
     assert.equal(a2.followUp, undefined);
     assert.equal(a1.effort, 'xhigh');
-    assert.equal(a2.effort, 'high');
+    assert.equal(a2.effort, 'medium');
   });
 });
 
@@ -200,7 +200,7 @@ test('follow-up: a failed, invalid or throwing follow-up ask raises nothing and 
   await withDissat(async () => {
     for (const p of ['fail', 'throw'] as const) {
       const d = await new EffortRouter({ jev: faultJev(p), bounds: { min: 'low', max: 'max' } }).routeTask('不对', 'medium', undefined, complaint());
-      assert.equal(d.effort, 'high', p);
+      assert.equal(d.effort, 'medium', p);
       assert.equal(d.jevError, undefined, p);
       assert.equal(d.source, 'jev', p);
       assert.equal(d.followUp?.yes, false, p);
@@ -211,7 +211,7 @@ test('follow-up: a failed, invalid or throwing follow-up ask raises nothing and 
       ? { answers: { dissatisfied: noul(0.99) }, signals: { dissatisfied: 'invalid' } }
       : { answers: { task_type: choice('code'), deep: noul(0.1) }, signals: allValid(Object.keys(q)) });
     const d = await new EffortRouter({ jev: invalid, bounds: { min: 'low', max: 'max' } }).routeTask('不对', 'medium', undefined, complaint());
-    assert.equal(d.effort, 'high');
+    assert.equal(d.effort, 'medium');
     assert.equal(d.followUp?.error, 'jev returned no usable answers');
   });
 });
@@ -220,7 +220,7 @@ test('decision 6: a follow-up verdict from the fallback endpoint never raises', 
   await withDissat(async () => {
     const d = await new EffortRouter({ jev: faultJev(0.99, 0.1, 'Jev HTTP 503'), bounds: { min: 'low', max: 'max' } })
       .routeTask('不对，还是报错', 'medium', undefined, complaint({ prevMax: 'high' }));
-    assert.equal(d.effort, 'high');
+    assert.equal(d.effort, 'medium');
     assert.equal(d.followUp?.yes, false);
     assert.equal(d.followUp?.error, FALLBACK_IGNORED);
     assert.equal(d.followUp?.raisedTo, undefined);
