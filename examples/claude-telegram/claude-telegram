@@ -1,22 +1,27 @@
 #!/usr/bin/env bash
-# The only Claude session allowed to talk to Telegram.
-# Telegram allows one poller per bot token, and every new telegram plugin
-# server kills the previous one. The token lives only in telegram-live/, so
-# ordinary sessions (which use the default channels/telegram/ dir) exit at
-# startup without polling; this launcher points the plugin at telegram-live/.
+# The only Claude session allowed to talk to Telegram, run as a Router: each
+# request goes to a background worker (mods/tg-router), and a reply to any
+# message of a request reaches that request's worker.
+# Telegram allows one poller per bot token, and every new channel server kills
+# the previous one. The token lives only in telegram-live/, so ordinary
+# sessions (which use the default channels/telegram/ dir) exit at startup
+# without polling; this launcher points the channel at telegram-live/.
 cd "$HOME" || exit 1
 export TELEGRAM_STATE_DIR="$HOME/.claude/channels/telegram-live"
 CLAUDE_MODS="${CLAUDE_MODS:-$HOME/claude-mods}"
+CHANNEL_DIR="$CLAUDE_MODS/examples/claude-telegram/tg-channel"
 
-# Those ordinary sessions' failed starts mark the server in this cache, and
-# Claude Code then skips it at startup. Clear the mark so this session connects.
-cache="$HOME/.claude/mcp-needs-auth-cache.json"
-if [ -f "$cache" ] && tmp=$(mktemp) && jq 'del(.["plugin:telegram:telegram"])' "$cache" > "$tmp"; then
-  mv "$tmp" "$cache"
-fi
+# The channel is tg-channel, a copy of the official telegram plugin's server
+# that also reports which message a message replies to. It is not on the
+# approved channel list, so it loads as a development channel: Claude Code asks
+# for one confirmation at each start. The official plugin stays installed for
+# other sessions but is off here, or its server would poll the same token.
+mcp_config=$(jq -nc --arg dir "$CHANNEL_DIR" \
+  '{mcpServers: {"tg-channel": {command: "bun", args: ["run", "--cwd", $dir, "--shell=bun", "--silent", "start"]}}}')
 
-# tg-progress loads in this session only: it is not installed from the marketplace.
 exec claude --dangerously-skip-permissions \
-  --channels plugin:telegram@claude-plugins-official \
-  --plugin-dir "$CLAUDE_MODS/mods/tg-progress" \
+  --settings '{"enabledPlugins":{"telegram@claude-plugins-official":false}}' \
+  --mcp-config "$mcp_config" \
+  --dangerously-load-development-channels server:tg-channel \
+  --plugin-dir "$CLAUDE_MODS/mods/tg-router" \
   "$@"

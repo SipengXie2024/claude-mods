@@ -10,6 +10,10 @@ describe('channel tag', () => {
     const text = '<channel source="plugin:telegram:telegram" chat_id="7051661301" message_id="878" user="V" ts="x">\nhi\n</channel>'
     expect(parseChannelTag(text)).toEqual({ chatId: '7051661301', messageId: 878 })
   })
+  test('reads the replied-to message id', () => {
+    const text = '<channel source="plugin:tg-channel:telegram" chat_id="7051661301" message_id="901" reply_to_message_id="500" user="V">\n别改测试\n</channel>'
+    expect(parseChannelTag(text)).toEqual({ chatId: '7051661301', messageId: 901, replyTo: 500 })
+  })
   test('a tag without chat_id gives null', () => {
     expect(parseChannelTag('<channel source="plugin:telegram:telegram">hi</channel>')).toBe(null)
     expect(parseChannelTag('plain prompt')).toBe(null)

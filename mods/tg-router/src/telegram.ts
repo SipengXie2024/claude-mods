@@ -1,7 +1,7 @@
 import type { HttpInit, HttpResponse } from 'claude-code'
 
-// Bot API calls for the card. Send and edit only: the official telegram plugin
-// owns getUpdates, and a second poller would steal its updates.
+// Bot API calls for cards, acks and worker answers. Send and edit only: the
+// channel server owns getUpdates, and a second poller would steal its updates.
 
 /** The host calls this module needs; register.ts builds it from $. */
 export type TgIo = {
@@ -23,10 +23,15 @@ function parseEnvFile(text: string): Record<string, string> {
   return out
 }
 
+/** The channel's state folder: TELEGRAM_STATE_DIR, else the channel's default. */
+export async function stateDir(io: Pick<TgIo, 'stateDir' | 'home'>): Promise<string> {
+  return (await io.stateDir()) ?? `${(await io.home()) ?? ''}/.claude/channels/telegram`
+}
+
 /** The bot token from the channel's state folder, read once per module load. */
 export function token(io: TgIo): Promise<string | null> {
   tokenP ??= (async () => {
-    const dir = (await io.stateDir()) ?? `${(await io.home()) ?? ''}/.claude/channels/telegram`
+    const dir = await stateDir(io)
     try {
       return parseEnvFile(await io.read(`${dir}/.env`)).TELEGRAM_BOT_TOKEN || null
     } catch {
@@ -34,11 +39,6 @@ export function token(io: TgIo): Promise<string | null> {
     }
   })()
   return tokenP
-}
-
-/** For tests: forget the cached token. */
-export function resetToken(): void {
-  tokenP = null
 }
 
 async function call(io: TgIo, method: string, body: Record<string, unknown>): Promise<Record<string, any> | null> {
@@ -59,12 +59,15 @@ async function call(io: TgIo, method: string, body: Record<string, unknown>): Pr
   return null
 }
 
-/** Sends the card; resolves its message_id, or undefined when Telegram refused. */
-export async function send(io: TgIo, chatId: string, text: string, replyTo?: number): Promise<number | undefined> {
+/**
+ * Sends a message; resolves its message_id, or undefined when Telegram refused.
+ * A card goes out silent; an ack or an answer (`notify`) makes the phone ring.
+ */
+export async function send(io: TgIo, chatId: string, text: string, replyTo?: number, notify = false): Promise<number | undefined> {
   const r = await call(io, 'sendMessage', {
     chat_id: chatId,
     text,
-    disable_notification: true,
+    disable_notification: !notify,
     ...(replyTo ? { reply_parameters: { message_id: replyTo, allow_sending_without_reply: true } } : {}),
   })
   const id = r?.result?.message_id

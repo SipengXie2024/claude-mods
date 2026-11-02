@@ -1,0 +1,11 @@
+tg-channel is a modified copy of the Telegram channel plugin from
+anthropics/claude-plugins-official (plugin "telegram", version 0.0.7),
+licensed under the Apache License 2.0 (see LICENSE).
+
+Changes from the original:
+- server.ts: inbound channel messages carry `reply_to_message_id`, the id of
+  the message they reply to, when they reply to one.
+- The plugin manifest, .mcp.json and the access/configure skills are left out:
+  examples/claude-telegram/claude-telegram starts server.ts as the MCP server
+  `tg-channel` through --mcp-config. Pairing and access.json stay as the
+  official plugin's /telegram:access skill manages them.

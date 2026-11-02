@@ -20,16 +20,17 @@ export type Turn = {
   done: boolean
 }
 
-export type ChannelTag = { chatId: string; messageId?: number }
+export type ChannelTag = { chatId: string; messageId?: number; replyTo?: number }
 
-/** chat_id and message_id from `<channel source="…telegram…" chat_id="…" message_id="…">`. */
+/** chat_id, message_id and reply_to_message_id from `<channel source="…telegram…" …>`. */
 export function parseChannelTag(text: string): ChannelTag | null {
   const tag = /<channel\b[^>]*>/.exec(text)?.[0]
   if (!tag) return null
   const chatId = /\bchat_id="(-?\d+)"/.exec(tag)?.[1]
   if (!chatId) return null
   const mid = /\bmessage_id="(\d+)"/.exec(tag)?.[1]
-  return { chatId, ...(mid ? { messageId: Number(mid) } : {}) }
+  const reply = /\breply_to_message_id="(\d+)"/.exec(tag)?.[1]
+  return { chatId, ...(mid ? { messageId: Number(mid) } : {}), ...(reply ? { replyTo: Number(reply) } : {}) }
 }
 
 const basename = (p: unknown) => (typeof p === 'string' ? p.split('/').pop() || p : '')
@@ -79,7 +80,8 @@ export function fmtDuration(ms: number): string {
 
 /** The live card. */
 export function renderLive(t: Turn, now: number): string {
-  const lines = [`🔄 已跑 ${fmtDuration(now - t.startedAt)} · ${t.tools} 个工具`]
+  // a worker's card counts no tools: the host does not show its calls to this mod
+  const lines = [`🔄 已跑 ${fmtDuration(now - t.startedAt)}${t.tools ? ` · ${t.tools} 个工具` : ''}`]
   if (t.current) lines.push(`当前：${t.current.label}（已 ${fmtDuration(now - t.current.since)}）`)
   if (t.recent.length) lines.push(`最近：${t.recent.slice(-2).join(' · ')}`)
   return redact(lines.join('\n'))
@@ -94,7 +96,7 @@ export function renderFinal(t: Turn, reason: EndReason, durationMs: number): str
   const where = last ? ` · 最后在：${last}` : ''
   const line =
     reason === 'answer'
-      ? `✅ 完成 · ${d} · ${t.tools} 个工具`
+      ? `✅ 完成 · ${d}${t.tools ? ` · ${t.tools} 个工具` : ''}`
       : reason === 'aborted'
         ? `⚠️ 被中断 · ${d}${where}`
         : `❌ 出错 · ${d} · ${reason === 'refusal' ? '模型拒绝' : 'API error'}${where}`
