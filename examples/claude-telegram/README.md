@@ -37,6 +37,24 @@ a known thread go straight to their worker).
 
 Tasks are kept in the mod's store and dropped 14 days after their last message.
 
+## Typing in the session's own terminal
+
+A message typed in the `claude-telegram` pane (or sent to it through Remote
+Control) is a request like a Telegram message: the Router dispatches it to a
+worker (`dispatch` with chat_id `tui`; the worker is named `tui-<id>`) and stays
+free for the next message. Nothing goes to Telegram for it:
+
+- The worker's answer comes back as a message from the `tg-router` plugin,
+  which the terminal shows in full; the Router acknowledges it in one line.
+  A worker the mod spawned sends the Router no completion notice of its own
+  (its answer reaches the mod's `turn.complete` only), and a `system` notice
+  row written with `$.session.append` is kept in the transcript but not drawn
+  in the terminal, so the answer travels as a prompt.
+- A terminal has no reply button: the Router reads which open terminal task a
+  new message continues and forwards it with `SendMessage`; otherwise it
+  dispatches a new task. Opening the worker from the task list and typing to
+  it directly also works.
+
 ## The Router does no work
 
 `tg-router` refuses every main-loop tool call except `dispatch`, the channel's

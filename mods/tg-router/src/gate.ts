@@ -6,6 +6,8 @@ export const DISPATCH = 'mcp__tg-router__dispatch'
 /** the forked channel: the MCP server the launcher starts through --mcp-config */
 export const CHANNEL_SERVER = 'tg-channel'
 export const CHANNEL_PREFIX = `mcp__${CHANNEL_SERVER}__`
+/** the chat id of requests typed in the Router session's own terminal (or through Remote Control) */
+export const TERMINAL_CHAT = 'tui'
 
 const ROUTER_TOOLS = new Set([DISPATCH, 'TaskStop', 'ToolSearch', 'SendMessage'])
 const PANE_CMD = /^(herdr|tmux)$/

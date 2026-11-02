@@ -16,3 +16,4 @@
 ## Session log
 - 2026-11-01: old `plan.md` / `progress.md` (finished jev and upgrade work) renamed to `plan-upgrade-2026-10-08.md` / `progress-jev-band-2026-10-23.md`.
 - [x] 9. /code-review max --fix: 13 of 15 findings fixed (gate `&` and tmux shell subcommands, refused spawn, serialized store writes, chat-scoped keys, attachments in follow-ups, refused answers to the Router, re-dispatch with the original request, handbacks through the Router path). 53 tests pass; the live session reloaded the code. Task tg-953 predates the `request` field: a reply to it reaches the Router unrouted until it is pruned.
+- [x] 10. Messages typed in the session's terminal (or via Remote Control) are requests too (chat_id `tui`, worker `tui-<id>`); the answer returns as the plugin's prompt, since a plugin-spawned worker sends no completion notice and a `system` notice row is not drawn. Live: a CPU/memory request came back in the pane. 56 tests pass.

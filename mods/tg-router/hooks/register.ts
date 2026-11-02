@@ -1,7 +1,7 @@
 import type { EngineInterface, Register, Timer } from 'claude-code'
 import { describeTool, parseChannelTag, renderFinal, renderLive, type EndReason, type Turn } from '../src/card'
-import { CHANNEL_SERVER, DISPATCH, routerDeny } from '../src/gate'
-import { answerNotPosted, followUp, handedBack, lostWorker, routerContext, takeOver, workerBrief } from '../src/prompts'
+import { CHANNEL_SERVER, DISPATCH, routerDeny, TERMINAL_CHAT } from '../src/gate'
+import { answerNotPosted, followUp, handedBack, lostWorker, routerContext, takeOver, terminalAnswer, terminalContext, workerBrief } from '../src/prompts'
 import * as tasks from '../src/tasks'
 import * as tg from '../src/telegram'
 import type { TgIo } from '../src/telegram'
@@ -15,6 +15,14 @@ import type { TgIo } from '../src/telegram'
 // host skips this mod's tool.call hook for the worker's calls (re-entry; checked
 // with Claude Code 2.1.316). turn.complete still reaches this mod, so everything
 // about a worker happens there: its answer, its card's last line, its handbacks.
+//
+// A message typed in this session's terminal (or sent through Remote Control) is a
+// request too, in the chat TERMINAL_CHAT: the Router dispatches it the same way,
+// and turn.complete hands its worker's answer to the Router as a prompt from this
+// mod, which the terminal shows. A worker this mod spawned sends the Router no
+// completion notice (its answer is its turn.complete); only a run woken later
+// does, and that notice is dropped. (A `system` notice row from
+// $.session.append is kept in the transcript but not drawn in the terminal.)
 
 export const SHOW_AFTER = 30_000
 export const EDIT_EVERY = 10_000
@@ -175,12 +183,13 @@ async function dispatch($: EngineInterface, a: DispatchArgs): Promise<string> {
   const key = reqKey(String(a.chat_id), messageId)
   const req = requests.get(key)
   if (!req) throw new Error(`没有等待派活的 Telegram 消息 ${key}（只能派发本次会话收到、还没派过的消息）`)
-  const name = `tg-${req.chatId}-${messageId}`
+  const name = req.chatId === TERMINAL_CHAT ? `tui-${messageId}` : `tg-${req.chatId}-${messageId}`
   const now = await $.clock.now()
   // the task exists before the worker starts, so even a first run that ends at once finds it
   await tasks.create(kv($), { name, title, chatId: req.chatId, rootId: messageId, request: req.text, messageIds: [messageId], createdAt: now })
+  const terminal = req.chatId === TERMINAL_CHAT
   const spawned = await $.agent
-    .spawn({ prompt: workerBrief(title, req.text), description: title, name, model: WORKER_MODEL })
+    .spawn({ prompt: workerBrief(title, req.text, terminal), description: title, name, model: WORKER_MODEL })
     .catch(async (err) => {
       await tasks.remove(kv($), name)
       throw err
@@ -193,6 +202,7 @@ async function dispatch($: EngineInterface, a: DispatchArgs): Promise<string> {
   if (spawned.agentId) await tasks.setAgent(kv($), name, spawned.agentId)
   // a reply to any message of the gone worker's task now reaches this one
   if (req.replaces) await tasks.absorb(kv($), name, req.replaces)
+  if (terminal) return `已派给 worker ${name}（${title}）。把 ack 告诉用户；它做完后 host 会把回答作为一条消息送到这里。`
   track($, `w:${name}`, req.chatId, messageId, now)
   const ackId = await tg.send(io($), req.chatId, clip(ack), messageId, true)
   if (ackId !== undefined) await tasks.addMessage(kv($), name, ackId, now)
@@ -232,8 +242,9 @@ async function ensureTools($: EngineInterface): Promise<void> {
     await $.tool.register({
       name: 'dispatch',
       description:
-        'Hand one Telegram request to a new background worker. The host starts the worker with the original message, '
-        + 'posts `ack` as a reply to that message, and later posts the worker\'s answers. Call once per message.',
+        'Hand one request (a Telegram message, or a message typed in this terminal with chat_id "tui") to a new background '
+        + 'worker. The host starts the worker with the original message; for Telegram it posts `ack` as a reply to that '
+        + 'message and later posts the worker\'s answers. Call once per message.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -266,10 +277,21 @@ export const register: Register = (on) => {
       const mine = Object.values(open.tasks).find(
         (t) => new RegExp(`\\b${t.name}\\b`).test(e.text) || (t.agentId && e.text.includes(t.agentId)),
       )
-      if (mine && !unposted.delete(mine.name)) return { drop: 'tg-router: 这个 worker 的回答已经发到 Telegram' }
       armed = null
+      if (mine && !unposted.delete(mine.name)) return { drop: 'tg-router: 这个 worker 的回答已经发到 Telegram' }
       if (!mine) return next(e)
       return next({ ...e, context: [...(e.context ?? []), answerNotPosted(mine.chatId, mine.rootId)] })
+    }
+    // typed in this terminal, or through Remote Control: a request like a Telegram message
+    if (o?.kind === 'composer' || o?.kind === 'bridge') {
+      armed = null
+      await ensureTools($)
+      const now = await $.clock.now()
+      let messageId = now
+      while (requests.has(reqKey(TERMINAL_CHAT, messageId))) messageId++
+      requests.set(reqKey(TERMINAL_CHAT, messageId), { chatId: TERMINAL_CHAT, messageId, text: e.text })
+      const open = await tasks.openTasks(kv($), TERMINAL_CHAT)
+      return next({ ...e, context: [...(e.context ?? []), terminalContext(messageId, open, now)] })
     }
     // a follow-up a worker handed back, resubmitted by handBack below
     const handed = o?.kind === 'plugin' && o.name === PLUGIN
@@ -359,6 +381,15 @@ export const register: Register = (on) => {
     if (e.agentId) {
       const task = await taskFor($, e.agentId)
       if (!task) return next(e)
+      if (task.chatId === TERMINAL_CHAT) {
+        await tasks.setState(kv($), task.name, 'idle', await $.clock.now())
+        const body = e.reason === 'answer' && e.answer.trim()
+          ? e.answer.trim()
+          : renderFinal({ chatId: task.chatId, startedAt: 0, tools: 0, recent: [], dirty: false, lastEditAt: 0, done: true }, e.reason as EndReason, e.durationMs)
+        // queued for the Router, which may be mid-turn: the worker's end does not wait on it
+        void $.prompt.submit({ text: terminalAnswer(task.title, task.name, body) }).catch((err) => io($).log(`terminal answer ${String(err)}`))
+        return next(e)
+      }
       const answer = await handBack($, task, e.answer)
       const key = `w:${task.name}`
       const run = runs.get(key)

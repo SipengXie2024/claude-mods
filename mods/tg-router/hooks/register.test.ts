@@ -568,3 +568,51 @@ describe('the Router does no work', () => {
     expect(d.deny).toContain('只给前台用')
   })
 })
+
+describe('messages typed in the terminal', () => {
+  const COMPOSER = { kind: 'composer' as const }
+  const typed = async ($: any, text: string) => $.prompt.submit({ text, wait: false, origin: COMPOSER })
+  const terminalId = (w: World) => /message_id "(\d+)"/.exec(w.routed.at(-1)!.context!.join('\n'))![1]!
+
+  test('a typed message reaches the Router as a request it can dispatch, with the open terminal tasks', async ($, on) => {
+    const w = world(on)
+    await typed($, '把 jev 的超时改成 10 秒')
+    const ctx = w.routed.at(-1)!.context!.join('\n')
+    expect(ctx).toContain('typed in its terminal')
+    expect(ctx).toContain('chat_id "tui"')
+    expect(ctx).toContain('Open terminal tasks:\n（没有）')
+    const r = await $.tool.call({ tool: DISPATCH, chat_id: 'tui', message_id: terminalId(w), title: '改超时', ack: '收到。' } as never)
+    expect(JSON.stringify(r)).toContain(`tui-${terminalId(w)}`)
+    expect(w.spawns[0]!.prompt).toContain('typed in the terminal')
+    expect(w.spawns[0]!.prompt).toContain('把 jev 的超时改成 10 秒')
+    expect(sends(w).length).toBe(0) // no Telegram ack
+    await typed($, '再看看测试')
+    expect(w.routed.at(-1)!.context!.join('\n')).toContain('改超时（进行中')
+  })
+
+  test("a terminal worker's answer reaches the Router as the plugin's prompt, and its completion notice is dropped", async ($, on) => {
+    const w = world(on)
+    await typed($, '盘点待办')
+    const id = terminalId(w)
+    await $.tool.call({ tool: DISPATCH, chat_id: 'tui', message_id: id, title: '盘点', ack: '收到。' } as never)
+    await w.clock.advance(40_000)
+    await $.turn.complete({ turnId: 'w1', agentId: 'a-1', answer: '**三件事**没做', durationMs: 40_000, isAborted: false, reason: 'answer' })
+    await w.clock.advance(10)
+    expect(w.calls.length).toBe(0) // no card, no answer to Telegram
+    const shown = w.routed.at(-1)!
+    expect(shown.origin).toMatchObject({ kind: 'plugin', name: 'tg-router' })
+    expect(shown.text).toContain(`worker tui-${id}（盘点）的回答`)
+    expect(shown.text).toContain('**三件事**没做')
+    const before = w.routed.length
+    const r = await $.prompt.submit({ text: `<task-notification><task-id>a-1</task-id>tui-${id} done</task-notification>`, wait: false, origin: { kind: 'task-notification' } })
+    expect(r.drop).toBeTruthy()
+    expect(w.routed.length).toBe(before)
+  })
+
+  test('the Router still does no work for a typed message', async ($, on) => {
+    world(on)
+    await typed($, '直接改一下文件')
+    const r = await $.tool.call({ tool: 'Edit', file_path: '/x', old_string: 'a', new_string: 'b' } as never)
+    expect(r.deny).toBeTruthy()
+  })
+})
