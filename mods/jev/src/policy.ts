@@ -4,7 +4,7 @@ import type { FollowUpRecord, TaskProfile } from './types';
 
 /**
  * Pure mapping from evidence and Jev signals to an effort level
- * (policy.v12, 2026-10-30).
+ * (policy.v13, 2026-11-03).
  *
  * The start comes from the task kind, read from a table per model: a level
  * name is not the same amount of thinking on every model, and Opus 5.5
@@ -19,10 +19,10 @@ import type { FollowUpRecord, TaskProfile } from './types';
  * trusted starts at high: such prompts are mostly short or lean on earlier
  * context, and the person's own labels put most of them at high or above.
  * Every task starts at or above its kind's floor; bounds apply after that.
- * The start is decided once per prompt. After it only the ladder moves the
- * level, and only up: a check that fails again after the model changed code
- * raises one level (mid-loop on Mythos, carried into the next prompt on
- * Opus, whose effort change would not act before the next user turn).
+ * The level is decided once per prompt and holds for every request of its
+ * turn, on Opus and Mythos alike. A check that fails again after the model
+ * changed code and still fails when the turn ends starts the next prompt
+ * that continues the work one level up.
  */
 
 export interface Bounds {
@@ -31,7 +31,7 @@ export interface Bounds {
 }
 
 /** Version of this policy, recorded on every decision for provenance. */
-export const POLICY_VERSION = 'policy.v12';
+export const POLICY_VERSION = 'policy.v13';
 
 /**
  * Rules an A/B run can switch off to measure them:
@@ -71,10 +71,15 @@ export interface TypePrefs {
   deep: Effort;
 }
 
-/** Which table a model follows: Opus, Sonnet and Haiku 5.5 default to medium; Mythos, Fable and earlier Opus models to high. */
-export type ModelScale = 'medium-default' | 'high-default';
+/**
+ * Which table a model follows: Opus, Sonnet and Haiku 5.5 default to medium;
+ * Mythos, Fable and earlier Opus models to high; OpenAI's GPT-6 Astra (routed
+ * by the Hermes port) has its own.
+ */
+export type ModelScale = 'medium-default' | 'high-default' | 'astra';
 
 export function modelScale(model: string | null): ModelScale {
+  if (model !== null && /gpt-6-astra/i.test(model)) return 'astra';
   return model !== null && /claude-(opus|sonnet|haiku)-5-5|^(opus|sonnet|haiku)(\[1m\])?$/i.test(model) ? 'medium-default' : 'high-default';
 }
 
@@ -87,6 +92,17 @@ export function modelScale(model: string | null): ModelScale {
  * (Fable 5.1's numbers) and earlier Opus: research and visuals at high
  * (DeepResearch Bench II, Chartography), coding from medium up to xhigh, where
  * Fable 5.1 scores best on FrontierCode and Terminal-Bench.
+ *
+ * GPT-6 Astra (Artificial Analysis per-level runs, low / medium / high / xhigh /
+ * max): its low falls far below medium on coding (FrontierCode 2.0 26 / 37 /
+ * 40 / 41 / 42, Terminal-Bench 4.0 42 / 49 / 54 / 60 / 59), so code starts at
+ * medium and deep code at xhigh, where Terminal-Bench peaks. Knowledge-work
+ * deliverables gain most from low to medium (AA-Briefcase Elo 1256 / 1462 /
+ * 1505), so prose and explanations start at medium. Research starts at high
+ * (HLE-Diamond 45 / 53 / 59 / 62 / 64). Routine operations stay low (OpenAI:
+ * low for "execution-oriented coding" and tool use). No per-level visual
+ * benchmark exists; OpenAI names medium for slides. Max is never a start:
+ * it costs about twice xhigh's output tokens (52k vs 27k per task).
  */
 export const TYPE_PREFS: Record<ModelScale, Record<TaskType, TypePrefs>> = {
   'medium-default': {
@@ -104,6 +120,15 @@ export const TYPE_PREFS: Record<ModelScale, Record<TaskType, TypePrefs>> = {
     explain: { floor: 'low', base: 'medium', deep: 'high' },
     write: { floor: 'low', base: 'medium', deep: 'high' },
     design: { floor: 'medium', base: 'medium', deep: 'high' },
+    code: { floor: 'medium', base: 'medium', deep: 'xhigh' },
+    research: { floor: 'medium', base: 'high', deep: 'xhigh' },
+  },
+  astra: {
+    chat: { floor: 'low', base: 'low', deep: 'low' },
+    operate: { floor: 'low', base: 'low', deep: 'medium' },
+    explain: { floor: 'low', base: 'medium', deep: 'high' },
+    write: { floor: 'low', base: 'medium', deep: 'high' },
+    design: { floor: 'low', base: 'medium', deep: 'high' },
     code: { floor: 'medium', base: 'medium', deep: 'xhigh' },
     research: { floor: 'medium', base: 'high', deep: 'xhigh' },
   },
@@ -173,20 +198,6 @@ export function taskEffort(p: TaskProfile, bounds: Bounds, model: string | null 
   const effort = clampEffort(fromRank(r), nb.min, nb.max);
   if (effort !== fromRank(r)) reasons.push(`bounded to ${effort}`);
   return { effort, reasons };
-}
-
-/** Mid-loop raises allowed per prompt on Mythos (decision 2). */
-export const MAX_RAISES = 2;
-
-/**
- * One rung up the ladder: the level above `current`, inside the bounds, or
- * null at the top. A raise moves one level at a time, so max is reached only
- * from xhigh.
- */
-export function ladderRaise(current: Effort, bounds: Bounds): Effort | null {
-  const nb = normalizeBounds(bounds);
-  const to = clampEffort(shift(current, 1), nb.min, nb.max);
-  return rank(to) > rank(current) ? to : null;
 }
 
 /** Start levels exploration may move to. */

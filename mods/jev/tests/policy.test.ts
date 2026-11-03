@@ -1,6 +1,6 @@
 import assert, { test } from './assert';
 import {
-  ABLATABLE, DISSAT_DEFAULT, exploreStart, followUpEffort, getAblations, getDeepThresholds, getDissatThreshold, ladderRaise, MAX_RAISES, policyVersion, setAblations, isDeep,
+  ABLATABLE, DISSAT_DEFAULT, exploreStart, followUpEffort, getAblations, getDeepThresholds, getDissatThreshold, policyVersion, setAblations, isDeep,
   modelScale, normalizeBounds, setDeepThresholds, setDissatThreshold, taskEffort, TYPE_PREFS, typePrefs, typeTrusted, type Bounds, type FollowUpInput,
 } from '../src/policy';
 import { EFFORT_LEVELS, rank, type Effort } from '../src/effort';
@@ -19,6 +19,19 @@ const HIGH_DEFAULT_MODELS = ['claude-mythos-5-1', 'claude-opus-4-8', null] as co
 test('model scale: the 5.5 models read the default-medium table; Mythos, Fable, earlier Opus and an unknown model the default-high one', () => {
   for (const m of ['claude-opus-5-5', 'claude-opus-5-5[1m]', 'claude-sonnet-5-5', 'opus']) assert.equal(modelScale(m), 'medium-default', m);
   for (const m of ['claude-mythos-5-1', 'claude-fable-5-1', 'claude-opus-5', 'claude-opus-4-8', null]) assert.equal(modelScale(m), 'high-default', String(m));
+  for (const m of ['gpt-6-astra', 'gpt-6-astra-900k']) assert.equal(modelScale(m), 'astra', m);
+});
+
+test('task: Astra starts code and prose at medium, research at high, routine work low; deep code and research at xhigh, never max', () => {
+  const start: Array<[TaskType, Effort, Effort]> = [
+    ['chat', 'low', 'low'], ['operate', 'low', 'medium'], ['explain', 'medium', 'high'], ['write', 'medium', 'high'],
+    ['design', 'medium', 'high'], ['code', 'medium', 'xhigh'], ['research', 'high', 'xhigh'],
+  ];
+  for (const [taskType, base, deep] of start) {
+    assert.equal(taskEffort(profile({ taskType }), ALL, 'gpt-6-astra').effort, base, `Astra ${taskType}`);
+    assert.equal(taskEffort(profile({ taskType, typeConfidence: 0.9, deep: 0.99 }), ALL, 'gpt-6-astra-900k').effort, deep, `Astra deep ${taskType}`);
+  }
+  assert.equal(taskEffort(profile({ taskType: 'code', typeConfidence: 0.1 }), ALL, 'gpt-6-astra').effort, 'high', 'an unsure kind starts at high on Astra too');
 });
 
 test('task: each kind starts at its base on its model\'s table (Opus 5.5 low where failures show, Mythos a step up)', () => {
@@ -149,7 +162,7 @@ test('ablations switch off exactly one rule each and are recorded in the policy 
   try {
     setDeepThresholds({ yes: 0.88, no: 0.3 });
     assert.deepEqual([...ABLATABLE], ['r1', 'dissat']);
-    assert.equal(policyVersion(), 'policy.v12');
+    assert.equal(policyVersion(), 'policy.v13');
     assert.equal(taskEffort(deepResearch, ALL).effort, 'xhigh');
 
     setAblations(['r1']);
@@ -157,29 +170,15 @@ test('ablations switch off exactly one rule each and are recorded in the policy 
     // r2, r4 and stuck no longer exist: they are ignored like any unknown name
     setAblations(['r2', 'r4', 'stuck']);
     assert.deepEqual(getAblations(), []);
-    assert.equal(policyVersion(), 'policy.v12');
+    assert.equal(policyVersion(), 'policy.v13');
 
     setAblations(['dissat', 'bogus', 'r1']);
     assert.deepEqual(getAblations(), ['r1', 'dissat']);
-    assert.equal(policyVersion(), 'policy.v12-ablate:r1,dissat');
+    assert.equal(policyVersion(), 'policy.v13-ablate:r1,dissat');
   } finally {
     setAblations([]);
     setDeepThresholds({ yes: 0.5, no: 0.3 });
   }
-});
-
-test('decision 3: the ladder raises one level at a time, max only from xhigh, never past the bounds', () => {
-  assert.equal(ladderRaise('medium', ALL), 'high');
-  assert.equal(ladderRaise('high', ALL), 'xhigh');
-  assert.equal(ladderRaise('xhigh', ALL), 'max');
-  assert.equal(ladderRaise('max', ALL), null);
-  assert.equal(ladderRaise('high', UP_TO_HIGH), null);
-  assert.equal(ladderRaise('medium', { min: 'xhigh', max: 'max' }), 'xhigh', 'a raise lands inside the range');
-  for (const from of EFFORT_LEVELS) {
-    const to = ladderRaise(from, ALL);
-    if (to) assert.equal(rank(to), rank(from) + 1, from);
-  }
-  assert.equal(MAX_RAISES, 2);
 });
 
 test('decision 7: exploration moves the start one level up or down inside medium..max, with probability p', () => {
@@ -333,7 +332,7 @@ test('follow-up: shadow mode and the dissat ablation record the signal but never
     assert.equal(shadow.effort, 'medium');
     assert.deepEqual(shadow.followUp, { p: 0.99, threshold: 0.98, yes: true, prevMax: 'max', streak: 1, hiLosses: 1, advisor: false, shadow: true });
     setAblations(['dissat']);
-    assert.equal(policyVersion(), 'policy.v12-ablate:dissat');
+    assert.equal(policyVersion(), 'policy.v13-ablate:dissat');
     const ablated = followUpEffort(fu());
     assert.equal(ablated.effort, 'medium');
     assert.equal(ablated.followUp.shadow, true);

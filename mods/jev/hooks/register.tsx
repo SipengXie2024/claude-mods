@@ -7,21 +7,20 @@ import { hash20 } from '../src/hash'
 import { JevClient, JevFallback, type JevIo, type JevSource } from '../src/jev'
 import { Ladder } from '../src/ladder'
 import { modelLabel } from '../src/model'
-import { exploreStart, ladderRaise, MAX_RAISES, normalizeBounds, policyVersion, taskEffort, type Bounds } from '../src/policy'
+import { exploreStart, normalizeBounds, policyVersion, taskEffort, type Bounds } from '../src/policy'
 import { chatRecap, CLI_IDENTITY, conversationContext, lastAgentText, RECAP_SYSTEM, recapIncrement, recapPrompt, type Recap } from '../src/recap'
 import { EffortRouter, FALLBACK_IGNORED, type FollowUpAsk } from '../src/router'
 import type { EffortDecision, TaskProfile } from '../src/types'
 
 /**
- * Jev effort routing per prompt (policy.v11). `prompt.submit` decides a
+ * Jev effort routing per prompt (policy.v13). `prompt.submit` decides a
  * human prompt's start level: the task level from Jev (or heuristics), the
  * follow-up fault raise, a short acknowledgement's floor, the carry-over of a
  * check that kept failing, and exploration. `turn.step` sends that level on
  * every request of the turn. `tool.call` feeds each check's exit code to the
- * ladder: a check that fails again after the model changed code raises one
- * level, mid-loop on Mythos (at most twice per prompt), into the next prompt
- * on Opus, which acts on an effort change only at the next user turn with
- * new input. Nothing ever steps down mid-loop. A /effort the person runs
+ * ladder: a check that fails again after the model changed code and still
+ * fails when the turn ends starts the next prompt that continues the work one
+ * level up, on Opus and Mythos alike. The level never moves within a turn. A /effort the person runs
  * pins the session's own level until `[effort auto]`. Any failure leaves the
  * request as the engine made it. The band above the prompt names the model
  * of the loop whose transcript is in view (the main conversation, or the
@@ -33,8 +32,6 @@ type $ = EngineInterface
 const MAIN = 'main'
 /** Models the policy's effort table is written for (Opus and Mythos; the same five levels). */
 const ROUTED_MODEL = /opus|mythos/i
-/** Models whose effort change acts on the next request; on the others (Opus) it waits for the next user turn. */
-const MID_LOOP_MODEL = /mythos/i
 /** A `jev/…` model belongs to the jev-opus gateway, which routes it itself: two routers would undo each other. */
 const GATEWAY_MODEL = /^jev\//i
 const EDIT_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit'])
@@ -61,7 +58,6 @@ interface Tally {
   checks: number
   passed: number
   failed: number
-  raises: number
   /** passes of a check a raise was made for */
   raisesPassed: number
   jevMs: number
@@ -84,10 +80,6 @@ interface Loop {
   /** the session's own effort as last seen on that model: a change is the person's /effort */
   clientEffort: Effort | null
   ladder: Ladder
-  /** ladder raises made in this prompt */
-  raises: number
-  /** a check that just failed again after a change: the next step may raise */
-  repeat: string | null
   trail: Effort[]
   /** what starts the next turn (main only): a decided prompt, a continuation, or a slash command */
   next: { kind: 'prompt'; task: EffortDecision | null } | { kind: 'continue' } | { kind: 'command' } | null
@@ -170,13 +162,13 @@ function io($: $): JevIo {
   }
 }
 
-const newTally = (): Tally => ({ checks: 0, passed: 0, failed: 0, raises: 0, raisesPassed: 0, jevMs: 0, lastStop: null })
+const newTally = (): Tally => ({ checks: 0, passed: 0, failed: 0, raisesPassed: 0, jevMs: 0, lastStop: null })
 
 function newLoop(cfg: ModConfig, inherited: Bounds | null): Loop {
   return {
     router: new EffortRouter({ jev: null, bounds: cfg.bounds }),
     prompt: '', tagged: null, inherited, profile: null, effort: null, model: null, clientEffort: null,
-    ladder: new Ladder(), raises: 0, repeat: null, trail: [], next: null, tally: newTally(),
+    ladder: new Ladder(), trail: [], next: null, tally: newTally(),
   }
 }
 
@@ -198,7 +190,7 @@ function tagBounds(text: string, cfg: ModConfig): Bounds | null {
 /**
  * A new prompt (or subagent run): fresh per-prompt state, same router. A
  * `[effort …]` tag in the prompt replaces the configured range for this
- * prompt only; every later decision (task level, raises) stays inside it,
+ * prompt only; every later decision (task level, carried raise) stays inside it,
  * and the next prompt returns to the configured range. A subagent brief
  * without a tag of its own inherits the main prompt's range.
  */
@@ -208,8 +200,6 @@ function startPrompt(loop: Loop, prompt: string, cfg: ModConfig): void {
   loop.tagged = own ? { bounds: own, inherited: false } : loop.inherited ? { bounds: loop.inherited, inherited: true } : null
   loop.router.bounds = loop.tagged?.bounds ?? cfg.bounds
   loop.ladder = new Ladder()
-  loop.raises = 0
-  loop.repeat = null
   loop.trail = []
 }
 
@@ -348,9 +338,9 @@ function noteModel($: $, key: string, model: string): void {
   setBand($, key, { model, trail: [], phase: null, source: null, done: s?.done ?? false })
 }
 
-/** The band's state for this loop after a decision: the prompt's trail, the task kind (or the ladder step), and where the decision came from. */
+/** The band's state for this loop after a decision: the prompt's trail, the task kind, and where the decision came from. */
 function noteBand($: $, key: string, model: string, loop: Loop, d: EffortDecision): void {
-  const phase = d.kind === 'step' && d.source === 'local' ? 'check failed again' : d.profile?.taskType ?? loop.profile?.taskType ?? null
+  const phase = d.profile?.taskType ?? loop.profile?.taskType ?? null
   setBand($, key, { model, trail: [...loop.trail], phase, source: d.source, done: false })
 }
 
@@ -473,8 +463,8 @@ async function routePrompt($: $, raw: string, origin: string): Promise<{ advisor
       loop.ladder = continued
       taskCarry = prev.taskMax
     }
-    // Opus did not act on the failing check mid-loop: the prompt that continues the work starts one rung up.
-    if (continues && prev.carry && !MID_LOOP_MODEL.test(model)) {
+    // The level held through the turn while a check kept failing: the prompt that continues the work starts one rung up.
+    if (continues && prev.carry) {
       const to = clampEffort(shift(level, 1), bounds.min, bounds.max)
       if (rank(to) > rank(level)) {
         const carried = loop.ladder.repeatFailing()
@@ -571,28 +561,6 @@ async function startOfTurn($: $, loop: Loop, key: string, cfg: ModConfig, client
   return d
 }
 
-/**
- * A step after a check failed again following a change: on Mythos, one rung
- * up, at most MAX_RAISES per prompt; on Opus nothing until the turn ends.
- */
-function ladderStep(loop: Loop, model: string): EffortDecision | null {
-  const id = loop.repeat!
-  loop.repeat = null
-  if (!MID_LOOP_MODEL.test(model)) return null
-  const current = loop.effort!
-  const step = {
-    kind: 'step' as const, previous: current, source: 'local' as const, jevLatencyMs: 0,
-    ...(loop.profile ? { profile: loop.profile } : {}), policyVersion: policyVersion(),
-  }
-  if (loop.raises >= MAX_RAISES) return { ...step, effort: current, changed: false, reasons: [`check failed again after a change; ${MAX_RAISES} raises this prompt already → stays ${current}`] }
-  const to = ladderRaise(current, loop.router.bounds)
-  if (!to) return { ...step, effort: current, changed: false, reasons: [`check failed again after a change; ${current} is the top of the range`] }
-  loop.raises += 1
-  loop.tally.raises += 1
-  loop.ladder.markRaised(id)
-  return { ...step, effort: to, changed: true, reasons: [`check failed again after a change → ${to}`] }
-}
-
 async function decideStep($: $, e: { index: number; model: string; effort?: unknown; agentId?: string; turnId: string }): Promise<Effort | undefined> {
   if (!isEffort(e.effort) || !routed(e.model)) return undefined
   const { cfg, client, dir } = await load($)
@@ -616,15 +584,12 @@ async function decideStep($: $, e: { index: number; model: string; effort?: unkn
   if (pinned) {
     // The person's own level holds: the engine sends it as it is.
     if (e.index === 0) loop.next = null
-    loop.repeat = null
     if (e.index === 0 || loop.effort !== e.effort) {
       decision = { kind: e.index === 0 ? 'task' : 'step', effort: e.effort, previous: loop.effort, changed: loop.effort !== e.effort, reasons: ['/effort pin'], source: 'pinned', jevLatencyMs: 0, policyVersion: policyVersion() }
     }
   } else if (e.index === 0 || loop.effort === null) {
     decision = await startOfTurn($, loop, key, cfg, client, e.agentId)
     loop.tally.jevMs += decision.jevLatencyMs
-  } else if (loop.repeat !== null) {
-    decision = ladderStep(loop, e.model)
   }
 
   if (decision) {
@@ -700,7 +665,6 @@ async function noteToolResult($: $, loop: Loop, key: string, e: Record<string, u
   if (failed) loop.tally.failed += 1
   else loop.tally.passed += 1
   if (note.passedAfterRaise) loop.tally.raisesPassed += 1
-  if (note.outcome === 'repeat-failure') loop.repeat = id
   const { dir } = await load($)
   await journal($, dir, {
     at: await $.clock.now(), session: await $.session.id(), agent: key, event: 'check', check: id.slice(0, 8), outcome: note.outcome,
@@ -725,7 +689,7 @@ async function endTurn($: $, e: { turnId: string; agentId?: string; reason: stri
     at: await $.clock.now(), session, agent: key, event: 'outcome', turnId: e.turnId, ...(rec ? { prompt: rec.prompt } : {}),
     model: loop.model, effort: loop.effort, trail: [...loop.trail], reason: e.reason, durationMs: e.durationMs, jevWaitMs: t.jevMs,
     ...(e.usage ? { outputTokens: e.usage.output_tokens, inputTokens: e.usage.input_tokens, cacheReadTokens: e.usage.cache_read_input_tokens, cacheCreationTokens: e.usage.cache_creation_input_tokens } : {}),
-    checks: { run: t.checks, passed: t.passed, failed: t.failed }, raises: t.raises, raisesPassed: t.raisesPassed,
+    checks: { run: t.checks, passed: t.passed, failed: t.failed }, raisesPassed: t.raisesPassed,
     carry, unfinished, ...(pinned ? { manual: true } : {}), policy: policyVersion(),
   })
 }

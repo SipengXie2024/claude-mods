@@ -54,7 +54,7 @@ export interface FollowUpRecord {
 }
 
 export interface EffortDecision {
-  /** task: a prompt's start level; step: a mid-loop raise (or a raise the limit held back) */
+  /** task: a turn's start level; step: a later request's level under a /effort pin */
   kind: 'task' | 'step';
   effort: Effort;
   previous: Effort | null;

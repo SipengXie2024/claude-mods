@@ -47,7 +47,7 @@ test('the evaluator gets the full request', () => {
 test('decisions carry policy and question-set versions', async () => {
   const t = await lowTask().routeTask('hi', null);
   assert.equal(t.policyVersion, POLICY_VERSION);
-  assert.equal(POLICY_VERSION, 'policy.v12');
+  assert.equal(POLICY_VERSION, 'policy.v13');
   assert.deepEqual(t.questionVersions, { task: TASK_SET_VERSION, followup: FOLLOWUP_SET_VERSION });
 });
 

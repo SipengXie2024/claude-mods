@@ -20,7 +20,7 @@ interface CheckRecord {
   editedSince: boolean;
   failures: number;
   repeats: number;
-  /** a raise (mid-loop or carried) was made for this check */
+  /** the next prompt was started one level up for this check */
   raised: boolean;
 }
 

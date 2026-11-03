@@ -231,7 +231,7 @@ describe('task routing', () => {
     expect(sent(w)).toEqual(['high', 'high', 'high', 'high', 'high'])
     expect(journal(w).map((r) => r.event)).toEqual(['prompt', 'step', 'check', 'check', 'check'])
     expect(rows(w, 'check').map((r) => r.outcome)).toEqual(['first-failure', 'repeat-failure', 'pass'])
-    expect(rows(w, 'step')[0]).toMatchObject({ model: OPUS, sessionEffort: 'high', effort: 'high', policy: 'policy.v12' })
+    expect(rows(w, 'step')[0]).toMatchObject({ model: OPUS, sessionEffort: 'high', effort: 'high', policy: 'policy.v13' })
     // Jev is asked once, for the task: no step questions.
     expect(w.asks.map((a) => a.questions)).toEqual([['task_type', 'deep']])
     expect(w.status).toEqual([])
@@ -392,34 +392,28 @@ describe('task routing', () => {
 })
 
 describe('the ladder', () => {
-  test('decision 2/3: on Mythos a check that fails again after a change raises at the next request, twice at most, and nothing steps down', async ($, on) => {
+  test('on Mythos, as on Opus, the level holds through repeat failures; the next prompt that continues the work starts one level up', async ($, on) => {
     const w = world(on, { model: MYTHOS })
     await submit($, 'fix the crash in parser.ts')
     await step($, 0, 'high', { model: MYTHOS })
     let n = await failEditFail($, w, 1, MYTHOS)
-    expect(sent(w)).toEqual(['high', 'high', 'high', 'xhigh'])
     await edit($, '/repo/add.js')
     await bash(w, $, 'npm test', true)
     await step($, n++, 'high', { model: MYTHOS })
-    expect(sent(w).at(-1)).toBe('max')
-    await edit($, '/repo/add.js')
-    await bash(w, $, 'npm test', true)
-    await step($, n++, 'high', { model: MYTHOS })
-    expect(sent(w).at(-1)).toBe('max')
-    await bash(w, $, 'npm test')
-    await step($, n++, 'high', { model: MYTHOS })
-    expect(sent(w).at(-1)).toBe('max')
-    const raises = rows(w, 'step').filter((r) => r.kind === 'step')
-    expect(raises.map((r) => [r.previous, r.effort])).toEqual([['high', 'xhigh'], ['xhigh', 'max'], ['max', 'max']])
-    expect(raises[0]!.reasons).toEqual(['check failed again after a change → xhigh'])
-    expect(raises[2]!.reasons[0]).toContain('2 raises this prompt already')
-    expect(await bandText($)).toBe('Mythos 5.1 · ◆ Jev · high → xhigh → MAX · check failed again')
+    expect(sent(w)).toEqual(['high', 'high', 'high', 'high', 'high'])
+    expect(rows(w, 'step').filter((r) => r.kind === 'step')).toEqual([])
+    expect(await bandText($)).toBe('Mythos 5.1 · ◆ Jev · HIGH · code')
     await complete($)
-    expect(rows(w, 'outcome')[0]).toMatchObject({ raises: 2, raisesPassed: 1, checks: { run: 5, passed: 1, failed: 4 }, carry: 0 })
-    // The next prompt sets its level afresh.
-    await submit($, 'now add a README section')
+    expect(rows(w, 'outcome')[0]).toMatchObject({ carry: 1, checks: { run: 3, passed: 0, failed: 3 } })
+    expect(rows(w, 'outcome')[0]!.raises).toBeUndefined()
+    say(w, 'user', 'fix the crash in parser.ts'); say(w, 'assistant', 'still failing')
+    await submit($, '继续')
     await step($, 0, 'high', { model: MYTHOS, turnId: 'turn-2' })
-    expect(sent(w).at(-1)).toBe('high')
+    expect(sent(w).at(-1)).toBe('xhigh')
+    expect(rows(w, 'prompt').at(-1)).toMatchObject({ effort: 'xhigh', carry: { from: 'high', to: 'xhigh', checks: 1 } })
+    await bash(w, $, 'npm test')
+    await complete($, undefined, { turnId: 'turn-2' })
+    expect(rows(w, 'outcome').at(-1)).toMatchObject({ raisesPassed: 1, carry: 0 })
   })
 
   test('decision 3: a first failure and a rerun without a change raise nothing; there is no stuck bypass', async ($, on) => {
@@ -472,7 +466,8 @@ describe('the ladder', () => {
     await step($, 0, 'high', { model: MYTHOS })
     await failEditFail($, w, 1, MYTHOS, 'npm test -- --grep "invalid credentials"')
     expect(rows(w, 'check').map((r) => r.outcome)).toEqual(['first-failure', 'repeat-failure'])
-    expect(sent(w).at(-1)).toBe('xhigh')
+    await complete($)
+    expect(rows(w, 'outcome')[0]).toMatchObject({ carry: 1 })
   })
 
   test('B1: WebFetch never counts, whatever its HTTP status', async ($, on) => {
@@ -527,19 +522,13 @@ describe('code changes by Bash', () => {
     await step($, 3, 'high', { model })
   }
 
-  test('npm test fails, a sed -i rewrites add.js, npm test fails again: on Mythos the next request raises high → xhigh', async ($, on) => {
-    const w = world(on, { model: MYTHOS, tool: (e) => sedWrites(w, e) })
-    await failRunFail($, w, SED, MYTHOS)
-    expect(sent(w)).toEqual(['high', 'high', 'high', 'xhigh'])
+  test('npm test fails, a sed -i rewrites add.js, npm test fails again: a repeat failure, the level holds, the turn ends carrying the check, and the next "继续" starts at xhigh', async ($, on) => {
+    const w = world(on, { tool: (e) => sedWrites(w, e) })
+    await failRunFail($, w, SED, OPUS)
     expect(rows(w, 'check').map((r) => r.outcome)).toEqual(['first-failure', 'repeat-failure'])
     expect(w.stats).toEqual(['/repo/add.js'])
     // A code change writes no journal row, from the Edit tool or from Bash.
-    expect(journal(w).map((r) => r.event)).toEqual(['prompt', 'step', 'check', 'check', 'step'])
-  })
-
-  test('the same on Opus: nothing moves mid-loop, the turn ends carrying the check, and the next "继续" starts at xhigh', async ($, on) => {
-    const w = world(on, { tool: (e) => sedWrites(w, e) })
-    await failRunFail($, w, SED, OPUS)
+    expect(journal(w).map((r) => r.event)).toEqual(['prompt', 'step', 'check', 'check'])
     expect(sent(w)).toEqual(['high', 'high', 'high', 'high'])
     await complete($)
     expect(rows(w, 'outcome')[0]).toMatchObject({ carry: 1, checks: { run: 2, passed: 0, failed: 2 } })
@@ -569,23 +558,23 @@ describe('code changes by Bash', () => {
     const w = world(on, { model: MYTHOS })
     await failRunFail($, w, "cd lib && sed -i 's/x/y/' old.js && git mv old.js add.js", MYTHOS)
     expect(w.stats).toEqual(['/repo/lib/old.js'])
-    expect(sent(w).at(-1)).toBe('xhigh')
+    expect(rows(w, 'check').map((r) => r.outcome)).toEqual(['first-failure', 'repeat-failure'])
   })
 
   test('a remote edit counts with no stat', async ($, on) => {
     const w = world(on, { model: MYTHOS })
     await failRunFail($, w, `ssh box "sed -i 's/return a - b;/return a * b;/' /srv/app/add.js"`, MYTHOS)
     expect(w.stats).toEqual([])
-    expect(sent(w).at(-1)).toBe('xhigh')
+    expect(rows(w, 'check').map((r) => r.outcome)).toEqual(['first-failure', 'repeat-failure'])
   })
 
-  test('npm test fails, then `sed -i … && npm test` fails with add.js rewritten: the sed ran, so the failure is a repeat (high → xhigh)', async ($, on) => {
+  test('npm test fails, then `sed -i … && npm test` fails with add.js rewritten: the sed ran, so the failure is a repeat', async ($, on) => {
     const w = world(on, { model: MYTHOS, tool: (e) => sedWrites(w, e) })
     await failRunFail($, w, "sed -i 's/a - b/a * b/' add.js && npm test", MYTHOS, true)
     expect(w.mtimes.get('/repo/add.js')).toBe(1_000)
-    // the plain rerun after it changed nothing more: no second raise
+    // the plain rerun after it changed nothing more is no second repeat
     expect(rows(w, 'check').map((r) => r.outcome)).toEqual(['first-failure', 'repeat-failure', 'rerun-failure'])
-    expect(sent(w)).toEqual(['high', 'high', 'xhigh', 'xhigh'])
+    expect(sent(w)).toEqual(['high', 'high', 'high', 'high'])
   })
 
   test('the same with add.js unchanged (the sed failed, npm test never ran): no change, a rerun', async ($, on) => {
@@ -663,16 +652,14 @@ describe('carry-over (Opus)', () => {
     expect(rows(w, 'prompt').at(-1)!.effort).toBe('xhigh')
   })
 
-  test('decision 2/9: Mythos raised mid-loop; its next prompt starts afresh, nothing carried on top', async ($, on) => {
+  test('decision 9: on Mythos the turn holds its level and a continuing prompt starts one level up, as on Opus', async ($, on) => {
     const w = world(on, { model: MYTHOS })
     await firstTurn($, w, MYTHOS)
-    expect(sent(w).at(-1)).toBe('xhigh')
+    expect(sent(w).at(-1)).toBe('high')
     await submit($, '继续')
     await step($, 0, 'high', { model: MYTHOS, turnId: 'turn-2' })
     const p = rows(w, 'prompt').at(-1)!
-    expect(p.carry).toBeUndefined()
-    // the acknowledgement keeps the level the last prompt ended at, and no more
-    expect(p.reasons.at(-1)).toBe('short acknowledgement → stays at xhigh')
+    expect(p).toMatchObject({ effort: 'xhigh', carry: { from: 'high', to: 'xhigh', checks: 1 } })
     expect(sent(w).at(-1)).toBe('xhigh')
   })
 })
@@ -863,7 +850,10 @@ describe('non-human turns', () => {
     // the check that failed before the report repeats after it: the ladder goes on
     await bash(w, $, 'npm test', true)
     await step($, 1, 'high', { model: MYTHOS, turnId: 'turn-2' })
-    expect(sent(w).at(-1)).toBe('xhigh')
+    expect(sent(w).at(-1)).toBe('high')
+    expect(rows(w, 'check').map((r) => r.outcome)).toEqual(['first-failure', 'repeat-failure'])
+    await complete($, undefined, { turnId: 'turn-2' })
+    expect(rows(w, 'outcome').at(-1)).toMatchObject({ carry: 1 })
   })
 
   test('decision 8: a slash command is a new task judged from its expanded text, without the previous prompt\'s tag (B5)', async ($, on) => {
@@ -932,18 +922,18 @@ describe('exploration', () => {
 })
 
 describe('prompt effort tag', () => {
-  test('[effort xhigh..max]: the task starts at xhigh, a repeat failure on Mythos reaches max, a pass does not step down, the next prompt is back to the configured range', async ($, on) => {
+  test('[effort xhigh..max]: the task starts at xhigh and holds through a repeat failure, the next prompt is back to the configured range', async ($, on) => {
     const w = world(on, { model: MYTHOS })
     await submit($, '[effort xhigh..max] add a unit test for add() and fix the bug')
     await step($, 0, 'high', { model: MYTHOS })
     const n = await failEditFail($, w, 1, MYTHOS)
     await bash(w, $, 'npm test')
     await step($, n, 'high', { model: MYTHOS })
-    expect(sent(w)).toEqual(['xhigh', 'xhigh', 'xhigh', 'max', 'max'])
+    expect(sent(w)).toEqual(['xhigh', 'xhigh', 'xhigh', 'xhigh', 'xhigh'])
     const j = journal(w)
     expect(j[0]).toMatchObject({ kind: 'task', effort: 'xhigh', promptBounds: 'xhigh..max' })
     expect(j[0]!.reasons).toContain('prompt tag [effort xhigh..max]')
-    expect(rows(w, 'step').at(-1)).toMatchObject({ kind: 'step', effort: 'max', promptBounds: 'xhigh..max' })
+    expect(rows(w, 'step').at(-1)).toMatchObject({ kind: 'task', effort: 'xhigh', promptBounds: 'xhigh..max' })
     // the tag goes to the model and to Jev as written
     expect(w.asks[0]!.state).toContain('[effort xhigh..max]')
 
@@ -1073,8 +1063,8 @@ describe('band above the prompt', () => {
     await submit($, 'add a unit test for add() and fix the bug')
     await step($, 0, 'high', { model: MYTHOS })
     await failEditFail($, w, 1, MYTHOS)
-    expect(await bandText($)).toBe('Mythos 5.1 · ◆ Jev · high → XHIGH · check failed again')
-    expect(await bandText($, {}, 'desktop')).toBe('Mythos 5.1 · ◆ Jev · high → XHIGH · check failed again')
+    expect(await bandText($)).toBe('Mythos 5.1 · ◆ Jev · HIGH · code')
+    expect(await bandText($, {}, 'desktop')).toBe('Mythos 5.1 · ◆ Jev · HIGH · code')
     expect(await bandText($, { agentId: 'agent-7' })).toBe('Opus 5.5 · ◆ Jev · HIGH · code')
   })
 
@@ -1133,7 +1123,7 @@ describe('outcome rows', () => {
     expect(rows(w, 'outcome')).toEqual([{
       at: 1_000, session: 'sess-1', agent: 'main', event: 'outcome', turnId: 'turn-1', prompt: 1, model: OPUS, effort: 'high', trail: ['high'],
       reason: 'answer', durationMs: 42_000, jevWaitMs: 0, outputTokens: 900, inputTokens: 10, cacheReadTokens: 5_000, cacheCreationTokens: 300,
-      checks: { run: 2, passed: 1, failed: 1 }, raises: 0, raisesPassed: 0, carry: 0, unfinished: false, policy: 'policy.v12',
+      checks: { run: 2, passed: 1, failed: 1 }, raisesPassed: 0, carry: 0, unfinished: false, policy: 'policy.v13',
     }])
   })
 })
@@ -1370,17 +1360,22 @@ describe('task continuation', () => {
     expect(rows(w, 'prompt').at(-1)!.followUp).toMatchObject({ continues: 0.9, yes: false, error: 'fallback-ignored' })
   })
 
-  test('on Mythos a level raised mid-loop becomes the task\'s level for its next prompt', async ($, on) => {
+  test('on Mythos a level carried into the next prompt becomes the task\'s level for the prompts after it', async ($, on) => {
     let continues = 0.9
     const w = world(on, { model: MYTHOS, jev: (q, s) => reads(continues)(q, s) })
     await submit($, 'fix the crash in parser.ts')
     await step($, 0, 'high', { model: MYTHOS })
     const n = await failEditFail($, w, 1, MYTHOS)
     await step($, n, 'high', { model: MYTHOS })
-    expect(sent(w).at(-1)).toBe('xhigh')
+    expect(sent(w).at(-1)).toBe('high')
     await complete($)
     turn(w)
     await submit($, '继续看第三个函数')
+    await step($, 0, 'high', { model: MYTHOS })
+    expect(sent(w).at(-1)).toBe('xhigh')
+    await bash(w, $, 'npm test')
+    await complete($)
+    await submit($, '那第四个呢')
     await step($, 0, 'high', { model: MYTHOS })
     expect(sent(w).at(-1)).toBe('xhigh')
     continues = 0.1
