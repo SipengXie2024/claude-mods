@@ -247,6 +247,7 @@ describe('safety', () => {
 })
 
 const DISPATCH = 'mcp__tg-router__dispatch'
+const FORWARD = 'mcp__tg-router__forward'
 
 /** A request reaches the Router and is dispatched; resolves the dispatch result. */
 async function dispatched($: any, w: World, mid = '878') {
@@ -303,9 +304,9 @@ describe('reload', () => {
   test('without a session.start (the mod was reloaded), a Telegram message registers dispatch', async ($, on) => {
     const w = world(on)
     await $.prompt.submit({ text: TAG(), wait: false, origin: CHANNEL })
-    expect(w.registered).toEqual(['dispatch'])
+    expect(w.registered).toEqual(['dispatch', 'forward'])
     await $.prompt.submit({ text: TAG('7051661301', '879'), wait: false, origin: CHANNEL })
-    expect(w.registered).toEqual(['dispatch']) // once
+    expect(w.registered).toEqual(['dispatch', 'forward']) // once
     const r = await $.tool.call({ tool: DISPATCH, chat_id: '7051661301', message_id: '878', title: 't', ack: 'a' } as never)
     expect(JSON.stringify(r)).toContain('tg-7051661301-878')
     expect(w.spawns.length).toBe(1)
@@ -385,6 +386,68 @@ describe('follow-ups', () => {
     await w.clock.advance(10)
     expect(w.routed.length).toBe(before)
     expect(sends(w).at(-1)!.body.text).not.toContain('HANDBACK 878') // only the ack went out: nothing left to post
+  })
+})
+
+describe('forward', () => {
+  /** A message that replies to nothing reaches the Router, which forwards it to the worker of 878. */
+  async function forwarded($: any, w: World, mid = '910', worker = 'tg-7051661301-878') {
+    await $.prompt.submit({ text: TAG('7051661301', mid), wait: false, origin: CHANNEL })
+    await $.turn.start({ text: TAG('7051661301', mid), turnId: `r-${mid}` })
+    return $.tool.call({ tool: FORWARD, chat_id: '7051661301', message_id: mid, worker } as never)
+  }
+
+  test('the Router sees each open task with its worker name and the forward rule', async ($, on) => {
+    const w = world(on)
+    await dispatched($, w)
+    await $.prompt.submit({ text: TAG('7051661301', '910'), wait: false, origin: CHANNEL })
+    const ctx = w.routed.at(-1)!.context!.join('\n')
+    expect(ctx).toContain('worker tg-7051661301-878')
+    expect(ctx).toContain(FORWARD)
+  })
+
+  test('a forwarded message reaches the worker, the person is told, and a reply to that note routes there too', async ($, on) => {
+    const w = world(on)
+    await dispatched($, w) // the ack is message 500
+    const r = await forwarded($, w)
+    expect(JSON.stringify(r)).toContain('已转给 worker tg-7051661301-878')
+    expect(w.sendsToAgents.at(-1)).toMatchObject({ to: 'tg-7051661301-878', text: `Telegram 追问（message_id=910）：\n${TAG('7051661301', '910')}` })
+    const note = sends(w).at(-1)!.body
+    expect(note.text).toContain('改 recap 超时')
+    expect(note.reply_parameters.message_id).toBe(910)
+    const again = await $.prompt.submit({ text: REPLY('911', '501'), wait: false, origin: CHANNEL })
+    expect(again.drop).toBeTruthy()
+    // the message was used: it can no longer be dispatched
+    const d = await $.tool.call({ tool: DISPATCH, chat_id: '7051661301', message_id: '910', title: 't', ack: 'a' } as never)
+    expect(JSON.stringify(d)).toContain('没有等待派活')
+  })
+
+  test('a forward to no open task of this chat is refused and the message stays dispatchable', async ($, on) => {
+    const w = world(on)
+    await dispatched($, w)
+    const r = await forwarded($, w, '910', 'tg-111-1')
+    expect(JSON.stringify(r)).toContain('没有名为 tg-111-1')
+    expect(w.sendsToAgents.length).toBe(0)
+    const d = await $.tool.call({ tool: DISPATCH, chat_id: '7051661301', message_id: '910', title: 't', ack: 'a' } as never)
+    expect(JSON.stringify(d)).toContain('tg-7051661301-910')
+  })
+
+  test('a forward to a gone worker asks the Router to dispatch, and the new worker takes the task over', async ($, on) => {
+    const w = world(on)
+    await dispatched($, w)
+    w.deliver = false
+    const r = await forwarded($, w)
+    expect(JSON.stringify(r)).toContain('is gone')
+    w.deliver = true
+    await $.tool.call({ tool: DISPATCH, chat_id: '7051661301', message_id: '910', title: '接着改', ack: '收到。' } as never)
+    expect(w.spawns.at(-1)!.prompt).toContain('you take it over')
+  })
+
+  test('a worker cannot call forward', async ($, on) => {
+    const w = world(on)
+    await dispatched($, w)
+    const r = await $.tool.call({ tool: FORWARD, chat_id: '7051661301', message_id: '878', worker: 'tg-7051661301-878', agentId: 'a-1' } as never)
+    expect(JSON.stringify(r)).toContain('只给前台用')
   })
 })
 

@@ -3,13 +3,14 @@
 // so the rule is code: the Router routes, talks, and drives herdr/tmux panes.
 
 export const DISPATCH = 'mcp__tg-router__dispatch'
+export const FORWARD = 'mcp__tg-router__forward'
 /** the forked channel: the MCP server the launcher starts through --mcp-config */
 export const CHANNEL_SERVER = 'tg-channel'
 export const CHANNEL_PREFIX = `mcp__${CHANNEL_SERVER}__`
 /** the chat id of requests typed in the Router session's own terminal (or through Remote Control) */
 export const TERMINAL_CHAT = 'tui'
 
-const ROUTER_TOOLS = new Set([DISPATCH, 'TaskStop', 'ToolSearch', 'SendMessage'])
+const ROUTER_TOOLS = new Set([DISPATCH, FORWARD, 'TaskStop', 'ToolSearch', 'SendMessage'])
 const PANE_CMD = /^(herdr|tmux)$/
 /** tmux commands that run a shell command or script in the tmux server itself, and their aliases */
 const TMUX_SHELL = /^(run(-shell)?|if(-shell)?|pipe-pane|pipep|source(-file)?)$/
@@ -40,7 +41,7 @@ export type GateInput = { tool: string; agentId?: string; command?: unknown; fil
 
 /** The deny reason for a Router call, or null when the call may run. */
 export function routerDeny(e: GateInput, inboxDir: string): string | null {
-  if (e.agentId) return e.tool === DISPATCH ? `${DISPATCH} 只给前台用` : null
+  if (e.agentId) return e.tool === DISPATCH || e.tool === FORWARD ? `${e.tool} 只给前台用` : null
   if (ROUTER_TOOLS.has(e.tool) || e.tool.startsWith(CHANNEL_PREFIX)) return null
   if (e.tool === 'Bash' && typeof e.command === 'string' && isPaneCommand(e.command)) return null
   // a photo the person sent: the channel tells the Router to Read it

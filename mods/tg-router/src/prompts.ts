@@ -1,4 +1,4 @@
-import { DISPATCH, TERMINAL_CHAT } from './gate'
+import { DISPATCH, FORWARD, TERMINAL_CHAT } from './gate'
 import type { Task } from './tasks'
 
 /** The first prompt of a worker: its rules, then the request as the person sent it. */
@@ -60,7 +60,7 @@ export function followUp(messageId: number, body: string): string {
 
 const fmtTask = (t: Task, now: number) => {
   const min = Math.max(0, Math.round((now - t.lastAt) / 60_000))
-  return `- ${t.title}（${t.state === 'running' ? '进行中' : '已答复'}，${min} 分钟前；回复消息 ${t.rootId} 即可追问）`
+  return `- ${t.title}（${t.state === 'running' ? '进行中' : '已答复'}，${min} 分钟前；回复消息 ${t.rootId} 即可追问；worker ${t.name}）`
 }
 
 /** What rides beside each Telegram prompt that reaches the Router. */
@@ -72,8 +72,11 @@ Reply to the person in Chinese.
   Chinese sentence that names the object and the expected result. Add no requirements or plan:
   the worker reads the original message. Several requests in one message: one dispatch for the
   message, whose title names them all; its worker handles each of them.
-- A message that continues an open task below: tell the person, in one sentence, to reply to that
-  task's message so it reaches the worker; do not dispatch it again.
+- A message that continues an open task below (a follow-up, a correction, an answer to the worker's
+  question, an approval such as 去吧 after the worker asked): call ${FORWARD} with its chat_id and
+  message_id and that task's worker name; the host delivers it and tells the person. Do not dispatch it.
+  When it could continue more than one open task and the message does not say which, ask the person
+  in one sentence which task it belongs to, naming the candidates.
 - Questions about panes or other sessions: answer with herdr or tmux commands.
 - Plain chat that asks for no work: answer in one or two sentences with the reply tool.
 - A worker's completion notice needs no Telegram message: the host already posted its answer.

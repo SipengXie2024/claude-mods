@@ -1,6 +1,6 @@
 import type { EngineInterface, Register, Timer } from 'claude-code'
 import { describeTool, parseChannelTag, renderFinal, renderLive, type EndReason, type Turn } from '../src/card'
-import { CHANNEL_SERVER, DISPATCH, routerDeny, TERMINAL_CHAT } from '../src/gate'
+import { CHANNEL_SERVER, DISPATCH, FORWARD, routerDeny, TERMINAL_CHAT } from '../src/gate'
 import { answerNotPosted, followUp, handedBack, lostWorker, routerContext, takeOver, terminalAnswer, terminalContext, workerBrief } from '../src/prompts'
 import * as tasks from '../src/tasks'
 import * as tg from '../src/telegram'
@@ -8,7 +8,8 @@ import type { TgIo } from '../src/telegram'
 
 // The Telegram session is a Router: a new request becomes a background worker
 // (a subagent this mod spawns), a reply to any message of a task goes straight
-// to that task's worker, and each worker's answer is posted under the message
+// to that task's worker, a message that replies to nothing but continues an open
+// task goes there through the Router's `forward`, and each worker's answer is posted under the message
 // that started its run. Every run that lasts SHOW_AFTER gets a progress card.
 //
 // A worker this mod spawned or woke runs beneath this mod's own frame, so the
@@ -210,6 +211,44 @@ async function dispatch($: EngineInterface, a: DispatchArgs): Promise<string> {
 }
 
 /**
+ * Sends a follow-up to its task's worker. Answers false when the worker is
+ * gone: the task is then lost and the message becomes a request the Router
+ * dispatches, carrying the task's original request.
+ */
+async function deliver($: EngineInterface, owner: tasks.Task, req: Request, now: number): Promise<boolean> {
+  await tasks.addFollowUp(kv($), owner.name, req.messageId, req.text, now)
+  const sent = await $.session.send({ to: owner.name, text: followUp(req.messageId, req.text) })
+  if (sent.isDelivered) {
+    requests.delete(reqKey(req.chatId, req.messageId))
+    await tasks.setState(kv($), owner.name, 'running', now)
+    if (!runs.has(`w:${owner.name}`)) track($, `w:${owner.name}`, req.chatId, req.messageId, now)
+    return true
+  }
+  await tasks.setState(kv($), owner.name, 'lost', now)
+  await tasks.removeMessage(kv($), owner.name, req.messageId)
+  requests.set(reqKey(req.chatId, req.messageId), { ...req, text: takeOver(owner.request, req.text), replaces: owner.name })
+  return false
+}
+
+type ForwardArgs = { chat_id?: unknown; message_id?: unknown; worker?: unknown }
+
+/** The Router judged a message that replies to nothing to continue an open task. */
+async function forward($: EngineInterface, a: ForwardArgs): Promise<string> {
+  const key = reqKey(String(a.chat_id), Number(a.message_id))
+  const req = requests.get(key)
+  if (!req) throw new Error(`没有等待处理的 Telegram 消息 ${key}`)
+  const owner = typeof a.worker === 'string' ? await tasks.byName(kv($), a.worker.trim()) : undefined
+  if (!owner || owner.chatId !== req.chatId || owner.state === 'lost') throw new Error(`这个聊天里没有名为 ${String(a.worker)} 的未结束任务`)
+  const now = await $.clock.now()
+  if (!(await deliver($, owner, req, now))) {
+    return `${lostWorker(owner.title)} Call ${DISPATCH} with chat_id ${req.chatId} and message_id ${req.messageId}.`
+  }
+  const noteId = await tg.send(io($), req.chatId, `已转给「${owner.title}」的 worker。`, req.messageId, true)
+  if (noteId !== undefined) await tasks.addMessage(kv($), owner.name, noteId, now)
+  return `已转给 worker ${owner.name}（${owner.title}），host 已告诉用户；你不用再回复。`
+}
+
+/**
  * Gives the follow-ups a worker's answer hands back to the Router, and answers
  * the rest of the answer. A line names a follow-up of this task, never its request.
  */
@@ -254,6 +293,22 @@ async function ensureTools($: EngineInterface): Promise<void> {
           ack: { type: 'string', description: 'one Chinese sentence for the person: the object and the expected result' },
         },
         required: ['chat_id', 'message_id', 'title', 'ack'],
+      },
+      isDeferred: false,
+    })
+    await $.tool.register({
+      name: 'forward',
+      description:
+        'Send a Telegram message that continues an open task to that task\'s worker, when the message does not reply to '
+        + 'one of the task\'s messages. The host delivers it, tells the person under the message, and posts the worker\'s answer.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          chat_id: { type: 'string', description: 'chat_id of the Telegram message' },
+          message_id: { type: 'string', description: 'message_id of the Telegram message' },
+          worker: { type: 'string', description: 'the worker name of the open task, as the open-task list shows it' },
+        },
+        required: ['chat_id', 'message_id', 'worker'],
       },
       isDeferred: false,
     })
@@ -311,19 +366,9 @@ export const register: Register = (on) => {
     // a handed-back follow-up still replies to its task's message: it must not go back to that worker
     const owner = !handed && tag.replyTo !== undefined ? await tasks.byMessage(kv($), tag.chatId, tag.replyTo) : undefined
     if (owner) {
-      await tasks.addFollowUp(kv($), owner.name, tag.messageId, e.text, now)
-      const sent = await $.session.send({ to: owner.name, text: followUp(tag.messageId, e.text) })
-      if (sent.isDelivered) {
-        await tasks.setState(kv($), owner.name, 'running', now)
-        if (!runs.has(`w:${owner.name}`)) track($, `w:${owner.name}`, tag.chatId, tag.messageId, now)
-        return { drop: `tg-router: 已转给 worker（${owner.title}）` }
-      }
-      await tasks.setState(kv($), owner.name, 'lost', now)
-      await tasks.removeMessage(kv($), owner.name, tag.messageId)
+      if (await deliver($, owner, req, now)) return { drop: `tg-router: 已转给 worker（${owner.title}）` }
       await tg.send(io($), tag.chatId, `这件事（${owner.title}）原来的 worker 已经不在了，可能是会话重启过。已转给前台重新派活。`, tag.messageId, true)
-      const lost: Request = { ...req, text: takeOver(owner.request, e.text), replaces: owner.name }
-      requests.set(reqKey(tag.chatId, tag.messageId), lost)
-      armed = { ...lost, at: now }
+      armed = { ...requests.get(reqKey(tag.chatId, tag.messageId))!, at: now }
       return next({ ...e, context: [...(e.context ?? []), routerContext(await tasks.openTasks(kv($), tag.chatId), now), lostWorker(owner.title)] })
     }
 
@@ -351,9 +396,9 @@ export const register: Register = (on) => {
     if (deny) return { deny }
     // registered tools: the engine's types list built-in names only
     const tool: string = e.tool
-    if (tool === DISPATCH) {
+    if (tool === DISPATCH || tool === FORWARD) {
       try {
-        return { result: await dispatch($, e as DispatchArgs) }
+        return { result: tool === DISPATCH ? await dispatch($, e as DispatchArgs) : await forward($, e as ForwardArgs) }
       } catch (err) {
         return { deny: err instanceof Error ? err.message : String(err) }
       }
