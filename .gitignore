@@ -3,3 +3,4 @@ node_modules/
 **/.claude-plugin/types/
 *.packed.html
 *.artifact.html
+__pycache__/

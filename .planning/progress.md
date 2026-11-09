@@ -1,3 +1,38 @@
+# Progress: context-memory 30-second archive timeout (2026-11-09)
+
+- [x] Locate the failing step: accumulator compaction wrote no checkpoint and its index timestamp stayed at 2026-11-07; transcript sync timed out.
+- [x] Reproduce on a cold copy of the real database: sync 37.7 s (DELETE 34.1 s); search 29.5 s.
+- [x] Read Agentix's stream-cursor projection (read-only, antcloud) and the ce_dag plugin schema for reference.
+- [x] Remove transcript sync from compaction and fork snapshots; replace full-rewrite sync with cursor-based appends, a separate search table and small chain/link/handoff tables; lock wait 20 s.
+- [x] Checks: 6 core, 20 storage (incremental equivalence, cursor-only reads, rewrite rebuild; mutation and old-implementation runs fail those checks), TypeScript, plugin validate. Real sessions 0e820d32 and 57f6dc1e: four compactions, 0 plugin model requests, notes carried, history search/read and fork retrieval work.
+- [x] Cold-copy timings: compaction archive 0.24 s, first sync 1.73 s, repeat sync 0.06 s, search 0.90 s.
+- Every open session keeps the previous code until `/reload-plugins`.
+
+# Progress: context-memory notes without plugin model requests (2026-11-09)
+
+## Task Status Dashboard
+- [x] Confirm the accumulator compaction was idle and inspect the old serial path: 883 inputs became 59 sequential Opus requests before native compaction.
+- [x] Baseline check: verify_compaction.py fails on the old real run with 6 plugin model requests.
+- [x] Replace per-turn and pre-compaction note generation with model-kept notes (`notes_write` / `notes_read`), a `prompt.compose` guidance section, note-carrying compaction instructions, and a verbatim handoff appended to the native result. Remove the summarization, candidate and request-format code paths and their checks.
+- [x] Checks: 6 core, 17 storage, TypeScript, plugin validate. Real sessions: two manual and two automatic compactions with 0 plugin model requests and matching handoff notes; refused note ignored; resume retrieval and fork retrieval work; unprompted session wrote its own note.
+- [x] Accumulator-scale archive overhead measured without model calls: 4.53 s.
+- Details: context-memory-verification.md. User still needs `/reload-plugins` in accumulator before `/compact`.
+
+# Progress: context-memory accumulator repair (2026-11-07)
+
+- [x] Locate the failing session and preserve its real 881-item input.
+- [x] Reproduce HTTP 429 in an isolated fork and distinguish request format from quota using same-account controls.
+- [x] Separate the subscription identity system block and surface actual API errors.
+- [x] Pass 12 core/request checks, type checking, and a real direct-subscription compaction/resume/retrieval session.
+
+| Check | Result | Evidence |
+|---|---|---|
+| Real request before fix | HTTP 429 | accumulator fork debug log |
+| Same input with separate identity block | Success | 11319 input / 2512 output tokens |
+| Return to combined layout | HTTP 429 | same-account control |
+| Core/request regression | 12 passed | Bun test output |
+| Direct subscription end-to-end | Passed | session 6fe09413-4b2a-41d8-9d81-f77d9eff0f68 |
+
 # Progress: claude-telegram Router + background workers (2026-11-01)
 
 ## Task Status Dashboard

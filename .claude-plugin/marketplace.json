@@ -48,6 +48,11 @@
       "name": "reply-language",
       "source": "./mods/reply-language",
       "description": "Restate the settings' reply language beside every prompt, so long English context does not pull replies into English."
+    },
+    {
+      "name": "context-memory",
+      "source": "./mods/context-memory",
+      "description": "Model-kept task notes carried verbatim across context compaction, a local archive of the conversation, and scoped history search and read tools."
     }
   ]
 }

@@ -1,3 +1,29 @@
+# Findings: context-memory storage layout and handoff display (2026-11-09)
+
+- Plugins from the directory marketplace `sipeng-mods` are read from the repository folder (`claude plugin list`: `Read from: /home/ubuntu/sipeng/claude-mods/mods/context-memory`), not from the versioned copy under `~/.claude/plugins/cache`; an open session keeps the hooks module it loaded until `/reload-plugins`, while `storage.py` is spawned from the folder on every call. context-memory is 0.2.0 and enabled since 2026-11-09 06:05 UTC; superpower-planning is disabled, its conventions for `findings.md`, `CONTEXT.md` and plans moved to `~/.codex/AGENTS.md` (Project Records).
+- Real archive was 611.8 MB; under 50 MB was text any operation reads. Space went to a pre-cursor transcript index (`transcript_rows`, 360.8 MB), snapshot `items.message` raw JSON never read by any op (92.7 MB), identical rendered/search copies in both snapshots and transcript tables, `observed` message bodies used only for a count, and 14 snapshots of compactions that never installed (120 MB) because the snapshot was written before the native compaction.
+- SQLite reads a later column only after walking the overflow pages of earlier ones, so the old `items` row layout made every snapshot search read all three text columns.
+- Schema version 1 (`PRAGMA user_version`): text once per row with `search_text` NULL unless it differs; transcript reading and search tables merged; `observed` and the observe hooks removed; snapshot and handoff written in one transaction after `next(e)` succeeds, checkpoint id generated in the hooks module (`crypto.randomUUID`). Legacy archives migrate in place on first contact, then VACUUM; the real archive went 611.8 MB to 48.7 MB in 9.2 s with all kept rows hash-identical.
+- 9 of the 10 kept checkpoints are referenced by no transcript: the old order wrote their handoff before the native compaction failed or was cancelled. Deleted with user confirmation; archive is now 40.3 MB with one checkpoint (43df9c60).
+- `SessionCompacted.messages` has no hidden/meta field; `isMeta` on append rows is pinned. `ui.render` on `UserMessage` can redraw a row without changing what the model reads; the handoff now draws as one line and expands under ctrl+o (checked in a live tmux session).
+
+# Findings: context-memory 30-second archive timeout (2026-11-09)
+
+- accumulator `/compact` at 03:08:24 UTC failed after 30 s: `$.process.run(python3) aborted`. No new checkpoint was written and the index timestamp stayed at 2026-11-07, so the transcript sync was the step that timed out.
+- Old sync re-read the whole 163 MB transcript and replaced every index row for it (4454 rows, 220 MB: an unused raw-JSON column 114 MB, rendered 53 MB, search text 53 MB) in one rollback-journal transaction. On a copy of the real database: 6.4 s with a warm page cache; 37.7 s after evicting the copy from the cache (DELETE alone 34.1 s). Cold-cache search took 29.5 s because it read through the same wide rows.
+- Agentix reference (read-only, antcloud `~/agentix`, HEAD 9696a02701): per-stream cursor with byte offset and last-body hash, append-only projection committed with the cursor, rebuild only on mismatch, WAL + synchronous=NORMAL (`crates/storage/src/projection/projector.rs:37-41,140-168,226-234`; `schema.sql:20-42`). The ce_dag plugin's FTS5 unicode61 index cannot match Chinese substrings; it falls back to LIKE.
+- Measured alternatives on accumulator search text (warm): FTS5 trigram detail=full 216 MB / 24 s build / 3 ms query; detail=none 70 MB / 20 s / 52 ms; narrow text table 55 MB / 0.1 s / 0.1 s scan. Trigram also misses two-character queries. Chose the narrow table.
+- After the change, on a cold copy of the real database: compaction archive 0.24 s for 883 items; first index sync 1.73 s; repeat sync 0.06 s; search 0.90 s cold, 0.29 s warm.
+- Compaction no longer syncs the transcript; snapshot parents come from handoff markers in the compaction input. Old `transcript_rows` and `sync_state` tables remain unused in existing databases.
+
+# Findings: context-memory compaction latency (2026-11-09)
+
+- The 20-minute PreCompact wait came from the plugin itself: every compaction split the input into 24,000-character segments and requested Opus for each in sequence (accumulator: 883 items, 59 segments, about 21 s each). The same pipeline also ran after every turn.
+- Codex experimental context management avoids this: the working model writes notes during the task and `new_context` installs a fresh window without summarization (`compact_token_budget.rs`, `session/token_budget.rs`).
+- New design: notes live in the conversation as `notes_write` calls, so rewinds, resumes and forks use the current branch's note; the latest note goes into the native summarizer's instructions and is appended verbatim in the handoff. No database copy of notes is kept.
+- `--system-prompt` sessions do not run `prompt.compose` hooks (0 runs in the debug log); default-prompt sessions do (1 run). Live checks that rely on the guidance must use the default prompt or ask for the tool explicitly.
+- Accumulator-scale archive cost: transcript sync 4.21 s, snapshot 0.26 s, handoff 0.05 s.
+
 # Findings: Super-agent routing for claude-telegram (2026-11-01)
 
 ## Goal
