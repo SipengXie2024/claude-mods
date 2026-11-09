@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
-import { buildHandoff, checkpointRoots, compactionInstructions, handoffLine, latestNotes, newCheckpointId, noteProblem, NOTES_LIMIT, NOTES_TOOL, project } from '../src/core'
+import { archiveFailure, buildHandoff, checkpointRoots, compactionInstructions, handoffLine, latestNotes, newCheckpointId, noteProblem, NOTES_LIMIT, NOTES_TOOL, PLUGIN_ID, project, PROTOCOL } from '../src/core'
 
 // The input is the actual conversation in which this plugin was requested.
 const source = process.env.CONTEXT_MEMORY_TRANSCRIPT ?? '/home/ubuntu/.claude/projects/-home-ubuntu-sipeng-re-test/e84c9c29-5d2e-444c-b954-11c546adedaa.jsonl'
@@ -61,8 +61,31 @@ describe('real conversation projection', () => {
     expect(line).toContain(`笔记 ${actualText.length} 字`)
     expect(line).not.toContain('\n')
     expect(handoffLine(buildHandoff(id, 3, null, []).text)).toContain('没有任务笔记')
-    expect(handoffLine(`[context-memory checkpoint=${id}]\n这是创建该 fork 时的父会话输入快照，共 3 条。`)).toContain('fork')
+    // An older handoff without attributes still folds, without a count.
+    const plain = `[context-memory checkpoint=${id}]\n上下文已压缩。`
+    expect(handoffLine(plain)).toContain(id.slice(0, 8))
+    expect(handoffLine(plain)).not.toContain('条记录（')
+    expect(checkpointRoots([{ role: 'user', text: plain, toolUses: [] }])).toEqual([id])
     expect(messages.every(m => handoffLine(m.text) === null)).toBe(true)
+  })
+
+  test('the storage helper speaks the same protocol and reads the same marker', () => {
+    const source = readFileSync(`${import.meta.dir}/../src/storage.py`, 'utf8')
+    expect(Number(/^PROTOCOL = (\d+)$/m.exec(source)![1])).toBe(PROTOCOL)
+    const id = newCheckpointId()
+    const texts = [buildHandoff(id, 7, actualText, []).text, `[context-memory checkpoint=${id}]\nx`]
+    const run = Bun.spawnSync(['python3', '-I', '-c',
+      'import json,sys,importlib.util as u;s=u.spec_from_file_location("s",sys.argv[1]);m=u.module_from_spec(s);s.loader.exec_module(m);print(json.dumps([m.HANDOFF_MARK_RE.match(t).group(1) for t in json.loads(sys.stdin.read())]))',
+      `${import.meta.dir}/../src/storage.py`], { stdin: Buffer.from(JSON.stringify(texts)) })
+    expect(run.exitCode).toBe(0)
+    expect(JSON.parse(run.stdout.toString())).toEqual([id, id])
+  })
+
+  test('an archive failure names its reason and how to step around the plugin', () => {
+    const text = archiveFailure('database or disk is full')
+    expect(text).toContain('database or disk is full')
+    expect(text).toContain(`claude plugin disable ${PLUGIN_ID}`)
+    expect(text).toContain('/reload-plugins')
   })
 
   test('the summarizer keeps the person\'s own instructions ahead of the note', () => {

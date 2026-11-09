@@ -106,6 +106,16 @@ def main():
         assert 'mcp__context-memory__history_search' in calls, 'No real history search tool call'
         assert 'mcp__context-memory__history_read' in calls, 'No real history read tool call'
         assert 'Agent' in calls, 'No real fork agent call'
+        # The fork must find its parent's words, not merely call the tool without an error.
+        fork_totals = []
+        for path in transcript.parent.joinpath(transcript.stem, 'subagents').glob('*.jsonl'):
+            rows = [json.loads(line) for line in path.read_text().split('\n') if line]
+            searches = {b['id'] for r in rows if r.get('type') == 'assistant' for b in r['message']['content']
+                        if b.get('type') == 'tool_use' and b.get('name') == 'mcp__context-memory__history_search'}
+            fork_totals += [json.loads(b['content'] if isinstance(b['content'], str) else b['content'][0]['text'])['total']
+                            for r in rows if r.get('type') == 'user' and isinstance(r['message']['content'], list)
+                            for b in r['message']['content'] if b.get('type') == 'tool_result' and b.get('tool_use_id') in searches]
+        assert fork_totals and max(fork_totals) > 0, f'The fork found nothing of its parent: {fork_totals}'
     timings = [line.split('[DEBUG] ', 1)[-1] for line in debug.split('\n') if 'context-memory: archived' in line]
     print(json.dumps({'compaction': report, 'archive_timings': timings, 'transcript': str(transcript)}, ensure_ascii=False))
     (output / 'results.json').write_text(json.dumps(results, ensure_ascii=False, indent=2))

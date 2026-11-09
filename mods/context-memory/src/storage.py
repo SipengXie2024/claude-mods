@@ -6,6 +6,7 @@ Any error propagates as an exception and a non-zero exit status.
 """
 
 import argparse
+import datetime
 import hashlib
 import json
 import os
@@ -26,9 +27,19 @@ HANDOFF_PREFIX = "[context-memory checkpoint="
 HISTORY_TOOL_PREFIX = "mcp__context-memory__history_"
 
 CHECKPOINT_RE = re.compile(r"^[0-9a-f]{32}$")
+SESSION_FILE_RE = re.compile(r"^([0-9a-f-]{36})\.jsonl$")
 REF_RE = re.compile(r"^cm:([0-9a-f]{32}):(0|[1-9][0-9]*)$")
-ROW_REF_RE = re.compile(r"^row:(.+)$")
-HANDOFF_MARK_RE = re.compile(r"^\[context-memory checkpoint=([0-9a-f]{32})\]")
+# row:<uuid> is a row of the caller's own transcript; row:<session>/<uuid> one of another
+# session's main transcript in the same project.
+ROW_REF_RE = re.compile(r"^row:(?:([0-9a-f-]{36})/)?([^/]+)$")
+# The marker may carry attributes after the id (items=N); older handoffs have none.
+HANDOFF_MARK_RE = re.compile(r"^\[context-memory checkpoint=([0-9a-f]{32})(?: [a-z]+=[^\]\s]*)*\]")
+# Bumped whenever a request or result changes shape. The hooks module stays loaded for a
+# session's life while this helper is started fresh for every call, so the two can differ.
+PROTOCOL = 2
+SESSIONS_DEFAULT_LIMIT = 20
+SESSIONS_MAX_LIMIT = 50
+PROMPT_PREVIEW_CHARS = 200
 ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 
 SCHEMA = """
@@ -38,7 +49,10 @@ CREATE TABLE IF NOT EXISTS checkpoints (
   session TEXT NOT NULL,
   agent TEXT NOT NULL,
   created_at REAL NOT NULL,
-  count INTEGER NOT NULL
+  count INTEGER NOT NULL,
+  -- The session's main transcript when the snapshot was taken; the checkpoint expires
+  -- with that file. NULL on checkpoints written before schema version 2.
+  transcript TEXT
 );
 CREATE TABLE IF NOT EXISTS checkpoint_parents (
   checkpoint TEXT NOT NULL REFERENCES checkpoints(id),
@@ -159,7 +173,7 @@ def dumps(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Archives written before SCHEMA_VERSION 1 kept every snapshot message twice more
 # (raw JSON and an identical search copy), the transcript text in two tables,
@@ -240,12 +254,18 @@ def connect(db_path):
         conn.execute("BEGIN IMMEDIATE")
         try:
             # Another process may have set the schema up while this one waited for the lock.
-            if conn.execute("PRAGMA user_version").fetchone()[0] < SCHEMA_VERSION:
-                migrated = table_exists(conn, "items")
-                if migrated:
-                    migrate_legacy(conn)
-                else:
-                    run_script(conn, SCHEMA)
+            current = conn.execute("PRAGMA user_version").fetchone()[0]
+            if current < SCHEMA_VERSION:
+                if current < 1:
+                    migrated = table_exists(conn, "items")
+                    if migrated:
+                        migrate_legacy(conn)
+                    else:
+                        run_script(conn, SCHEMA)
+                # Version 2 records each checkpoint's transcript.
+                columns = {r[1] for r in conn.execute("PRAGMA table_info(checkpoints)")}
+                if "transcript" not in columns:
+                    conn.execute("ALTER TABLE checkpoints ADD COLUMN transcript TEXT")
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.execute("COMMIT")
         except BaseException:
@@ -324,6 +344,8 @@ def op_snapshot(conn, req, session, agent):
     """
     cp = checkpoint_id(field(req, "checkpoint", str), "checkpoint")
     handoff = field(req, "handoff", str)
+    transcript = field(req, "transcript", str, optional=True)
+    require(transcript is None or os.path.isabs(transcript), "transcript must be an absolute path")
     messages = field(req, "messages", list)
     parents = field(req, "parents", list)
     for p in parents:
@@ -345,11 +367,11 @@ def op_snapshot(conn, req, session, agent):
 
     inherited = inherited_field(req)
     with conn:
-        for p in set(parents):
-            check_trusted(conn, p, "parent", session, agent, inherited)
+        parents = trusted(conn, parents, "parent", session, agent, inherited)
         conn.execute(
-            "INSERT INTO checkpoints (id, session, agent, created_at, count) VALUES (?, ?, ?, ?, ?)",
-            (cp, session, agent, time.time(), len(messages)),
+            "INSERT INTO checkpoints (id, session, agent, created_at, count, transcript)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (cp, session, agent, time.time(), len(messages), transcript),
         )
         conn.executemany(
             "INSERT INTO checkpoint_parents (checkpoint, parent) VALUES (?, ?)",
@@ -388,19 +410,25 @@ def inherited_field(req):
     return bool(value)
 
 
-def check_trusted(conn, cp, name, session, agent, inherited):
-    """Validate a checkpoint the host supplied from the caller's current context.
+def trusted(conn, ids, name, session, agent, inherited):
+    """The checkpoints, among those the host supplied from the caller's context, the archive holds.
 
     The same agent may use its checkpoints from any session (resume). A forked
     agent (inherited=true) may also use another agent's checkpoint from the
-    same session.
+    same session. A marker whose checkpoint the archive does not hold (a recreated
+    archive, another storage directory, a pasted handoff) names nothing to search.
     """
-    checkpoint_id(cp, name)
-    row = conn.execute("SELECT session, agent FROM checkpoints WHERE id = ?", (cp,)).fetchone()
-    require(row is not None, f"unknown {name} checkpoint: {cp}")
-    owner_session, owner_agent = row
-    allowed = owner_agent == agent or (inherited and owner_session == session)
-    require(allowed, f"{name} checkpoint {cp} belongs to another agent")
+    found = []
+    for cp in dict.fromkeys(ids):
+        checkpoint_id(cp, name)
+        row = conn.execute("SELECT session, agent FROM checkpoints WHERE id = ?", (cp,)).fetchone()
+        if row is None:
+            continue
+        owner_session, owner_agent = row
+        allowed = owner_agent == agent or (inherited and owner_session == session)
+        require(allowed, f"{name} checkpoint {cp} belongs to another agent")
+        found.append(cp)
+    return found
 
 
 def scope_ids(conn, req, session, agent):
@@ -409,10 +437,7 @@ def scope_ids(conn, req, session, agent):
     Ancestors were validated when each child snapshot was written, so the
     recursion does not re-filter by agent.
     """
-    roots = roots_field(req)
-    inherited = inherited_field(req)
-    for r in roots:
-        check_trusted(conn, r, "root", session, agent, inherited)
+    roots = trusted(conn, roots_field(req), "root", session, agent, inherited_field(req))
     if not roots:
         return []
     marks = ",".join("?" * len(roots))
@@ -447,7 +472,13 @@ def op_read(conn, req, session, agent):
     require(offset >= 0, "offset must be non-negative")
     row_match = ROW_REF_RE.match(ref)
     if row_match:
-        return read_row(conn, session, agent, ref, row_match.group(1), offset, limit)
+        other, uuid = row_match.group(1), row_match.group(2)
+        if other is None or (other == session and agent == "main"):
+            path = latest_sync_path(conn, session, agent)
+            require(path is not None, f"no synced transcript for this session/agent: {ref}")
+            return read_row(conn, (session, agent, path), ref, uuid, offset, limit)
+        path = project_transcript(conn, req, other)
+        return read_row(conn, (other, "main", path), ref, uuid, offset, limit)
     match = REF_RE.match(ref)
     require(match is not None, f"invalid ref: {ref!r}")
     cp, idx = match.group(1), int(match.group(2))
@@ -468,20 +499,46 @@ def latest_sync_path(conn, session, agent):
     return None if row is None else row[0]
 
 
-def read_row(conn, session, agent, ref, uuid, offset, limit):
-    # Transcript rows are readable only from the caller's own session and agent,
-    # and only on the active chain of the most recently synced transcript.
-    path = latest_sync_path(conn, session, agent)
-    require(path is not None, f"no synced transcript for this session/agent: {ref}")
+def read_row(conn, key, ref, uuid, offset, limit):
+    # Only rows on the active chain of the transcript are readable.
     row = conn.execute(
         "SELECT e.role, e.rendered FROM transcript_entries e JOIN transcript_active a"
         " ON a.session = e.session AND a.agent = e.agent AND a.path = e.path AND a.uuid = e.uuid"
         " WHERE e.session = ? AND e.agent = ? AND e.path = ? AND e.uuid = ?"
         " ORDER BY e.line_no DESC LIMIT 1",
-        (session, agent, path, uuid),
+        (*key, uuid),
     ).fetchone()
     require(row is not None, f"ref not on the active transcript chain: {ref}")
     return page(ref, row[0], row[1], "transcript", offset, limit)
+
+
+def project_field(req):
+    project = field(req, "project", str)
+    require(os.path.isabs(project), "project must be an absolute directory")
+    return os.path.normpath(project)
+
+
+def project_transcript(conn, req, other):
+    """Path of another session's main transcript, if it lies in the caller's project."""
+    project = project_field(req)
+    row = conn.execute(
+        "SELECT path FROM transcript_cursor WHERE session = ? AND agent = 'main'"
+        " ORDER BY synced_at DESC LIMIT 1", (other,)).fetchone()
+    require(row is not None and os.path.dirname(row[0]) == project,
+            f"session {other} has no indexed transcript in this project")
+    return row[0]
+
+
+def project_transcripts(conn, req):
+    """(mtime, session, path) of the project's indexed main transcripts, newest first."""
+    project = project_field(req)
+    found = []
+    for other, path in conn.execute(
+            "SELECT session, path FROM transcript_cursor WHERE agent = 'main'"):
+        if os.path.dirname(path) == project and os.path.exists(path):
+            found.append((os.stat(path).st_mtime, other, path))
+    found.sort(reverse=True)
+    return found
 
 
 def page(ref, role, rendered, source, offset, limit):
@@ -499,61 +556,144 @@ def page(ref, role, rendered, source, offset, limit):
     }
 
 
-def snippet(search_text, query):
-    if not query:
+def snippet(search_text, terms):
+    if not terms:
         return search_text[:SNIPPET_CHARS]
-    pos = search_text.translate(ASCII_LOWER).find(query.translate(ASCII_LOWER))
+    pos = search_text.translate(ASCII_LOWER).find(terms[0].translate(ASCII_LOWER))
     require(pos >= 0, "search match vanished")
     start = max(0, min(pos - SNIPPET_LEAD, len(search_text) - SNIPPET_CHARS))
     return search_text[start:start + SNIPPET_CHARS]
 
 
 def op_search(conn, req, session, agent):
+    """Find records whose searchable text contains every whitespace-separated term.
+
+    Scope current: the caller's active transcript; for a subagent, also its session's main
+    transcript, which holds the conversation it was started from; then snapshots of its
+    checkpoint lineage. A snapshot the caller itself took is left out while its transcript
+    is indexed, since the active chain already holds those messages. Scope project adds the
+    other sessions' main transcripts of the same project, newest file first; session narrows
+    it to one session.
+    """
     query = field(req, "query", str)
     offset = field(req, "offset", int, optional=True) or 0
     limit = field(req, "limit", int, optional=True)
     limit = SEARCH_DEFAULT_LIMIT if limit is None else limit
+    scope = field(req, "scope", str, optional=True) or "current"
+    only = field(req, "session_filter", str, optional=True)
     require(0 < limit <= SEARCH_MAX_LIMIT, f"limit must be in 1..{SEARCH_MAX_LIMIT}")
     require(offset >= 0, "offset must be non-negative")
+    require(scope in ("current", "project"), "scope must be current or project")
+    require(only is None or scope == "project", "a session filter needs scope project")
     ids = scope_ids(conn, req, session, agent)
     path = latest_sync_path(conn, session, agent)
-    marks = ",".join("?" * len(ids))
-    # Candidates: active rows of the latest synced transcript (one per uuid,
-    # newest line first), then snapshot items (newest checkpoint, latest index
-    # first). Matching is a literal, ASCII-case-insensitive substring test.
-    candidates = f"""
+    others = []
+    main_path = latest_sync_path(conn, session, "main") if agent != "main" else None
+    if main_path is not None:
+        others.append((session, main_path))
+    if scope == "project":
+        others += [(other, p) for _, other, p in project_transcripts(conn, req) if other != session]
+    own = only is None or only == session
+    if only is not None:
+        others = [o for o in others if o[0] == only]
+        require(own or others, f"session {only} has no indexed transcript in this project")
+    terms = query.split()
+    parts, args = [], []
+    if own:
+        parts.append("""
         SELECT 0 AS kind, 0 AS k1, t.line_no AS k2, 'row:' || t.uuid AS ref, t.role AS role,
-               'transcript' AS source, coalesce(t.search_text, t.rendered) AS search_text
+               'transcript' AS source, t.session AS session,
+               coalesce(t.search_text, t.rendered) AS search_text
         FROM transcript_entries t JOIN transcript_active a
           ON a.session = t.session AND a.agent = t.agent AND a.path = t.path AND a.uuid = t.uuid
         WHERE t.session = ? AND t.agent = ? AND t.path = ? AND t.searchable = 1
           AND t.line_no = (SELECT max(u.line_no) FROM transcript_entries u
                            WHERE u.session = t.session AND u.agent = t.agent AND u.path = t.path
-                             AND u.uuid = t.uuid)
-        UNION ALL
-        SELECT 1, c.seq, i.idx, 'cm:' || i.checkpoint || ':' || i.idx, i.role, i.source,
-               coalesce(i.search_text, i.rendered)
+                             AND u.uuid = t.uuid)""")
+        args += [session, agent, path if path is not None else ""]
+    if others:
+        parts.append("""
+        SELECT 1 AS kind, -o.rank AS k1, t.line_no AS k2,
+               'row:' || t.session || '/' || t.uuid AS ref, t.role AS role,
+               'transcript' AS source, t.session AS session,
+               coalesce(t.search_text, t.rendered) AS search_text
+        FROM (SELECT value AS path, key AS rank FROM json_each(?)) o
+        JOIN transcript_entries t ON t.path = o.path AND t.agent = 'main'
+        JOIN transcript_active a
+          ON a.session = t.session AND a.agent = t.agent AND a.path = t.path AND a.uuid = t.uuid
+        WHERE t.searchable = 1
+          AND t.line_no = (SELECT max(u.line_no) FROM transcript_entries u
+                           WHERE u.session = t.session AND u.agent = t.agent AND u.path = t.path
+                             AND u.uuid = t.uuid)""")
+        args.append(json.dumps([other_path for _, other_path in others]))
+    if own and ids:
+        marks = ",".join("?" * len(ids))
+        parts.append(f"""
+        SELECT 2 AS kind, c.seq AS k1, i.idx AS k2, 'cm:' || i.checkpoint || ':' || i.idx AS ref,
+               i.role AS role, i.source AS source, c.session AS session,
+               coalesce(i.search_text, i.rendered) AS search_text
         FROM items i JOIN checkpoints c ON c.id = i.checkpoint
-        WHERE i.checkpoint IN ({marks}) AND i.searchable = 1"""
-    args = (session, agent, path if path is not None else "", *ids)
-    where = "instr(lower(search_text), lower(?)) > 0"
-    total = conn.execute(
-        f"SELECT count(*) FROM ({candidates}) WHERE {where}", (*args, query)
-    ).fetchone()[0]
+        WHERE i.checkpoint IN ({marks}) AND i.searchable = 1
+          AND NOT (? AND c.session = ? AND c.agent = ?)""")
+        args += [*ids, int(path is not None), session, agent]
+    if not parts:
+        return {"items": [], "next_offset": None, "total": 0}
+    candidates = " UNION ALL ".join(parts)
+    where = " AND ".join("instr(lower(search_text), lower(?)) > 0" for _ in terms) or "1"
     rows = conn.execute(
-        f"""SELECT ref, role, source, search_text FROM ({candidates}) WHERE {where}
-            ORDER BY kind ASC, k1 DESC, k2 DESC LIMIT ? OFFSET ?""",
-        (*args, query, limit, offset),
+        f"""SELECT ref, role, source, session, search_text, count(*) OVER () FROM ({candidates})
+            WHERE {where} ORDER BY kind ASC, k1 DESC, k2 DESC LIMIT ? OFFSET ?""",
+        (*args, *terms, limit, offset),
     ).fetchall()
-    items = [
-        {"ref": ref, "role": role, "snippet": snippet(text, query), "source": source}
-        for ref, role, source, text in rows
-    ]
+    if rows:
+        total = rows[0][5]
+    else:
+        # A page past the end holds no row to carry the total.
+        total = conn.execute(
+            f"SELECT count(*) FROM ({candidates}) WHERE {where}", (*args, *terms)
+        ).fetchone()[0] if offset else 0
+    items = []
+    for ref, role, source, owner, text, _ in rows:
+        item = {"ref": ref, "role": role, "snippet": snippet(text, terms), "source": source}
+        if owner != session:
+            item["session"] = owner
+        items.append(item)
     end = offset + len(items)
     return {"items": items, "next_offset": end if end < total else None, "total": total}
 
 
-# ---------------------------------------------------------------- handoff
+def op_sessions(conn, req, session, agent):
+    """The project's indexed main transcripts, newest first, each with its first and last prompt."""
+    project = project_field(req)
+    offset = field(req, "offset", int, optional=True) or 0
+    limit = field(req, "limit", int, optional=True)
+    limit = SESSIONS_DEFAULT_LIMIT if limit is None else limit
+    require(0 < limit <= SESSIONS_MAX_LIMIT, f"limit must be in 1..{SESSIONS_MAX_LIMIT}")
+    require(offset >= 0, "offset must be non-negative")
+    found = project_transcripts(conn, req)
+    prompt = ("SELECT e.rendered FROM transcript_entries e JOIN transcript_active a"
+              " ON a.session = e.session AND a.agent = e.agent AND a.path = e.path AND a.uuid = e.uuid"
+              " WHERE e.session = ? AND e.agent = 'main' AND e.path = ? AND e.role = 'user'"
+              " AND e.searchable = 1 AND substr(e.rendered, 1, 1) NOT IN (char(10), '<')"
+              " ORDER BY e.line_no {} LIMIT 1")
+    out = []
+    for mtime, other, path in found[offset:offset + limit]:
+        first = conn.execute(prompt.format("ASC"), (other, path)).fetchone()
+        last = conn.execute(prompt.format("DESC"), (other, path)).fetchone()
+        rows = conn.execute(
+            "SELECT count(*) FROM transcript_entries WHERE session = ? AND agent = 'main' AND path = ?",
+            (other, path)).fetchone()[0]
+        out.append({
+            "session": other,
+            "current": other == session,
+            "modified": datetime.datetime.fromtimestamp(mtime, datetime.timezone.utc)
+                        .strftime("%Y-%m-%d %H:%M UTC"),
+            "rows": rows,
+            "first_prompt": None if first is None else first[0][:PROMPT_PREVIEW_CHARS],
+            "last_prompt": None if last is None else last[0][:PROMPT_PREVIEW_CHARS],
+        })
+    end = offset + len(out)
+    return {"sessions": out, "next_offset": end if end < len(found) else None, "total": len(found)}
 
 
 def op_get_handoff(conn, req, session, agent):
@@ -650,20 +790,20 @@ def tail_digest(f, end):
     return hashlib.sha256(chunk).hexdigest()
 
 
-def parse_lines(path, data, line_no):
-    """Yield (line_no, record) for each complete line of data, numbering from line_no + 1."""
-    pos = 0
-    while pos < len(data):
-        nl = data.index(b"\n", pos)
-        line = data[pos:nl]
+def parse_lines(data, line_no):
+    """Return ([(line_no, record)], undecodable) for the complete lines of data, numbering
+    from line_no + 1. A line cut short by a crash and later appended to cannot be decoded;
+    it is skipped so the rest of the transcript stays indexed."""
+    records, undecodable = [], 0
+    for line in data.split(b"\n")[:-1]:
         line_no += 1
-        if line:
-            try:
-                rec = json.loads(line.decode("utf-8"))
-            except ValueError as exc:
-                raise ValueError(f"{path}: corrupt JSON on line {line_no}") from exc
-            yield line_no, rec
-        pos = nl + 1
+        if not line:
+            continue
+        try:
+            records.append((line_no, json.loads(line.decode("utf-8"))))
+        except ValueError:
+            undecodable += 1
+    return records, undecodable
 
 
 def walk_chain(tip, parents):
@@ -677,35 +817,111 @@ def walk_chain(tip, parents):
 
 
 def op_sync(conn, req, session, agent):
+    path = field(req, "path", str)
+    require(os.path.isabs(path), "path must be absolute")
+    result = sync_path(conn, session, agent, path)
+    if req.get("project") is not None:
+        prune(conn)
+    return result
+
+
+def op_sync_project(conn, req, session, agent):
+    """Index every main transcript of the caller's project, then drop what has expired."""
+    project = project_field(req)
+    synced = 0
+    for name in sorted(os.listdir(project)):
+        path = os.path.join(project, name)
+        match = SESSION_FILE_RE.match(name)
+        if match and os.path.isfile(path):
+            sync_path(conn, match.group(1), "main", path)
+            synced += 1
+    prune(conn)
+    return {"synced": synced}
+
+
+def prune(conn):
+    """Drop the index of transcripts that no longer exist, and the checkpoints that expired.
+
+    A checkpoint expires when the transcript it recorded at snapshot time is gone: Claude Code
+    deleted that session. One written before transcripts were recorded expires when its
+    session's indexed main transcript is gone. Either way a checkpoint that a remaining
+    transcript still names in a handoff marker is kept, together with its ancestors, so a
+    resumed or forked conversation does not lose it.
+    """
+    gone = [key for key in conn.execute("SELECT session, agent, path FROM transcript_cursor")
+            if not os.path.exists(key[2])]
+    missing = [p for (p,) in conn.execute(
+        "SELECT DISTINCT transcript FROM checkpoints WHERE transcript IS NOT NULL")
+        if not os.path.exists(p)]
+    if not gone and not missing:
+        return
+    with conn:
+        for key in gone:
+            for table in TRANSCRIPT_TABLES + ("transcript_cursor",):
+                conn.execute(f"DELETE FROM {table} WHERE session = ? AND agent = ? AND path = ?", key)
+        unrecorded = [s for s in {s for s, agent, _ in gone if agent == "main"}
+                      if conn.execute("SELECT 1 FROM transcript_cursor WHERE session = ? AND agent = 'main'",
+                                      (s,)).fetchone() is None]
+        expired = [r[0] for r in conn.execute(
+            "SELECT id FROM checkpoints WHERE transcript IN (SELECT value FROM json_each(?))"
+            " OR (transcript IS NULL AND session IN (SELECT value FROM json_each(?)))",
+            (json.dumps(missing), json.dumps(unrecorded)))]
+        carried = {r[0] for r in conn.execute(
+            """WITH RECURSIVE kept(id) AS (
+                 SELECT checkpoint FROM transcript_handoffs
+                 UNION
+                 SELECT p.parent FROM checkpoint_parents p JOIN kept k ON p.checkpoint = k.id
+               )
+               SELECT id FROM kept""")}
+        ids = [i for i in expired if i not in carried]
+        if not ids:
+            return
+        marks = ",".join("?" * len(ids))
+        conn.execute(f"DELETE FROM checkpoint_parents WHERE checkpoint IN ({marks})"
+                     f" OR parent IN ({marks})", (*ids, *ids))
+        for table in ("items", "handoffs"):
+            conn.execute(f"DELETE FROM {table} WHERE checkpoint IN ({marks})", ids)
+        conn.execute(f"DELETE FROM checkpoints WHERE id IN ({marks})", ids)
+
+
+def sync_path(conn, session, agent, path):
     """Index a transcript from where the previous sync stopped.
 
     Only the bytes appended since the cursor are parsed and inserted, so the cost
     follows the new material. A file that no longer matches the cursor (shorter,
     or rewritten before it) is indexed again from the start.
     """
-    path = field(req, "path", str)
-    require(os.path.isabs(path), "path must be absolute")
     key = (session, agent, path)
-    cursor = conn.execute(
-        "SELECT bytes, line_no, tail_hash, chain_tip FROM transcript_cursor"
-        " WHERE session = ? AND agent = ? AND path = ?", key).fetchone()
-    with open(path, "rb") as f:
-        size = os.fstat(f.fileno()).st_size
-        resume = cursor is not None and size >= cursor[0] and tail_digest(f, cursor[0]) == cursor[2]
-        start, line0 = (cursor[0], cursor[1]) if resume else (0, 0)
-        f.seek(start)
-        data = f.read()
-        complete = data.rfind(b"\n") + 1
-        end = start + complete
-        tail_hash = tail_digest(f, end)
-    trailing = complete < len(data)
-
-    records = list(parse_lines(path, data[:complete], line0))
-    line_no = line0 + data[:complete].count(b"\n")
-    links =[(rec["uuid"], rec.get("parentUuid") or rec.get("logicalParentUuid"))
-             for _, rec in records if isinstance(rec, dict) and rec.get("uuid") is not None]
-    entries = [(ln, rec) for ln, rec in records
-               if isinstance(rec, dict) and rec.get("uuid") is not None and is_conversation(rec)]
+    select_cursor = ("SELECT bytes, line_no, tail_hash, chain_tip FROM transcript_cursor"
+                     " WHERE session = ? AND agent = ? AND path = ?")
+    # The file is read and parsed without a lock, since a first sync of a long transcript takes
+    # long enough to stall another session's compaction. The write lock is then taken and the
+    # cursor read again: if another process moved it meanwhile, the work is redone from there,
+    # so two processes never append the same lines.
+    cursor = conn.execute(select_cursor, key).fetchone()
+    while True:
+        with open(path, "rb") as f:
+            size = os.fstat(f.fileno()).st_size
+            resume = cursor is not None and size >= cursor[0] and tail_digest(f, cursor[0]) == cursor[2]
+            start, line0 = (cursor[0], cursor[1]) if resume else (0, 0)
+            f.seek(start)
+            data = f.read()
+            complete = data.rfind(b"\n") + 1
+            end = start + complete
+            tail_hash = tail_digest(f, end)
+        trailing = complete < len(data)
+        records, undecodable = parse_lines(data[:complete], line0)
+        line_no = line0 + data[:complete].count(b"\n")
+        links = [(rec["uuid"], rec.get("parentUuid") or rec.get("logicalParentUuid"))
+                 for _, rec in records if isinstance(rec, dict) and rec.get("uuid") is not None]
+        entries = [(ln, rec) for ln, rec in records
+                   if isinstance(rec, dict) and rec.get("uuid") is not None and is_conversation(rec)]
+        conn.execute("BEGIN IMMEDIATE")
+        current = conn.execute(select_cursor, key).fetchone()
+        if current == cursor:
+            break
+        conn.execute("ROLLBACK")
+        cursor = current
 
     with conn:
         if not resume:
@@ -777,6 +993,7 @@ def op_sync(conn, req, session, agent):
         "count": count,
         "active_count": active_count,
         "coverage": {"path": path, "bytes": end, "trailing_incomplete": trailing},
+        "undecodable_lines": undecodable,
         "roots": roots,
     }
 
@@ -809,6 +1026,8 @@ OPS = {
     "get_handoff": op_get_handoff,
     "read": op_read,
     "search": op_search,
+    "sessions": op_sessions,
+    "sync_project": op_sync_project,
     "sync": op_sync,
     "status": op_status,
 }
@@ -820,17 +1039,26 @@ def main():
     args = parser.parse_args()
     os.umask(0o077)
     req = json.loads(sys.stdin.read())
-    require(isinstance(req, dict), "request must be a JSON object")
-    op = field(req, "op", str)
-    require(op in OPS, f"unknown op: {op}")
-    session = field(req, "session", str)
-    agent = field(req, "agent", str)
-    require(session and agent, "session and agent must be non-empty")
-    conn = connect(args.db)
     try:
-        result = OPS[op](conn, req, session, agent)
-    finally:
-        conn.close()
+        require(isinstance(req, dict), "request must be a JSON object")
+        require(req.get("protocol") == PROTOCOL,
+                f"context-memory 的 hooks 与存储程序版本不一致（hooks 协议 {req.get('protocol')!r}，"
+                f"存储程序协议 {PROTOCOL}）：请在这个会话执行 /reload-plugins")
+        op = field(req, "op", str)
+        require(op in OPS, f"unknown op: {op}")
+        session = field(req, "session", str)
+        agent = field(req, "agent", str)
+        require(session and agent, "session and agent must be non-empty")
+        conn = connect(args.db)
+        try:
+            result = OPS[op](conn, req, session, agent)
+        finally:
+            conn.close()
+    except ValueError as exc:
+        # Request and archive errors are reported as one readable line; anything else keeps
+        # its traceback.
+        sys.stderr.write(f"{exc}\n")
+        sys.exit(2)
     sys.stdout.write(json.dumps(result, ensure_ascii=False))
     sys.stdout.write("\n")
 

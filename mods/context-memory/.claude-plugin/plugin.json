@@ -1,6 +1,6 @@
 {
   "name": "context-memory",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Lets the working model keep a task note, archives the conversation at compaction, carries the latest note verbatim into the new context, and provides scoped history search and read tools. Makes no model requests of its own.",
   "author": {
     "name": "sipeng"
