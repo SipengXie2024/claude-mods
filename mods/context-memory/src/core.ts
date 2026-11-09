@@ -72,6 +72,58 @@ export function buildHandoff(checkpoint: string, count: number, notes: string | 
   }
 }
 
+// Outputs a tool can reproduce by running again; the archive keeps the original text either way.
+const REPRODUCIBLE_TOOLS = new Set(['Read', 'Grep', 'Glob'])
+export const PRUNE_MIN_CHARS = 1024
+export const PRUNE_KEEP_RECENT = 10
+
+function prunedOutput(tool: string, chars: number): string {
+  return `[context-memory: ${tool} 的 ${chars} 字符输出没有交给压缩摘要；原文已存档，可用 mcp__context-memory__history_search 查找，或重新运行该工具]`
+}
+
+/**
+ * The compaction input as the native summarizer reads it: long outputs of reproducible tools
+ * outside the most recent messages are replaced by a short pointer. A rewritten message loses
+ * its engine handle and is rebuilt from role, text and tool blocks; tool ids, and so every
+ * call/result pairing, are unchanged. The original messages are what the archive stores.
+ */
+export function pruneForSummary(messages: readonly SessionMessage[]): { messages: SessionMessage[]; pruned: number; before: number; after: number } {
+  const limit = messages.length - PRUNE_KEEP_RECENT
+  const resultAt = new Map<string, number>()
+  messages.forEach((m, i) => { for (const r of m.toolResults ?? []) resultAt.set(r.tool_use_id, i) })
+  const outputs = new Map<string, { tool: string; chars: number }>()
+  messages.forEach((m, i) => {
+    for (const use of m.toolUses) {
+      const at = resultAt.get(use.tool_use_id) ?? i
+      const text = messages[at]!.toolResults?.find(r => r.tool_use_id === use.tool_use_id)?.text ?? use.text ?? ''
+      if (i < limit && at < limit && REPRODUCIBLE_TOOLS.has(use.tool) && !use.isError && text.length >= PRUNE_MIN_CHARS) {
+        outputs.set(use.tool_use_id, { tool: use.tool, chars: text.length })
+      }
+    }
+  })
+  let after = 0
+  for (const o of outputs.values()) after += prunedOutput(o.tool, o.chars).length
+  const before = [...outputs.values()].reduce((n, o) => n + o.chars, 0)
+  const rewritten = messages.map(m => {
+    const hit = m.toolUses.some(u => outputs.has(u.tool_use_id)) || (m.toolResults ?? []).some(r => outputs.has(r.tool_use_id))
+    if (!hit) return m
+    const toolUses = m.toolUses.map(u => {
+      const o = outputs.get(u.tool_use_id)
+      if (!o || u.text === undefined) return u
+      const { result: _result, ...rest } = u
+      return { ...rest, text: prunedOutput(o.tool, o.chars) }
+    })
+    const toolResults = m.toolResults?.map(r => {
+      const o = outputs.get(r.tool_use_id)
+      if (!o) return r
+      const { result: _result, ...rest } = r
+      return { ...rest, text: prunedOutput(o.tool, o.chars) }
+    })
+    return { role: m.role, text: m.text, toolUses, ...(toolResults ? { toolResults } : {}) }
+  })
+  return { messages: rewritten, pruned: outputs.size, before, after }
+}
+
 /** A fresh checkpoint id: 32 lowercase hex digits. */
 export function newCheckpointId(): string {
   return crypto.randomUUID().replaceAll('-', '')

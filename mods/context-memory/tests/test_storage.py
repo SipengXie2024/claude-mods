@@ -180,6 +180,13 @@ class StorageTest(unittest.TestCase):
         self.assertEqual(res["count"], len(MESSAGES))
         self.assertEqual(stat.S_IMODE(self.dbdir.stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE(self.db.stat().st_mode), 0o600)
+        conn = sqlite3.connect(f"file:{self.db}?mode=ro", uri=True)
+        try:
+            self.assertEqual(conn.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+        finally:
+            conn.close()
+        for extra in self.dbdir.iterdir():
+            self.assertEqual(stat.S_IMODE(extra.stat().st_mode), 0o600, extra.name)
 
         # The first user prompt is read back verbatim (each call is a new process).
         first = self.a.call("read", roots=[cp], ref=f"cm:{cp}:0")
@@ -582,7 +589,10 @@ class StorageTest(unittest.TestCase):
         self.assertEqual(got["source"], "transcript")
         self.a.fails("read", roots=[], ref=f"row:{inactive['uuid']}")
         self.a.fails("read", roots=[], ref="row:no-such-uuid")
-        self.a.fails("read", agent="agent-x", roots=[], ref=f"row:{first_user['uuid']}")
+        # A subagent of this session reaches its main conversation; an agent of another does not.
+        self.assertEqual(self.a.call("read", agent="agent-x", roots=[], ref=f"row:{first_user['uuid']}")["text"],
+                         got["text"])
+        self.a.fails("read", agent="agent-x", session="other-session", roots=[], ref=f"row:{first_user['uuid']}")
         self.a.fails("read", session="other-session", roots=[], ref=f"row:{first_user['uuid']}")
 
         query = "优化对话"
@@ -614,6 +624,25 @@ class StorageTest(unittest.TestCase):
             self.assertIn("/reload-plugins", err)
             self.assertNotIn("Traceback", err)
         self.assertFalse(self.db.exists())
+
+    def test_wal_switch_waits_for_a_free_archive(self):
+        cp = self.snap(MESSAGES[:3])["checkpoint"]
+        holder = sqlite3.connect(str(self.db), isolation_level=None)
+        try:
+            self.assertEqual(holder.execute("PRAGMA journal_mode = DELETE").fetchone()[0], "delete")
+            holder.execute("BEGIN IMMEDIATE")
+            # Another session holds the archive: the call works in the current mode.
+            self.assertEqual(self.a.call("status", roots=[cp])["items"], 3)
+            self.assertEqual(holder.execute("PRAGMA journal_mode").fetchone()[0], "delete")
+            holder.execute("ROLLBACK")
+        finally:
+            holder.close()
+        self.assertEqual(self.a.call("status", roots=[cp])["items"], 3)
+        conn = sqlite3.connect(f"file:{self.db}?mode=ro", uri=True)
+        try:
+            self.assertEqual(conn.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+        finally:
+            conn.close()
 
     def test_own_snapshot_left_out_once_transcript_is_indexed(self):
         frozen = Path(self.tmp.name) / "frozen.jsonl"
@@ -702,6 +731,10 @@ class StorageTest(unittest.TestCase):
         got = self.a.call("read", roots=[], ref=res["items"][0]["ref"], limit=20000, **fork)
         self.assertEqual(got["text"], self.a.call(
             "read", roots=[], ref="row:" + res["items"][0]["ref"].split("/", 1)[1], limit=20000)["text"])
+        # A bare row ref the main conversation handed out, as a fork inherits it, reads the same row.
+        bare = "row:" + res["items"][0]["ref"].split("/", 1)[1]
+        self.assertEqual(self.a.call("read", roots=[], ref=bare, limit=20000, **fork)["text"], got["text"])
+        self.a.fails("read", roots=[], ref="row:00000000-0000-0000-0000-000000000000", **fork)
         # Another session of the project needs scope project.
         self.a.call("sync_project", roots=[], project=str(project))
         self.assertTrue(all("session" not in i for i in self.a.call(

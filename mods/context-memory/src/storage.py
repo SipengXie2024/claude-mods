@@ -247,6 +247,17 @@ def connect(db_path):
     conn.execute("PRAGMA foreign_keys = ON")
     # Other sessions share this archive; wait out their short transactions rather than failing.
     conn.execute("PRAGMA busy_timeout = 20000")
+    # Write-ahead logging lets searches read while another session writes. The mode is stored
+    # in the file, so it is switched once. The switch needs the database to itself and SQLite
+    # refuses it at once while another session holds a lock; the archive then works in its
+    # current mode and the next connection switches it. Any other error propagates.
+    if conn.execute("PRAGMA journal_mode").fetchone()[0] != "wal":
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc):
+                raise
+    conn.execute("PRAGMA synchronous = NORMAL")
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     require(version <= SCHEMA_VERSION, f"archive schema {version} is newer than this helper")
     migrated = False
@@ -474,9 +485,17 @@ def op_read(conn, req, session, agent):
     if row_match:
         other, uuid = row_match.group(1), row_match.group(2)
         if other is None or (other == session and agent == "main"):
-            path = latest_sync_path(conn, session, agent)
-            require(path is not None, f"no synced transcript for this session/agent: {ref}")
-            return read_row(conn, (session, agent, path), ref, uuid, offset, limit)
+            # A subagent's context may hold refs its session's main conversation handed out
+            # (a fork inherits them), so a bare row ref also names a row there.
+            keys = [(session, agent, latest_sync_path(conn, session, agent))]
+            if agent != "main":
+                keys.append((session, "main", latest_sync_path(conn, session, "main")))
+            keys = [key for key in keys if key[2] is not None]
+            require(keys, f"no synced transcript for this session/agent: {ref}")
+            for key in keys[:-1]:
+                if active_row(conn, key, uuid) is not None:
+                    return read_row(conn, key, ref, uuid, offset, limit)
+            return read_row(conn, keys[-1], ref, uuid, offset, limit)
         path = project_transcript(conn, req, other)
         return read_row(conn, (other, "main", path), ref, uuid, offset, limit)
     match = REF_RE.match(ref)
@@ -499,15 +518,19 @@ def latest_sync_path(conn, session, agent):
     return None if row is None else row[0]
 
 
-def read_row(conn, key, ref, uuid, offset, limit):
-    # Only rows on the active chain of the transcript are readable.
-    row = conn.execute(
+def active_row(conn, key, uuid):
+    return conn.execute(
         "SELECT e.role, e.rendered FROM transcript_entries e JOIN transcript_active a"
         " ON a.session = e.session AND a.agent = e.agent AND a.path = e.path AND a.uuid = e.uuid"
         " WHERE e.session = ? AND e.agent = ? AND e.path = ? AND e.uuid = ?"
         " ORDER BY e.line_no DESC LIMIT 1",
         (*key, uuid),
     ).fetchone()
+
+
+def read_row(conn, key, ref, uuid, offset, limit):
+    # Only rows on the active chain of the transcript are readable.
+    row = active_row(conn, key, uuid)
     require(row is not None, f"ref not on the active transcript chain: {ref}")
     return page(ref, row[0], row[1], "transcript", offset, limit)
 

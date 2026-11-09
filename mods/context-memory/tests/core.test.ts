@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
-import { archiveFailure, buildHandoff, checkpointRoots, compactionInstructions, handoffLine, latestNotes, newCheckpointId, noteProblem, NOTES_LIMIT, NOTES_TOOL, PLUGIN_ID, project, PROTOCOL } from '../src/core'
+import { archiveFailure, buildHandoff, checkpointRoots, compactionInstructions, handoffLine, latestNotes, newCheckpointId, noteProblem, NOTES_LIMIT, NOTES_TOOL, PLUGIN_ID, project, PROTOCOL, PRUNE_KEEP_RECENT, PRUNE_MIN_CHARS, pruneForSummary } from '../src/core'
 
 // The input is the actual conversation in which this plugin was requested.
 const source = process.env.CONTEXT_MEMORY_TRANSCRIPT ?? '/home/ubuntu/.claude/projects/-home-ubuntu-sipeng-re-test/e84c9c29-5d2e-444c-b954-11c546adedaa.jsonl'
@@ -86,6 +86,35 @@ describe('real conversation projection', () => {
     expect(text).toContain('database or disk is full')
     expect(text).toContain(`claude plugin disable ${PLUGIN_ID}`)
     expect(text).toContain('/reload-plugins')
+  })
+
+  test('the summary input points at long reproducible outputs and keeps everything else', () => {
+    const { messages: input, pruned, before, after } = pruneForSummary(all)
+    expect(pruned).toBeGreaterThan(0)
+    expect(after).toBeLessThan(before)
+    expect(input.length).toBe(all.length)
+    const stub = /^\[context-memory: (Read|Grep|Glob) 的 (\d+) 字符输出/
+    all.forEach((original, i) => {
+      const got = input[i]!
+      if (i >= all.length - PRUNE_KEEP_RECENT) expect(got).toBe(original)
+      expect(got.toolUses.map(u => u.tool_use_id)).toEqual(original.toolUses.map(u => u.tool_use_id))
+      expect((got.toolResults ?? []).map(r => r.tool_use_id)).toEqual((original.toolResults ?? []).map(r => r.tool_use_id))
+      if (got === original) return
+      expect('handle' in got).toBe(false)
+      expect(got.text).toBe(original.text)
+      got.toolUses.forEach((u, k) => {
+        const o = original.toolUses[k]!
+        if (u.text !== o.text) {
+          const m = stub.exec(u.text!)!
+          expect(m[1]).toBe(o.tool)
+          expect(Number(m[2])).toBeGreaterThanOrEqual(PRUNE_MIN_CHARS)
+        }
+        if (!['Read', 'Grep', 'Glob'].includes(o.tool)) expect(u).toEqual(o)
+      })
+    })
+    // Nothing to omit leaves the input as the engine handed it.
+    const recent = all.slice(-PRUNE_KEEP_RECENT)
+    expect(pruneForSummary(recent).messages.every((m, i) => m === recent[i])).toBe(true)
   })
 
   test('the summarizer keeps the person\'s own instructions ahead of the note', () => {

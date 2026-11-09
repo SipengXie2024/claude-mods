@@ -1,5 +1,5 @@
 import type { EngineInterface, Register, SessionMessage } from 'claude-code'
-import { archiveFailure, buildHandoff, checkpointRoots, compactionInstructions, handoffLine, latestNotes, newCheckpointId, noteProblem, NOTES_GUIDANCE, NOTES_LIMIT, NOTES_TOOL, project, PROTOCOL } from '../src/core'
+import { archiveFailure, buildHandoff, checkpointRoots, compactionInstructions, handoffLine, latestNotes, newCheckpointId, noteProblem, NOTES_GUIDANCE, NOTES_LIMIT, NOTES_TOOL, project, PROTOCOL, pruneForSummary } from '../src/core'
 
 type Dollar = EngineInterface
 type Scope = { session: string; agent: string }
@@ -146,11 +146,17 @@ export const register: Register = on => {
   on('session.compact', async ($, e, next) => {
     const notes = latestNotes(e.messages)
     const instructions = compactionInstructions(e.instructions, notes)
-    const input = instructions === e.instructions ? e : { ...e, instructions }
     // A precomputed summary installs nothing; the handoff is bound to the compaction that installs.
-    if (e.trigger === 'precompute') return next(input)
+    // It runs over the engine's own messages, so whether core reuses it never depends on a rewrite.
+    if (e.trigger === 'precompute') return next(instructions === e.instructions ? e : { ...e, instructions })
+    // The summarizer reads long outputs of reproducible tools as pointers; the archive keeps them.
+    const pruned = pruneForSummary(e.messages)
+    const input = { ...e, ...(instructions === e.instructions ? {} : { instructions }), ...(pruned.pruned ? { messages: pruned.messages } : {}) }
+    $.ui.log(`context-memory: summary input omits ${pruned.pruned} tool outputs (${pruned.before} -> ${pruned.after} chars)`, { to: 'debug' })
     const result = await next(input)
     if (result.skip !== undefined) return result
+    const keptPruned = result.messages.filter(m => m.handle === undefined && /^\[context-memory: \S+ 的 \d+ 字符输出/m.test([m.text, ...m.toolUses.map(u => u.text ?? ''), ...(m.toolResults ?? []).map(r => r.text)].join('\n'))).length
+    if (keptPruned) $.ui.log(`context-memory: ${keptPruned} kept messages carry omitted tool outputs`, { to: 'debug' })
     // Archived only once the native compaction stands, so a failed or cancelled one leaves nothing.
     const scope = await scopeFor($, e.agentId)
     const started = await $.clock.now()
