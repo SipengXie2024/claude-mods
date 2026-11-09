@@ -1,0 +1,8 @@
+{
+  "name": "advisor-guard",
+  "version": "0.3.0",
+  "description": "Under a Fable or Mythos main loop, tell the model never to consult the advisor tool, so the session does not pay for a second model.",
+  "author": {
+    "name": "sipeng"
+  }
+}

@@ -20,6 +20,11 @@
       "description": "Under a Fable or Mythos main loop, deny Workflow scripts whose agent() calls do not pin model: 'opus'."
     },
     {
+      "name": "advisor-guard",
+      "source": "./mods/advisor-guard",
+      "description": "Under a Fable or Mythos main loop, tell the model never to consult the advisor tool, so the session does not pay for a second model."
+    },
+    {
       "name": "jev",
       "source": "./mods/jev",
       "description": "Jev effort routing for Opus and Mythos (policy.v12): start effort per prompt, follow-up fault raise, check-failure ladder."
