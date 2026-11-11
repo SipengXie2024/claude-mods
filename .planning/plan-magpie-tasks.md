@@ -52,7 +52,7 @@ mods/magpie-tasks/
   src/jev.ts  src/dialogue.ts  src/judge.ts
   src/git.ts  src/integrate.ts  src/conflict.ts
   src/session.ts  src/trust.ts  src/launch.ts  src/gate.ts  src/architect.ts  src/recovery.ts
-  src/brief.ts  src/spawn.ts  src/route.ts  src/daily.ts  src/unavailable.ts
+  src/brief.ts  src/spawn.ts  src/band.ts  src/route.ts  src/daily.ts  src/unavailable.ts
   src/telegram.ts  src/router.ts  src/calibration.ts
   src/tools.ts  src/state.ts
   tests/*.test.ts                   claude plugin test 运行的纯函数测试
@@ -88,6 +88,7 @@ mods/magpie-tasks/
 | `src/recovery.ts` | 启动恢复、context-memory 更新后的重新恢复 | `session.start` | E |
 | `src/brief.ts` | 任务标记、各类说明的生成与解析、状态行与结论行解析 | spawn、daily、architect | F |
 | `src/spawn.ts` | `agent.spawn` 路由、`turn.start` 续接判定、`turn.step` 强度、续接时的重新判断 | `agent.spawn`、`turn.start`、`turn.step` | F |
+| `src/band.ts` | 路由过的子代理的强度条：模型、请求实际带的强度、规则 | `turn.step`、`turn.complete`、`ui.render`、`session.end` | F |
 | `src/route.ts` | 架构师的委派工具 `model_route`：Jev 与路由表选择模型和强度，Jev 权衡架构师的推荐，经中转启动子代理 | architect（工具调用） | F |
 | `src/daily.ts` | 中转（启动与唤醒子代理）、日常任务的评估确认、验收、诊断、阻碍判定、整合触发、日常任务决定的执行、`open_worktree` 工具 | `prompt.submit`（中转）、`turn.complete`、`tool.call` | F |
 | `src/unavailable.ts` | 路由过的子代理因模型不可用或额度耗尽结束时的替代与报告 | `classic.StopFailure`、`turn.complete` | F |
@@ -764,12 +765,14 @@ export class Registry {
 | `session.send` | — | — | — | — | 观察 tg-router 发给 worker 的追问，记录反馈 |
 | `agent.spawn` | `next` | `next` | `next` | 路由 | 路由 |
 | `turn.start` | `next` | `next` | `next` | 路由过的子代理的续接判定 | 同左 |
-| `turn.step` | `next` | `next` | `next` | 路由过的子代理设强度 | 同左 |
+| `turn.step` | `next` | `next` | `next` | 路由过的子代理设强度，记下它的强度条 | 同左 |
 | `tool.call` | `next` | `next` | `next` | 主对话工具限制；子代理写入范围与文件冲突；注册工具的处理（架构师工具只回应主对话，子代理调用时拒绝） | 子代理写入范围；注册工具的处理（Router 工具只回应主对话，子代理调用时拒绝） |
 | `classic.StopFailure` | — | — | — | 路由过的子代理：记录错误分类 | 同左 |
-| `turn.complete` | `next` | 接管确认后发出 `/bg` | — | 主对话：Telegram 回复、调试日志检查；子代理：冲突等待解除、报告记录、模型不可用 | 日常任务流程；模型不可用 |
+| `turn.complete` | `next` | 接管确认后发出 `/bg` | — | 主对话：Telegram 回复、调试日志检查；子代理：冲突等待解除、报告记录、模型不可用、强度条标记结束 | 日常任务流程；模型不可用；强度条标记结束 |
+| `ui.render`（`AbovePrompt`） | `next` | `next` | `next` | 视图中是路由过的子代理时画它的强度条（第 9.7 节），其余 `next` | 同左 |
+| `session.end` | 清空强度条 | 同左 | 同左 | 同左 | 同左 |
 
-`settings.read` 钩子是纯函数 `bgIsolationAnswer`，不注册 `.catch`。其余钩子按出错的后果分三类处理，没有一类在出错后悄悄继续：
+`settings.read` 钩子是纯函数 `bgIsolationAnswer`，不注册 `.catch`。`ui.render` 与 `session.end` 只读写本进程内存中的强度条，也不注册 `.catch`：绘制钩子出错时引擎跳过它，画内层的内容。其余钩子按出错的后果分三类处理，没有一类在出错后悄悄继续：
 
 1. **流程钩子**：`prompt.submit`（第一条消息、接管、启动认领、中转、架构师收到的消息）、`turn.complete`（架构师主对话、子代理、日常任务）以及注册工具的处理。`.catch` 中：错误写入调试日志与任务日志（`type: 'error'`，含错误首行）；能确定任务时，任务改为 `error` 并写入 `error`；`$.ui.log('magpie-tasks 出错（任务 <id>）：<错误首行>')`（本计划中的 `$.ui.notice(text)` 一律指 `$.ui.log(text)`：一行不发给模型的会话提示；类型中的 `$.ui.notice` 是工具调用对话框下的说明行）；有 Telegram 关联或默认聊天、且聊天不是 `tui` 时发一条通知（任务标题、ID、错误首行，`notify: true`），聊天为 `tui` 时会话中的那一行就是报告。`prompt.submit` 的流程返回 `{ drop: 'magpie-tasks 出错：<错误首行>；消息没有发出' }`，不把消息交给普通会话：第一条消息流程在 `git init` 或建立工作副本之后出错时，前台会话保留，消息放回输入框；中转消息出错时请求留在 `pendingRelays` 中，由出错通知说明；架构师收到的 Telegram 转交消息出错时，Telegram 通知说明这条消息没有交给架构师。注册工具的处理抛出错误时（参数不合法最常见）以 `{ deny: 错误首行 }` 返回，模型读到拒绝理由后改正；错误写入调试日志、任务日志（`type: 'error'`）与会话提示，任务状态不变。
 2. **把关钩子**：`agent.spawn` 与 `tool.call` 的检查。`.catch` 在 `next.called` 为假时返回拒绝，理由含错误首行，模型或 Router 看到原因；同时写入日志并 `$.ui.notice`。`next` 已经调用后出错时保留其结果，写入日志并 `$.ui.notice`。
@@ -909,6 +912,8 @@ on('turn.step', async function* ($, e, next) { … })
 - 其余：用记录中的当前强度，`yield* next({ ...e, effort: clampEffort(model, effort) })`。
 
 安装后 magpie-tasks 位于 JEV 之内，它设置的强度到达请求（实测）；它只改写带任务标记的子代理请求，其余原样传递。
+
+强度条（`src/band.ts`，输入框正上方的一行）：路由过的子代理每次请求时记下请求的模型（`e.model`）、这次请求实际带的强度和规则 ID；强度钩子出错时请求按引擎原值发出，强度条记引擎的强度并写 `engine effort`。`turn.complete` 时标记 `done`，下一轮运行开始时去掉。从任务列表打开这个子代理的界面时，`ui.render`（`AbovePrompt`）画一行，例如 `Opus 5.5 · ◆ magpie-tasks · medium → HIGH · daily-default`：模型用路由表中的名称，强度按变化的先后排列，当前的一个大写，超过六个时只显示最后五个；换了模型时重新开始记录。JEV 在本插件之外，同一时刻只有一层能画这一行：JEV 对带任务标记的子代理调用 `next(e)`，把这一行交给本插件，主对话与其他子代理的强度条由 JEV 画。强度条只存在本进程的内存中，最多 64 行，超出时先删除已结束的子代理的行。
 
 ### 9.8 中转：启动与唤醒子代理
 
@@ -1184,10 +1189,11 @@ export function tick(ctx: Ctx): Promise<void>
 
 ### 10.2 JEV（依赖 JEV 的 Jev 上下文改造）
 
-本计划不修改 `mods/jev`。JEV 的 Jev 上下文改造（`/tmp/jev-dev`）已经替换 `prompt.submit` 与对话整理，并实现了 magpie-tasks 需要的两项跳过；在仓库中另行修改同一组函数会与改造合入时冲突。这两项的实现与测试归该改造的负责人，magpie-tasks 依赖它们的现有形式：
+JEV 的 Jev 上下文改造（`/tmp/jev-dev`，已合入 `mods/jev`）替换了 `prompt.submit` 与对话整理，并实现了 magpie-tasks 需要的两项跳过；JEV 还把带任务标记的子代理的强度条交给 magpie-tasks。magpie-tasks 依赖这三项的现有形式：
 
-- 子代理：委派说明（子代理视图的第一条 user 消息）去掉开头空白后匹配 `^\[magpie-tasks task=[^\]\s]+[^\]\n]*\]` 时（`/tmp/jev-dev/src/dialogue.ts` 的 `MAGPIE_TASKS_MARKER`），JEV 在该子代理每一轮运行的第一次请求时写一条 `skip` 记录（`event: 'skip', reason: 'magpie-tasks'`），本轮不再改写强度、不写判断记录（`/tmp/jev-dev/hooks/register.tsx` 的 `decideStep`；子代理的 `loops` 记录在它的 `turn.complete` 时删除，所以每轮一条）。第 9.6 节第 10 步写出的任务标记满足这个格式。
+- 子代理：委派说明（子代理视图的第一条 user 消息）去掉开头空白后匹配 `^\[magpie-tasks task=[^\]\s]+[^\]\n]*\]` 时（`mods/jev/src/dialogue.ts` 的 `MAGPIE_TASKS_MARKER`），JEV 在该子代理每一轮运行的第一次请求时写一条 `skip` 记录（`event: 'skip', reason: 'magpie-tasks'`），本轮不再改写强度、不写判断记录（`mods/jev/hooks/register.tsx` 的 `decideStep`；子代理的 `loops` 记录在它的 `turn.complete` 时删除，所以每轮一条）。第 9.6 节第 10 步写出的任务标记满足这个格式。
 - 中转消息：`e.origin` 为插件 `magpie-tasks` 且文本以 `[magpie-tasks spawn ` 开头时（`MAGPIE_TASKS_RELAY`），JEV 直接 `next(e)`，不写判断记录，也不改变下一回合的判断。第 9.8 节的启动与唤醒在调用处直接执行，magpie-tasks 不提交这种消息，JEV 的这项放行没有使用者。
+- 强度条：委派说明带任务标记的子代理，不论模型，JEV 都不记它的模型，`ui.render`（`AbovePrompt`）对它调用 `next(e)`，由 magpie-tasks 画（第 9.7 节）。是否带标记按子代理 ID 记在 `magpieOwned` 中，每个子代理只读一次委派说明。
 
 集成顺序（第 13 节）要求这一改造先合入仓库；端到端场景安装的 JEV 是合入后的版本。
 
@@ -1280,6 +1286,7 @@ U1、U2 是实现方案第 11 节列出的待验证行为；U9 来自官方文�
 | gate | `tests/gate.test.ts` | 写入白名单的路径（含 `..`、符号链接解析结果、工作副本中的同名文件）；只读 Bash 的放行与拒绝（重定向、`$(…)`、`sed -i`、`find -delete`、`git commit`）；打包与发布命令 |
 | brief | `tests/brief.test.ts` | 标记生成与解析、`[model-reason …]`、`[review-of …]`、`[effort …]`、tg-router 请求头、`requestText`；状态行、验收结论、选模确认、诊断建议的解析（含全角冒号与多余空白） |
 | spawn | `tests/spawn.test.ts` | `decideSpawn` 的每个分支：fork/workflow/teammate/resume/自身中转放行，指定模型无理由拒绝，有理由采用（`user` 不检查模型列表；`adjusted` 只接受 `model_route` 的调用，不在列表时拒绝），`parentModel` 为 Fable 5.1 且 `e.model === 'opus'`、没有理由行时按规则选择，`review-second` 排除，没有匹配时架构师拒绝、日常任务转评估；`nextEffort` 按第 5 节；`unavailableAction`：`user` 类型询问用户，`code-change` 的 Opus 5.5 与 Mythos 5.2 互为接手者（强度不低于当前档位），两者都不可用时得到 Astra xhigh，规则 `none` 与只有 `null` 强度候选时询问用户；`code-change` 在 Jev 深入推理概率达到 0.95 时选 Mythos 5.2，评估模型代为判断时选 Opus 5.5 |
+| band | `tests/band.test.ts` | 强度条：按路由表名称写模型、请求实际带的强度与规则，重复请求不重画；续接提高后的强度变化；结束标记在下一轮运行时去掉；钩子出错时的 `engine effort`；换模型时重新记录；超过六个强度时只显示最后五个；超过 64 行时先删除已结束子代理的行 |
 | route | `tests/route.test.ts`、`io-tests/route.spec.ts` | `model_route` 的参数校验；采用推荐时写出的控制行能被 `brief.ts` 读回；Jev 的推荐选择题：有规则时选项为路由表的选择与推荐，没有规则时为推荐与“都不合适”，输入含说明、理由与路由表对两个模型的说明（Haiku 的“只在用户指定时使用”）；真实 Jev 对 E9 第 5 步（架构师为改一行推荐 Haiku 5.5）的判断 |
 | session、launch | `tests/session.test.ts`、`tests/launch.test.ts` | 角色判定表；`bgIsolationAnswer`：输入为 `~/.config/magpie/claude-launch/settings.json` 作为 `flag` 层（测试只取 `env.ANTHROPIC_BASE_URL`）时得到 `worktree.bgIsolation: 'none'`，没有 `flag` 层或地址不同时原样返回，读取单个来源时原样返回；`launchArgv`（`env -u`、开发方式的 `--plugin-dir`）；`parseBackgrounded` 对实测输出 `backgrounded · e21efae8`；确认对话的选项恰好是四个候选模型，文字包含 Git 信息与不受信任时的说明 |
 | telegram、router、calibration | `tests/telegram.test.ts`、`tests/router.test.ts`、`tests/calibration.test.ts` | `parseChannelTag` 对实测的 channel 块；`clip`；索引种类到处理方式的分派；`parseRating`；`ratingDue` 在时区边界；`calibrationFindings` 的 3 个任务门槛、两周窗口、替代成功计数；按深入推理概率分段的统计（3 个任务需要提高或换模型时成为证据，`code-change` 的 Opus 段建议下调 `hardYes`，提醒列出每一格）；评分邀请先选 `ratingPriority` 的任务 |
