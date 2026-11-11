@@ -1,5 +1,6 @@
 import assert, { test } from './assert';
-import { DEFAULT_DEADLINE_MS, JevClient, JevFallback, decisionsAnswers, decisionsRequest, parseAnswers, validateAnswers, type JevIo, type JevQuestion } from '../src/jev';
+import type { JevMessage } from '../src/dialogue';
+import { DECISIONS_URL, DEFAULT_DEADLINE_MS, JevClient, decisionsAnswers, decisionsRequest, validateAnswers, type JevIo, type JevQuestion } from '../src/jev';
 import { TASK_QUESTIONS } from '../src/questions';
 
 /** A question set with one question of each type (choice, score, noul), the shape the step questions of policy.v9 had. */
@@ -8,21 +9,6 @@ const STEP_QUESTIONS = {
   step_difficulty: { type: 'score', instructions: 'How hard?', criteria: ['0', '1', '2', '3', '4'] },
   stuck: { type: 'noul', instructions: 'Stuck?' },
 } satisfies Record<string, JevQuestion>;
-
-// Legacy lenient parser — still exported for scripted JevLike stubs elsewhere.
-test('parseAnswers clamps values and rejects unknown choices', () => {
-  const a = parseAnswers(
-    {
-      task_type: { choice: 'not-a-type', confidence: 3 },
-      deep: { noul: -1 },
-    },
-    TASK_QUESTIONS,
-  );
-  assert.deepEqual(a.task_type, { kind: 'choice', choice: 'chat', confidence: 1, probabilities: {} });
-  assert.equal(a.deep?.kind === 'noul' && a.deep.p, 0);
-  const s = parseAnswers({ step_difficulty: { score: 9, confidence: 0.5 } }, STEP_QUESTIONS);
-  assert.equal(s.step_difficulty?.kind === 'score' && s.step_difficulty.score, 4);
-});
 
 test('validateAnswers: absent entries are missing and excluded from answers', () => {
   const { answers, signals } = validateAnswers({}, TASK_QUESTIONS);
@@ -109,12 +95,19 @@ test('validateAnswers keeps server confidence without probabilities or in server
 // decisionsRequest(state, 'gpt-6-luna', TASK_QUESTIONS), recorded as is.
 const DECISIONS_TASK_RESPONSE = {"model":"gpt-6-luna","answers":[{"type":"choice","name":"task_type","choice":"code","probabilities":[{"value":"chat","probability":0.0},{"value":"explain","probability":0.0},{"value":"operate","probability":0.0},{"value":"write","probability":0.0},{"value":"code","probability":1.0},{"value":"research","probability":0.0}],"confidence":1.0},{"type":"predicate","name":"deep","probability":0.9}],"usage":{"input_tokens":996,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens":0,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":996}};
 
-test('decisionsRequest: noul as predicate, choice criteria as choices in the question set order, score criteria as levels', () => {
-  const req = decisionsRequest('USER REQUEST:\nfix it', 'gpt-6-luna', { ...TASK_QUESTIONS, step_difficulty: STEP_QUESTIONS.step_difficulty }) as {
-    model: string; input: string; questions: Array<Record<string, unknown>>;
+/** A conversation as the dialogue builder hands it to the client, newest message last. */
+const INPUT: JevMessage[] = [
+  { role: 'user', content: 'the date test fails on leap years' },
+  { role: 'assistant', content: 'The parser drops Feb 29. Want me to fix it?' },
+  { role: 'user', content: 'fix it' },
+];
+
+test('decisionsRequest: the conversation as a message array; noul as predicate, choice criteria as choices in the question set order, score criteria as levels', () => {
+  const req = decisionsRequest(INPUT, 'gpt-6-luna', { ...TASK_QUESTIONS, step_difficulty: STEP_QUESTIONS.step_difficulty }) as {
+    model: string; input: JevMessage[]; questions: Array<Record<string, unknown>>;
   };
   assert.equal(req.model, 'gpt-6-luna');
-  assert.equal(req.input, 'USER REQUEST:\nfix it');
+  assert.deepEqual(req.input, INPUT);
   assert.deepEqual(req.questions.map((q) => [q.name, q.type]), [['task_type', 'choice'], ['deep', 'predicate'], ['step_difficulty', 'score']]);
   const choices = req.questions[0]!.choices as Array<{ value: string; description: string }>;
   assert.deepEqual(choices.map((c) => c.value), ['chat', 'explain', 'operate', 'write', 'design', 'code', 'research']);
@@ -123,7 +116,12 @@ test('decisionsRequest: noul as predicate, choice criteria as choices in the que
   assert.deepEqual(req.questions[2]!.levels, ['0', '1', '2', '3', '4'].map((c) => ({ label: c, description: c })));
 });
 
-test('decisionsAnswers: a recorded Decisions response validates as System One answers', () => {
+test('decisionsRequest replaces lone surrogates, which make a request body invalid', () => {
+  const req = decisionsRequest([{ role: 'user', content: 'bad \uD800 half 😀' }], 'gpt-6-luna', TASK_QUESTIONS) as { input: JevMessage[] };
+  assert.equal(req.input[0]!.content, 'bad \uFFFD half 😀');
+});
+
+test('decisionsAnswers: a recorded Decisions response validates', () => {
   const { answers, signals } = validateAnswers(decisionsAnswers(DECISIONS_TASK_RESPONSE.answers), TASK_QUESTIONS);
   assert.deepEqual(signals, { task_type: 'valid', deep: 'valid' });
   assert.equal(answers.task_type?.kind === 'choice' && answers.task_type.choice, 'code');
@@ -133,8 +131,15 @@ test('decisionsAnswers: a recorded Decisions response validates as System One an
 });
 
 // The client's network and clock come from the hook that asks (JevIo); these
-// fakes stand where jev-opus ran a local HTTP server. Retries, a caller's
-// AbortSignal and the OpenRouter provider are not ported, nor their tests.
+// tests hand it scripted replies in the Decisions response shape.
+
+/** Per-question answers as a Decisions `answers` array. */
+function decisions(answers: Record<string, Record<string, unknown>>): unknown[] {
+  return Object.entries(answers).map(([name, a]) =>
+    'noul' in a ? { type: 'predicate', name, probability: a.noul }
+      : 'choice' in a ? { type: 'choice', name, ...a }
+        : { type: 'score', name, ...a });
+}
 
 type Reply = { status?: number; body?: unknown; text?: string } | 'hang';
 
@@ -160,46 +165,51 @@ function fakeIo(handler: (req: { url: string; auth: string; body: Record<string,
   return io;
 }
 
-test('JevClient sends the System-1 wire format and parses answers', async () => {
+test('JevClient posts the conversation to OpenAI Decisions and reads answers and cached tokens', async () => {
   let body: Record<string, unknown> = {};
   let auth = '';
+  let url = '';
   const io = fakeIo((req) => {
     auth = req.auth;
     body = req.body;
-    return { body: {
-      model: 'jev-latest',
-      answers: { phase: { choice: 'diagnosing', confidence: 0.9 }, step_difficulty: { score: 3.2, confidence: 0.7 }, stuck: { noul: 0.2 } },
-      usage: { input_tokens: 120, output_tokens: 0 },
-    } };
+    url = req.url;
+    return { body: DECISIONS_TASK_RESPONSE };
   });
-  const jev = new JevClient({ apiKey: 'apikey_test', baseUrl: 'http://jev.test/v1/systemone', model: 'jev-latest' });
-  const r = await jev.ask('state text', STEP_QUESTIONS, io);
+  const jev = new JevClient({ apiKey: 'apikey_test' });
+  const r = await jev.ask(INPUT, TASK_QUESTIONS, io);
   assert.equal(r.failed, false);
+  assert.equal(url, DECISIONS_URL);
+  assert.equal(url, 'https://api.openai.com/v1/decisions');
   assert.equal(auth, 'Bearer apikey_test');
-  assert.equal(body.state, 'state text');
-  assert.equal(body.model, 'jev-latest');
-  assert.deepEqual(Object.keys(body.questions as object), ['phase', 'step_difficulty', 'stuck']);
-  assert.equal(r.answers.phase?.kind === 'choice' && r.answers.phase.choice, 'diagnosing');
-  assert.deepEqual(r.signals, { phase: 'valid', step_difficulty: 'valid', stuck: 'valid' });
-  assert.equal(r.inputTokens, 120);
+  assert.deepEqual(body.input, INPUT);
+  assert.equal(body.model, 'gpt-6-luna');
+  assert.deepEqual((body.questions as Array<{ name: string }>).map((q) => q.name), ['task_type', 'deep']);
+  assert.equal(r.answers.task_type?.kind === 'choice' && r.answers.task_type.choice, 'code');
+  assert.deepEqual(r.signals, { task_type: 'valid', deep: 'valid' });
+  assert.equal(r.inputTokens, 996);
+  assert.equal(r.cachedTokens, 0);
+  assert.equal(r.provider, 'api.openai.com');
+  const cached = await jev.ask(INPUT, TASK_QUESTIONS, fakeIo(() => ({ body: { ...DECISIONS_TASK_RESPONSE, usage: { input_tokens: 61492, input_tokens_details: { cached_tokens: 59444 } } } })));
+  assert.equal(cached.inputTokens, 61492);
+  assert.equal(cached.cachedTokens, 59444);
 });
 
 test('JevClient: HTTP 200 with empty answers fails — every signal missing, no stand-ins', async () => {
-  const jev = new JevClient({ apiKey: 'apikey_test', baseUrl: 'http://jev.test' });
-  const r = await jev.ask('s', TASK_QUESTIONS, fakeIo(() => ({ body: { model: 'jev-latest', answers: {}, usage: {} } })));
+  const jev = new JevClient({ apiKey: 'apikey_test' });
+  const r = await jev.ask(INPUT, TASK_QUESTIONS, fakeIo(() => ({ body: { model: 'gpt-6-luna', answers: [], usage: {} } })));
   assert.equal(r.failed, true);
   assert.deepEqual(r.signals, { task_type: 'missing', deep: 'missing' });
   assert.deepEqual(r.answers, {});
 });
 
 test('JevClient: partial validity keeps valid answers, marks the rest, and does not fail', async () => {
-  const jev = new JevClient({ apiKey: 'apikey_test', baseUrl: 'http://jev.test' });
-  const r = await jev.ask('s', STEP_QUESTIONS, fakeIo(() => ({ body: {
-    answers: {
+  const jev = new JevClient({ apiKey: 'apikey_test' });
+  const r = await jev.ask(INPUT, STEP_QUESTIONS, fakeIo(() => ({ body: {
+    answers: decisions({
       phase: { choice: 'bogus-phase', confidence: 0.99 },
       step_difficulty: { score: 2, confidence: 0.6 },
       stuck: { noul: 0.5 },
-    },
+    }),
   } })));
   assert.equal(r.failed, false);
   assert.deepEqual(r.signals, { phase: 'invalid', step_difficulty: 'valid', stuck: 'valid' });
@@ -208,8 +218,8 @@ test('JevClient: partial validity keeps valid answers, marks the rest, and does 
 });
 
 test('JevClient never throws: HTTP errors fail with empty answers and missing signals', async () => {
-  const jev = new JevClient({ apiKey: 'apikey_bad', baseUrl: 'http://jev.test' });
-  const r = await jev.ask('s', STEP_QUESTIONS, fakeIo(() => ({ status: 401, text: 'bad key' })));
+  const jev = new JevClient({ apiKey: 'apikey_bad' });
+  const r = await jev.ask(INPUT, STEP_QUESTIONS, fakeIo(() => ({ status: 401, text: 'bad key' })));
   assert.equal(r.failed, true);
   assert.match(r.error ?? '', /401/);
   assert.deepEqual(r.answers, {});
@@ -217,18 +227,18 @@ test('JevClient never throws: HTTP errors fail with empty answers and missing si
 });
 
 test('JevClient never throws: a non-JSON body or a rejected fetch fails', async () => {
-  const jev = new JevClient({ apiKey: 'apikey_test', baseUrl: 'http://jev.test', breakerThreshold: 99 });
-  assert.equal((await jev.ask('s', STEP_QUESTIONS, fakeIo(() => ({ text: '<html>' })))).failed, true);
+  const jev = new JevClient({ apiKey: 'apikey_test', breakerThreshold: 99 });
+  assert.equal((await jev.ask(INPUT, STEP_QUESTIONS, fakeIo(() => ({ text: '<html>' })))).failed, true);
   const io = fakeIo(() => ({ body: {} }));
   io.fetch = async () => { throw new Error('connect ECONNREFUSED'); };
-  const r = await jev.ask('s', STEP_QUESTIONS, io);
+  const r = await jev.ask(INPUT, STEP_QUESTIONS, io);
   assert.equal(r.failed, true);
   assert.match(r.error ?? '', /ECONNREFUSED/);
 });
 
 test('JevClient enforces one overall deadline across the whole ask', async () => {
-  const jev = new JevClient({ apiKey: 'apikey_test', baseUrl: 'http://jev.test', deadlineMs: 80 });
-  const r = await jev.ask('s', TASK_QUESTIONS, fakeIo(() => 'hang', { deadlineFires: true }));
+  const jev = new JevClient({ apiKey: 'apikey_test', deadlineMs: 80 });
+  const r = await jev.ask(INPUT, TASK_QUESTIONS, fakeIo(() => 'hang', { deadlineFires: true }));
   assert.equal(r.failed, true);
   assert.equal(r.latencyMs, 80);
   assert.match(r.error ?? '', /deadline/i);
@@ -236,16 +246,16 @@ test('JevClient enforces one overall deadline across the whole ask', async () =>
 
 test('JevClient circuit breaker opens after N failures, skips fetch while open, probes after cooldown', async () => {
   const io = fakeIo(() => ({ status: 500, text: 'err' }));
-  const jev = new JevClient({ apiKey: 'apikey_test', baseUrl: 'http://jev.test', breakerThreshold: 3, breakerCooldownMs: 30_000 });
+  const jev = new JevClient({ apiKey: 'apikey_test', breakerThreshold: 3, breakerCooldownMs: 30_000 });
   for (let i = 0; i < 3; i++) {
-    const r = await jev.ask('s', TASK_QUESTIONS, io);
+    const r = await jev.ask(INPUT, TASK_QUESTIONS, io);
     assert.equal(r.failed, true);
     assert.equal(r.circuitOpen, undefined);
   }
   assert.equal(io.hits, 3);
 
   // Open: no fetch happens.
-  const open = await jev.ask('s', TASK_QUESTIONS, io);
+  const open = await jev.ask(INPUT, TASK_QUESTIONS, io);
   assert.equal(open.failed, true);
   assert.equal(open.circuitOpen, true);
   assert.equal(open.error, 'circuit open');
@@ -253,40 +263,40 @@ test('JevClient circuit breaker opens after N failures, skips fetch while open, 
 
   // Cooldown elapsed: one real probe goes out, fails, and re-opens.
   io.t += 30_001;
-  const probe = await jev.ask('s', TASK_QUESTIONS, io);
+  const probe = await jev.ask(INPUT, TASK_QUESTIONS, io);
   assert.equal(probe.failed, true);
   assert.equal(probe.circuitOpen, undefined);
   assert.equal(io.hits, 4);
 
-  const again = await jev.ask('s', TASK_QUESTIONS, io);
+  const again = await jev.ask(INPUT, TASK_QUESTIONS, io);
   assert.equal(again.circuitOpen, true);
   assert.equal(io.hits, 4);
 });
 
 test('JevClient circuit breaker closes when the recovery probe succeeds', async () => {
-  const io = fakeIo(() => (io.hits <= 3 ? { status: 500, text: 'err' } : { body: { answers: { stuck: { noul: 0.1 } } } }));
-  const jev = new JevClient({ apiKey: 'apikey_test', baseUrl: 'http://jev.test', breakerThreshold: 3, breakerCooldownMs: 30_000 });
-  for (let i = 0; i < 3; i++) await jev.ask('s', { stuck: STEP_QUESTIONS.stuck }, io);
-  const open = await jev.ask('s', { stuck: STEP_QUESTIONS.stuck }, io);
+  const io = fakeIo(() => (io.hits <= 3 ? { status: 500, text: 'err' } : { body: { answers: decisions({ stuck: { noul: 0.1 } }) } }));
+  const jev = new JevClient({ apiKey: 'apikey_test', breakerThreshold: 3, breakerCooldownMs: 30_000 });
+  for (let i = 0; i < 3; i++) await jev.ask(INPUT, { stuck: STEP_QUESTIONS.stuck }, io);
+  const open = await jev.ask(INPUT, { stuck: STEP_QUESTIONS.stuck }, io);
   assert.equal(open.circuitOpen, true);
   assert.equal(io.hits, 3);
 
   io.t += 30_001;
-  const probe = await jev.ask('s', { stuck: STEP_QUESTIONS.stuck }, io);
+  const probe = await jev.ask(INPUT, { stuck: STEP_QUESTIONS.stuck }, io);
   assert.equal(probe.failed, false);
   assert.equal(io.hits, 4);
 
   // Closed again: calls flow normally.
-  const r = await jev.ask('s', { stuck: STEP_QUESTIONS.stuck }, io);
+  const r = await jev.ask(INPUT, { stuck: STEP_QUESTIONS.stuck }, io);
   assert.equal(r.failed, false);
   assert.equal(io.hits, 5);
 });
 
 test('JevClient without a key is disabled and fails fast', async () => {
   const io = fakeIo(() => ({ body: {} }));
-  const jev = new JevClient({ apiKey: '', baseUrl: 'http://jev.test' });
+  const jev = new JevClient({ apiKey: '' });
   assert.equal(jev.enabled, false);
-  const r = await jev.ask('s', TASK_QUESTIONS, io);
+  const r = await jev.ask(INPUT, TASK_QUESTIONS, io);
   assert.equal(r.failed, true);
   assert.equal(io.hits, 0);
   assert.deepEqual(r.signals, { task_type: 'missing', deep: 'missing' });
@@ -298,83 +308,21 @@ test('validateAnswers never inflates confidence from a partial probability map',
   assert.ok(answers.task_type?.kind === 'choice' && answers.task_type.confidence < 0.6, JSON.stringify(answers.task_type));
 });
 
-const PRIMARY = 'http://primary.test/v1/systemone';
-const FALLBACK = 'http://127.0.0.1:18016/v1/systemone';
 const STUCK = { stuck: STEP_QUESTIONS.stuck };
-const answered = { body: { answers: { stuck: { noul: 0.1 } } } };
-
-function chain(opts: { primary?: Partial<ConstructorParameters<typeof JevClient>[0]>; fallback?: Partial<ConstructorParameters<typeof JevClient>[0]> } = {}) {
-  return new JevFallback(
-    new JevClient({ apiKey: 'primary-key', baseUrl: PRIMARY, ...opts.primary }),
-    new JevClient({ apiKey: 'fallback-key', baseUrl: FALLBACK, ...opts.fallback }),
-  );
-}
-
-test('JevFallback: a primary answer is returned as is and the fallback is never fetched', async () => {
-  const urls: string[] = [];
-  const io = fakeIo((req) => (urls.push(req.url), answered));
-  const r = await chain().ask('s', STUCK, io);
-  assert.equal(r.failed, false);
-  assert.equal(r.provider, 'primary.test');
-  assert.equal(r.fallbackFrom, undefined);
-  assert.deepEqual(urls, [PRIMARY]);
-});
-
-test('JevFallback: an HTTP error at the primary is answered by the fallback, with the primary error kept', async () => {
-  const io = fakeIo((req) => (req.url === PRIMARY ? { status: 500, text: 'err' } : answered));
-  const r = await chain().ask('s', STUCK, io);
-  assert.equal(r.failed, false);
-  assert.equal(r.provider, '127.0.0.1:18016');
-  assert.equal(r.fallbackFrom, 'Jev HTTP 500');
-  assert.equal(r.answers.stuck?.kind === 'noul' && r.answers.stuck.p, 0.1);
-  assert.equal(io.hits, 2);
-});
-
-test('JevFallback: a primary past its deadline falls back, and the latency is the sum of both', async () => {
-  // deadlineFires advances the fake clock by each client's deadline, the fallback's included.
-  const io = fakeIo((req) => (req.url === PRIMARY ? 'hang' : answered), { deadlineFires: true });
-  const r = await chain({ primary: { deadlineMs: 3_000 }, fallback: { deadlineMs: 500 } }).ask('s', STUCK, io);
-  assert.equal(r.failed, false);
-  assert.equal(r.fallbackFrom, 'deadline exceeded');
-  assert.equal(r.latencyMs, 3_500);
-  assert.equal(io.hits, 2);
-});
-
-test('JevFallback: an open primary circuit goes straight to the fallback without a primary fetch', async () => {
-  const io = fakeIo((req) => (req.url === PRIMARY ? { status: 500, text: 'err' } : answered));
-  const c = chain({ primary: { breakerThreshold: 2 } });
-  await c.ask('s', STUCK, io);
-  await c.ask('s', STUCK, io);
-  assert.equal(io.hits, 4);
-  const r = await c.ask('s', STUCK, io);
-  assert.equal(r.failed, false);
-  assert.equal(r.fallbackFrom, 'circuit open');
-  assert.equal(io.hits, 5, 'only the fallback was fetched');
-});
-
-test('JevFallback: when both fail the result is the fallback failure, its error unchanged', async () => {
-  const io = fakeIo((req) => ({ status: req.url === PRIMARY ? 500 : 503, text: 'err' }));
-  const r = await chain().ask('s', STUCK, io);
-  assert.equal(r.failed, true);
-  assert.equal(r.error, 'Jev HTTP 503');
-  assert.equal(r.fallbackFrom, 'Jev HTTP 500');
-  assert.equal(r.provider, '127.0.0.1:18016');
-  assert.deepEqual(r.signals, { stuck: 'missing' });
-});
 
 test('the breaker resets its probe even when the probing hook\'s clock rejects', async () => {
-  const io = fakeIo(() => (io.hits <= 1 ? { status: 503, text: 'down' } : { body: { answers: { stuck: { noul: 0.1 } } } }));
-  const jev = new JevClient({ apiKey: 'k', baseUrl: 'http://jev.test', breakerThreshold: 1, breakerCooldownMs: 30_000 });
-  assert.equal((await jev.ask('s', STUCK, io)).failed, true);
+  const io = fakeIo(() => (io.hits <= 1 ? { status: 503, text: 'down' } : { body: { answers: decisions({ stuck: { noul: 0.1 } }) } }));
+  const jev = new JevClient({ apiKey: 'k', breakerThreshold: 1, breakerCooldownMs: 30_000 });
+  assert.equal((await jev.ask(INPUT, STUCK, io)).failed, true);
   io.t += 31_000;
   // The probe's hook ends while it waits: its clock rejects after the first read.
   let reads = 0;
   const dying: JevIo = { fetch: (url, init) => io.fetch(url, init), sleep: (ms, signal) => io.sleep(ms, signal), now: async () => { if (++reads > 1) throw new Error('hook ended'); return io.t; } };
-  const probe = await jev.ask('s', STUCK, dying).then(() => 'answered', (e: Error) => e.message);
+  const probe = await jev.ask(INPUT, STUCK, dying).then(() => 'answered', (e: Error) => e.message);
   assert.equal(probe, 'hook ended');
   for (const later of [62_000, 3_600_000]) {
     io.t = 10_000 + later;
-    const r = await jev.ask('s', STUCK, io);
+    const r = await jev.ask(INPUT, STUCK, io);
     assert.equal(r.circuitOpen, undefined, `t+${later}`);
     assert.equal(r.failed, false, `t+${later}`);
   }
@@ -383,14 +331,14 @@ test('the breaker resets its probe even when the probing hook\'s clock rejects',
 test('a rejected clock sleep is its own error, never a deadline', async () => {
   const io = fakeIo(() => 'hang');
   const rejecting: JevIo = { fetch: (url, init) => io.fetch(url, init), now: () => io.now(), sleep: () => Promise.reject(new Error('hook ended')) };
-  const r = await new JevClient({ apiKey: 'k', baseUrl: 'http://jev.test' }).ask('s', STUCK, rejecting);
+  const r = await new JevClient({ apiKey: 'k' }).ask(INPUT, STUCK, rejecting);
   assert.equal(r.failed, true);
   assert.equal(r.error, 'clock sleep rejected');
 });
 
-test('decision 6: the primary deadline defaults to 6000 ms', async () => {
-  assert.equal(DEFAULT_DEADLINE_MS, 6_000);
-  const r = await new JevClient({ apiKey: 'k', baseUrl: 'http://jev.test' }).ask('s', STUCK, fakeIo(() => 'hang', { deadlineFires: true }));
-  assert.equal(r.latencyMs, 6_000);
+test('the deadline defaults to 10000 ms, above the 8.3 s measured for an 861K-token conversation', async () => {
+  assert.equal(DEFAULT_DEADLINE_MS, 10_000);
+  const r = await new JevClient({ apiKey: 'k' }).ask(INPUT, STUCK, fakeIo(() => 'hang', { deadlineFires: true }));
+  assert.equal(r.latencyMs, 10_000);
   assert.equal(r.error, 'deadline exceeded');
 });

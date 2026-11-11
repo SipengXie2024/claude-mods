@@ -1,26 +1,31 @@
 import type { EngineInterface, Register } from 'claude-code'
-import { applyPolicyConfig, modConfig, parseEnvFile, type ModConfig } from '../src/config'
+import { applyPolicyConfig, keyFilePath, modConfig, parseEnvFile, type ModConfig } from '../src/config'
 import { checkId, editPlan, editTargets, type EditTarget } from '../src/describe'
+import { isMagpieTask, jevDialogue, latestUserText, unwrapChannel, withPrompt, type ApiMessage } from '../src/dialogue'
 import { clampEffort, describeBounds, effortAuto, effortTag, isEffort, maxEffort, rank, shift, type Effort } from '../src/effort'
-import { followUpSummary, isHumanPrompt, previousPromptIndex, unwrapChannel, userText, type Message } from '../src/followup'
-import { hash20 } from '../src/hash'
-import { JevClient, JevFallback, type JevIo, type JevSource } from '../src/jev'
+import { JevClient, type JevIo } from '../src/jev'
 import { Ladder } from '../src/ladder'
-import { modelLabel } from '../src/model'
+import { isRoutedModel as routed, modelLabel } from '../src/model'
 import { exploreStart, normalizeBounds, policyVersion, taskEffort, type Bounds } from '../src/policy'
-import { chatRecap, CLI_IDENTITY, conversationContext, lastAgentText, RECAP_SYSTEM, recapIncrement, recapPrompt, type Recap } from '../src/recap'
-import { EffortRouter, FALLBACK_IGNORED, type FollowUpAsk } from '../src/router'
+import { EffortRouter, type FollowUpAsk } from '../src/router'
 import type { EffortDecision, TaskProfile } from '../src/types'
 
 /**
- * Jev effort routing per prompt (policy.v13). `prompt.submit` decides a
+ * Jev effort routing per prompt (policy.v17). `prompt.submit` decides a
  * human prompt's start level: the task level from Jev (or heuristics), the
  * follow-up fault raise, a short acknowledgement's floor, the carry-over of a
- * check that kept failing, and exploration. `turn.step` sends that level on
- * every request of the turn. `tool.call` feeds each check's exit code to the
- * ladder: a check that fails again after the model changed code and still
- * fails when the turn ends starts the next prompt that continues the work one
- * level up, on Opus and Mythos alike. The level never moves within a turn. A /effort the person runs
+ * check that kept failing, and exploration. Jev reads the conversation as
+ * Claude Code holds it (src/dialogue.ts), newest message last, and answers the
+ * task and follow-up questions in one request. `turn.step` sends that level on
+ * every request of the turn; a subagent's run is decided at its first request
+ * from its newest message (its brief, or the message that resumed it), and a
+ * subagent whose brief opens with the magpie-tasks marker is left alone, as
+ * is magpie-tasks' relay prompt. Notes other plugins append are recorded
+ * (`session.append`) and kept out of Jev's view.
+ * `tool.call` feeds each check's exit code to the ladder: a check that fails
+ * again after the model changed code and still fails when the turn ends starts
+ * the next prompt that continues the work, or the subagent's next run, one
+ * level up. The level never moves within a turn. A /effort the person runs
  * pins the session's own level until `[effort auto]`. Any failure leaves the
  * request as the engine made it. The band above the prompt names the model
  * of the loop whose transcript is in view (the main conversation, or the
@@ -30,10 +35,6 @@ import type { EffortDecision, TaskProfile } from '../src/types'
 type $ = EngineInterface
 
 const MAIN = 'main'
-/** Models the policy's effort table is written for (Opus and Mythos; the same five levels). */
-const ROUTED_MODEL = /opus|mythos/i
-/** A `jev/…` model belongs to the jev-opus gateway, which routes it itself: two routers would undo each other. */
-const GATEWAY_MODEL = /^jev\//i
 const EDIT_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit'])
 /** Prompt origins that are a person's own message: follow-up, acknowledgement, carry-over and exploration apply to these. */
 const HUMAN_ORIGINS = new Set(['composer', 'bridge', 'sdk', 'channel'])
@@ -52,6 +53,16 @@ export const ADVISOR_NOTE = 'The user says the previous attempt got something wr
 const STORE_SESSIONS = 200
 /** Band lines kept at most, the main loop's and the subagents'; a done subagent's is dropped first. */
 const BAND_AGENTS = 64
+/** Subagents whose open checks are kept for their next run, at most. */
+const HELD_AGENTS = 64
+/** Why Jev is off although a key was configured: the key file could not be read. */
+const KEY_FILE_UNREADABLE = 'key file unreadable'
+/** Why Jev is off: .env names JEV_API_KEY, a key of the service jev-opus used before, and no JEV_API_KEY_FILE. */
+const STALE_KEY = 'JEV_API_KEY is not read'
+/** Notes other plugins appended, kept at most: Jev's view drops them by their text. */
+const NOTES_KEPT = 500
+/** A magpie-tasks relay prompt: that plugin drops it and starts a subagent; it is no one's prompt. */
+const MAGPIE_TASKS_RELAY = '[magpie-tasks spawn '
 
 /** What one turn did, for its outcome row. */
 interface Tally {
@@ -84,6 +95,15 @@ interface Loop {
   /** what starts the next turn (main only): a decided prompt, a continuation, or a slash command */
   next: { kind: 'prompt'; task: EffortDecision | null } | { kind: 'continue' } | { kind: 'command' } | null
   tally: Tally
+  /** a subagent run whose brief opens with the magpie-tasks marker: its effort is left alone; null until its first request */
+  skip: boolean | null
+}
+
+/** What a subagent's next run needs of the last one: the level it ran at, its open checks, and whether one still failed after a change. */
+interface Held {
+  effort: Effort
+  ladder: Ladder
+  carry: boolean
 }
 
 /** What the next prompt needs of this one, kept per session in $.store. */
@@ -117,8 +137,13 @@ interface BandStatus {
 
 const loops = new Map<string, Loop>()
 const band = new Map<string, BandStatus>()
-let setup: Promise<{ cfg: ModConfig; client: JevSource | null; dir: string }> | null = null
-let refusedWarned = false
+/** Per subagent id, kept from the end of one run to the start of the next (SendMessage resumes the same id). */
+const held = new Map<string, Held>()
+let setup: Promise<{ cfg: ModConfig; client: JevClient | null; keyError: string | null; dir: string }> | null = null
+let keyWarned = false
+let authWarned = false
+/** Texts of the notes other plugins appended to this session's conversations (`session.append`, door `note`). */
+const notes = new Set<string>()
 /** The session's /effort pin; null until read from the store. */
 let pinned: boolean | null = null
 /** The [effort …] range of the main prompt in force, which subagents inherit; every new prompt sets it, routed or not. */
@@ -132,7 +157,12 @@ async function configDir($: $): Promise<string> {
   return `${xdg || `${home ?? ''}/.config`}/jev-opus`
 }
 
-/** Read once per module load: a missing or unreadable .env means heuristics only. */
+/**
+ * Read once per module load: a missing or unreadable .env means heuristics
+ * only. The OpenAI key comes from JEV_API_KEY_FILE alone; a key file that
+ * cannot be read (or is empty), or a JEV_API_KEY without the file, also leaves
+ * Jev off, and every decision's journal row says so.
+ */
 function load($: $) {
   setup ??= (async () => {
     const dir = await configDir($)
@@ -142,16 +172,18 @@ function load($: $) {
     } catch { /* no config: heuristics only */ }
     const cfg = modConfig(env)
     applyPolicyConfig(cfg)
-    return { cfg, client: jevSource(cfg), dir }
+    let apiKey = ''
+    let keyError: string | null = null
+    if (cfg.jevKeyFile) {
+      const path = keyFilePath(cfg.jevKeyFile, (await $.env.get('HOME')) ?? '', dir)
+      try {
+        apiKey = (await $.fs.read(path)).trim()
+      } catch { /* reported below */ }
+      if (!apiKey) keyError = KEY_FILE_UNREADABLE
+    } else if (cfg.staleKey) keyError = STALE_KEY
+    return { cfg, client: apiKey ? new JevClient({ apiKey, ...cfg.jev }) : null, keyError, dir }
   })()
   return setup
-}
-
-/** The configured endpoints as one source: none, one, or a primary with its fallback. */
-function jevSource(cfg: ModConfig): JevSource | null {
-  const clients = [cfg.jev, cfg.jevFallback].filter((c) => c !== null).map((c) => new JevClient(c))
-  if (clients.length === 2) return new JevFallback(clients[0]!, clients[1]!)
-  return clients[0] ?? null
 }
 
 function io($: $): JevIo {
@@ -168,7 +200,7 @@ function newLoop(cfg: ModConfig, inherited: Bounds | null): Loop {
   return {
     router: new EffortRouter({ jev: null, bounds: cfg.bounds }),
     prompt: '', tagged: null, inherited, profile: null, effort: null, model: null, clientEffort: null,
-    ladder: new Ladder(), trail: [], next: null, tally: newTally(),
+    ladder: new Ladder(), trail: [], next: null, tally: newTally(), skip: null,
   }
 }
 
@@ -229,20 +261,6 @@ async function writeRecord($: $, session: string, rec: SessionRecord): Promise<v
   for (const k of keys.slice(0, Math.max(0, keys.length - STORE_SESSIONS))) await $.store.delete(k)
 }
 
-const recapKey = (session: string) => `recap:${session}`
-
-/** The session's rolling recap; its own store entry, since it is written after the turn while the next prompt may be rewriting the record. */
-async function readRecap($: $, session: string): Promise<Recap | null> {
-  const v = (await $.store.get(recapKey(session))) as Partial<Recap> | undefined
-  return v && typeof v.text === 'string' && typeof v.coversHash === 'string' ? { text: v.text, coversHash: v.coversHash, at: v.at ?? 0 } : null
-}
-
-async function writeRecap($: $, session: string, recap: Recap): Promise<void> {
-  await $.store.set(recapKey(session), recap)
-  const keys = (await $.store.keys()).filter((k) => k.startsWith('recap:'))
-  for (const k of keys.slice(0, Math.max(0, keys.length - STORE_SESSIONS))) await $.store.delete(k)
-}
-
 /** A fresh record for a new prompt that starts at `effort`; `taskMax` carries a continuing task's highest level, else the start. */
 const freshRecord = (prev: SessionRecord | null, effort: Effort, at: number, followUp: SessionRecord['followUp'], taskMax: Effort = effort): SessionRecord => ({
   max: effort, last: effort, followUp, at, prompt: (prev?.prompt ?? 0) + 1, carry: false, unfinished: false, pinned: pinned === true, taskMax: maxEffort(taskMax, effort),
@@ -278,7 +296,8 @@ function errorCode(error: string | undefined): string | undefined {
   if (error === 'deadline exceeded') return 'deadline'
   if (error === 'clock sleep rejected') return 'sleep-rejected'
   if (error === 'circuit open' || error === 'jev circuit open') return 'circuit-open'
-  if (error === FALLBACK_IGNORED) return 'fallback-ignored'
+  if (error === KEY_FILE_UNREADABLE) return 'key-file'
+  if (error === STALE_KEY) return 'stale-key'
   const http = /^Jev HTTP (\d{3})/.exec(error)
   if (http) return `http-${http[1]}`
   if (/no (valid|usable) answers/.test(error)) return 'invalid-answers'
@@ -308,7 +327,7 @@ function record(d: EffortDecision, extra: Record<string, unknown> & { at: number
     jevLatencyMs: d.jevLatencyMs,
     ...(d.jevError ? { jevError: errorCode(d.jevError) } : {}),
     ...(d.jevProvider ? { jevProvider: d.jevProvider } : {}),
-    ...(d.jevFallbackFrom ? { jevFallbackFrom: errorCode(d.jevFallbackFrom) } : {}),
+    ...(d.jevUsage ? { jevUsage: d.jevUsage } : {}),
     ...(d.followUp ? { followUp: { ...d.followUp, ...(d.followUp.p !== undefined ? { p: round(d.followUp.p) } : {}), error: errorCode(d.followUp.error) } } : {}),
     ...(d.explore ? { explore: d.explore } : {}),
     ...(d.carry ? { carry: d.carry } : {}),
@@ -362,24 +381,9 @@ function bandLine(s: BandStatus): string {
   return parts.join(' · ')
 }
 
-/** Whether turn.step would act on requests to this model; a prompt for any other model is left alone. */
-function routed(model: string): boolean {
-  return ROUTED_MODEL.test(model) && !GATEWAY_MODEL.test(model)
-}
-
-/**
- * The follow-up ask for a human prompt after a turn in which the agent replied;
- * undefined otherwise. `messages` is the transcript before the prompt; the
- * recap, when there is one, leads the summary of the previous turn.
- */
-async function followUpAsk($: $, messages: readonly Message[], recap: Recap | null, text: string, prev: SessionRecord, cfg: ModConfig): Promise<FollowUpAsk | undefined> {
-  const all: Message[] = [...messages, { role: 'user', content: text }]
-  const lastUser = all.length - 1
-  const prevIdx = previousPromptIndex(all, lastUser)
-  if (prevIdx < 0 || !all.slice(prevIdx + 1, lastUser).some((m) => m.role === 'assistant')) return undefined
-  const turn = followUpSummary(all, prevIdx, lastUser)
+/** The follow-up questions' history for a human prompt that comes after an agent turn. */
+async function followUpAsk($: $, prev: SessionRecord, cfg: ModConfig): Promise<FollowUpAsk> {
   return {
-    summary: recap ? `RECAP:\n${recap.text.trim()}\n${turn}` : turn,
     prevMax: prev.max,
     prevDissatisfied: prev.followUp?.yes === true,
     prevStreak: prev.followUp?.streak ?? 0,
@@ -404,7 +408,7 @@ function moveTo(d: EffortDecision, effort: Effort, reason: string): void {
  * and exploration on top of its task level.
  */
 async function routePrompt($: $, raw: string, origin: string): Promise<{ advisor: boolean } | null> {
-  const { cfg, client, dir } = await load($)
+  const { cfg, client, keyError, dir } = await load($)
   const human = HUMAN_ORIGINS.has(origin)
   const text = origin === 'channel' ? unwrapChannel(raw) : raw
   // The tag goes with this prompt, whichever model runs it: a subagent may run on a routed one.
@@ -428,13 +432,13 @@ async function routePrompt($: $, raw: string, origin: string): Promise<{ advisor
     return null
   }
 
-  const messages = (await $.session.messages({ as: 'api' })) as Message[]
-  const recap = await readRecap($, session)
-  const context = conversationContext(messages, recap, prev?.carry === true)
-  const followUp = human && cfg.followUp.mode && prev ? await followUpAsk($, messages, recap, text, prev, cfg) : undefined
-  loop.router.useJev(client ? client.bind(io($)) : null)
+  const messages = (await $.session.messages({ as: 'api' })) as ApiMessage[]
+  const dialogue = withPrompt(jevDialogue(messages, notes), text)
+  // The follow-up questions need an agent turn before the prompt to judge.
+  const followUp = human && cfg.followUp.mode && prev && messages.some((m) => m.role === 'assistant') ? await followUpAsk($, prev, cfg) : undefined
+  loop.router.useJev(client ? client.bind(io($)) : null, keyError)
   loop.router.useModel(model)
-  const decision = await loop.router.routeTask(text || '(continuing an earlier task)', loop.effort, context.text || undefined, followUp)
+  const decision = await loop.router.routeTask(dialogue, loop.effort, followUp)
   noteTag(loop, decision)
   loop.profile = decision.profile ?? loop.router.lastProfileFallback(text)
   const bounds = loop.router.bounds
@@ -490,17 +494,14 @@ async function routePrompt($: $, raw: string, origin: string): Promise<{ advisor
   await writeRecord($, session, rec)
   loop.next = { kind: 'prompt', task: decision }
   const advisor = f?.advisor === true
-  if (cfg.jevRefusedHost && !refusedWarned) {
-    refusedWarned = true
-    $.ui.toast(`Jev off: endpoint ${cfg.jevRefusedHost} is not local or in JEV_ALLOWED_HOSTS; routing by heuristics`)
-  }
+  warnKey($, keyError)
+  warnAuth($, decision)
   if (f?.raisedTo) $.ui.toast(`Jev: your message says the last turn went wrong → ${f.raisedTo}`)
   if (decision.carry) $.ui.toast(`Jev: a check still fails after a change → ${decision.effort}`)
   if (advisor) $.ui.toast('Jev: asking the model to consult the advisor')
   await journal($, dir, record(decision, {
-    at, session, agent: MAIN, event: 'prompt', prompt: rec.prompt, origin, model, context: context.source, ...taggedField(loop),
+    at, session, agent: MAIN, event: 'prompt', prompt: rec.prompt, origin, model, ...taggedField(loop),
     ...(f ? { correction: f.yes, advisorAvailable: followUp?.advisorAvailable } : {}),
-    ...(cfg.jevRefusedHost ? { jevRefusedHost: cfg.jevRefusedHost } : {}),
   }))
   return { advisor }
 }
@@ -513,25 +514,34 @@ async function markTurn($: $, kind: 'continue' | 'command', text: string): Promi
   loopFor(MAIN, cfg).next = { kind }
 }
 
-/** The user messages after the last assistant reply: a slash command's expansion as the model reads it. */
-async function commandText($: $): Promise<string> {
-  const messages = (await $.session.messages({ as: 'api' })) as Message[]
-  let i = messages.length
-  while (i > 0 && messages[i - 1]!.role === 'user') i--
-  return messages.slice(i).map(userText).filter(Boolean).join('\n')
+/** Say once per module load why Jev is off although a key was configured. */
+function warnKey($: $, keyError: string | null): void {
+  if (!keyError || keyWarned) return
+  keyWarned = true
+  $.ui.toast(keyError === STALE_KEY
+    ? 'Jev off: JEV_API_KEY is not read; set JEV_API_KEY_FILE to the OpenAI key file. Routing by heuristics'
+    : 'Jev off: JEV_API_KEY_FILE could not be read; routing by heuristics')
 }
 
-/** The text a loop's first step routes on when no prompt.submit decided it. */
-async function loopPrompt($: $, agentId: string | undefined): Promise<string> {
-  if (agentId) {
-    // A subagent's brief: the first user message of its loop.
-    const rows = await $.session.messages({ agentId })
-    if (!Array.isArray(rows)) return ''
-    return rows.find((r) => r.role === 'user' && r.text)?.text ?? ''
-  }
-  const messages = (await $.session.messages({ as: 'api' })) as Message[]
-  for (let i = messages.length - 1; i >= 0; i--) if (isHumanPrompt(messages[i])) return userText(messages[i])
-  return ''
+/** Say once per module load that OpenAI refused the key (HTTP 401 or 403): each such decision falls back to heuristics. */
+function warnAuth($: $, d: EffortDecision): void {
+  if (authWarned) return
+  const code = [errorCode(d.jevError), errorCode(d.followUp?.error)].find((c) => c === 'http-401' || c === 'http-403')
+  if (!code) return
+  authWarned = true
+  $.ui.toast(`Jev: OpenAI refused the key (${code.replace('-', ' ').toUpperCase()}); routing by heuristics`)
+}
+
+/**
+ * Whether a subagent's brief opens with the magpie-tasks marker. The brief is
+ * the first user row of the plain view: that view keeps every row through a
+ * compaction (measured on the main loop, 2026-11-09), while the api view then
+ * opens with the summary.
+ */
+async function magpieTask($: $, agentId: string): Promise<boolean> {
+  const rows = await $.session.messages({ agentId })
+  if (!Array.isArray(rows)) throw new Error(`subagent conversation not readable: ${rows.deny}`)
+  return isMagpieTask(rows.find((r) => r.role === 'user' && r.text)?.text ?? '')
 }
 
 const continuation = (loop: Loop): EffortDecision => ({
@@ -539,21 +549,53 @@ const continuation = (loop: Loop): EffortDecision => ({
   jevLatencyMs: 0, ...(loop.profile ? { profile: loop.profile } : {}), policyVersion: policyVersion(),
 })
 
-/** The level a turn starts at: the prompt's decision, the last prompt's level for a continuation, or a new task's from its own text. */
-async function startOfTurn($: $, loop: Loop, key: string, cfg: ModConfig, client: JevSource | null, agentId: string | undefined): Promise<EffortDecision> {
+/**
+ * A subagent's run that follows a run whose check still failed after a change
+ * starts one level above the higher of its own decision and the level the
+ * last run held; its open checks carry over either way.
+ */
+function resumeSubagent(loop: Loop, d: EffortDecision, h: Held): void {
+  loop.ladder = h.ladder
+  if (!h.carry) return
+  const bounds = loop.router.bounds
+  const from = clampEffort(maxEffort(d.effort, h.effort), bounds.min, bounds.max)
+  const to = clampEffort(shift(from, 1), bounds.min, bounds.max)
+  if (rank(to) <= rank(from)) {
+    d.reasons.push(`check still failing after a change in the last run, already ${from}`)
+    return
+  }
+  const carried = loop.ladder.repeatFailing()
+  d.carry = { from, to, checks: carried.length }
+  for (const id of carried) loop.ladder.markRaised(id)
+  moveTo(d, to, `check still failing after a change in the last run → ${to}`)
+}
+
+/** The level a turn starts at: the prompt's decision, the last prompt's level for a continuation, or a new task's from the conversation's newest message. */
+async function startOfTurn($: $, loop: Loop, key: string, cfg: ModConfig, client: JevClient | null, keyError: string | null, agentId: string | undefined): Promise<EffortDecision> {
   const next = loop.next
   loop.next = null
   if (key === MAIN && next?.kind === 'prompt' && next.task) return next.task
   // A background task's report (or a turn no prompt started) continues the last prompt: same level, range and open checks.
   if (key === MAIN && next?.kind !== 'command' && loop.effort !== null) return continuation(loop)
-  const text = key === MAIN && next?.kind === 'command' ? await commandText($) : await loopPrompt($, agentId)
+  // A slash command's expanded body, a subagent's brief, or the message that resumed it: the newest user-side message.
+  const messages = agentId ? await $.session.messages({ agentId, as: 'api' }) : await $.session.messages({ as: 'api' })
+  if (!Array.isArray(messages)) throw new Error(`subagent conversation not readable: ${messages.deny}`)
+  const dialogue = jevDialogue(messages, notes)
+  const text = latestUserText(dialogue)
   if (key === MAIN && next?.kind === 'command') mainTag = tagBounds(text, cfg)
   startPrompt(loop, text, cfg)
-  loop.router.useJev(client ? client.bind(io($)) : null)
+  loop.router.useJev(client ? client.bind(io($)) : null, keyError)
   loop.router.useModel(loop.model)
-  const d = await loop.router.routeTask(text || '(continuing an earlier task)', loop.effort)
+  const d = await loop.router.routeTask(dialogue, loop.effort)
   noteTag(loop, d)
   loop.profile = d.profile ?? loop.router.lastProfileFallback(text)
+  const h = agentId ? held.get(agentId) : undefined
+  if (h) {
+    held.delete(agentId!)
+    resumeSubagent(loop, d, h)
+  }
+  warnKey($, keyError)
+  warnAuth($, d)
   if (key === MAIN) {
     const session = await $.session.id()
     await writeRecord($, session, freshRecord(await readRecord($, session), d.effort, await $.clock.now(), null))
@@ -563,10 +605,20 @@ async function startOfTurn($: $, loop: Loop, key: string, cfg: ModConfig, client
 
 async function decideStep($: $, e: { index: number; model: string; effort?: unknown; agentId?: string; turnId: string }): Promise<Effort | undefined> {
   if (!isEffort(e.effort) || !routed(e.model)) return undefined
-  const { cfg, client, dir } = await load($)
+  const { cfg, client, keyError, dir } = await load($)
   const key = e.agentId ?? MAIN
   const loop = loopFor(key, cfg)
   const session = await $.session.id()
+
+  // A subagent magpie-tasks routes: its effort is that plugin's, so this one
+  // neither sets a level nor reads a change of it as the person's /effort.
+  if (e.agentId && loop.skip === null) {
+    loop.skip = await magpieTask($, e.agentId)
+    if (loop.skip) {
+      await journal($, dir, { at: await $.clock.now(), session, agent: key, event: 'skip', reason: 'magpie-tasks', step: e.index, turnId: e.turnId, model: e.model, policy: policyVersion() })
+    }
+  }
+  if (loop.skip) return undefined
   await loadPin($, session)
 
   // The session's own effort changed between two requests on the same model:
@@ -588,7 +640,7 @@ async function decideStep($: $, e: { index: number; model: string; effort?: unkn
       decision = { kind: e.index === 0 ? 'task' : 'step', effort: e.effort, previous: loop.effort, changed: loop.effort !== e.effort, reasons: ['/effort pin'], source: 'pinned', jevLatencyMs: 0, policyVersion: policyVersion() }
     }
   } else if (e.index === 0 || loop.effort === null) {
-    decision = await startOfTurn($, loop, key, cfg, client, e.agentId)
+    decision = await startOfTurn($, loop, key, cfg, client, keyError, e.agentId)
     loop.tally.jevMs += decision.jevLatencyMs
   }
 
@@ -683,6 +735,8 @@ async function endTurn($: $, e: { turnId: string; agentId?: string; reason: stri
   const unfinished = e.reason === 'aborted' || e.reason === 'error' || UNFINISHED_STOPS.has(loop.tally.lastStop ?? '')
   const rec = key === MAIN ? await readRecord($, session) : null
   if (rec) await writeRecord($, session, { ...rec, carry: carry > 0, unfinished })
+  // A subagent's open checks wait for its next run (SendMessage resumes the same id).
+  if (key !== MAIN) holdSubagent(key, loop, carry > 0)
   const t = loop.tally
   loop.tally = newTally()
   await journal($, dir, {
@@ -694,64 +748,26 @@ async function endTurn($: $, e: { turnId: string; agentId?: string; reason: stri
   })
 }
 
-let recapChain: Promise<void> = Promise.resolve()
-
-/**
- * Rewrites the session's recap from the previous recap and what happened since
- * the reply it covers: the person's prompts and the agent's replies in full,
- * and a line of what the agent did. `answer` is the turn's final reply, added
- * when the transcript does not hold it yet. A model that does not answer
- * leaves the recap as it was; the journal says why.
- */
-async function updateRecap($: $, answer: string): Promise<void> {
-  if (!routed(await $.session.model())) return
-  const { cfg, dir } = await load($)
-  const session = await $.session.id()
-  const recap = await readRecap($, session)
-  const messages = (await $.session.messages({ as: 'api' })) as Message[]
-  const final = answer.trim()
-  const all: Message[] = final && lastAgentText(messages) !== final ? [...messages, { role: 'assistant', content: final }] : messages
-  const increment = recapIncrement(all, recap?.coversHash ?? null)
-  if (!increment) return
-  const started = await $.clock.now()
-  const prompt = recapPrompt(recap?.text ?? null, increment)
-  const r = await $.model.complete({
-    model: cfg.recapModel,
-    system: [{ text: CLI_IDENTITY }, { text: RECAP_SYSTEM, cache: true }],
-    prompt,
-    maxTokens: 1024,
-    effort: 'low',
-  })
-  let text = r.isAnswered ? r.text.trim() : ''
-  let model = cfg.recapModel
-  const failed = r.isAnswered ? (text ? null : { error: 'empty-reply' }) : r.reason === 'api-error' ? { error: r.reason, status: r.status, apiError: r.error } : { error: r.reason }
-  let fallbackError: string | undefined
-  if (failed && cfg.recapFallback) {
-    const f = await chatRecap((url, init) => $.http.fetch(url, init), cfg.recapFallback, prompt)
-    if ('text' in f) {
-      text = f.text
-      model = cfg.recapFallback.model
-    } else fallbackError = f.error
+function holdSubagent(agentId: string, loop: Loop, carry: boolean): void {
+  held.delete(agentId)
+  if (loop.ladder.open === 0 || loop.effort === null) return
+  held.set(agentId, { effort: loop.effort, ladder: loop.ladder, carry })
+  for (const k of held.keys()) {
+    if (held.size <= HELD_AGENTS) break
+    held.delete(k)
   }
-  const at = await $.clock.now()
-  if (text) await writeRecap($, session, { text, coversHash: hash20(lastAgentText(all)), at })
-  await journal($, dir, {
-    at, session, agent: MAIN, event: 'recap', model, ok: text !== '', ms: at - started, inputChars: increment.length,
-    ...(text ? { outputChars: text.length } : {}),
-    ...(r.isAnswered ? { outputTokens: r.usage.output_tokens, inputTokens: r.usage.input_tokens } : {}),
-    ...(failed ? { recapError: failed } : {}),
-    ...(failed && cfg.recapFallback ? { fallbackModel: cfg.recapFallback.model, ...(fallbackError ? { fallbackError } : {}) } : {}),
-  })
 }
 
 export const register: Register = (on) => {
   on('prompt.submit', async ($, e, next) => {
     // A prompt delivered into a running turn joins that turn's steps.
     if (e.turnId !== undefined) return next(e)
+    // magpie-tasks' relay: the session's record and the next turn's start stay as the last prompt left them.
+    if (e.origin.kind === 'plugin' && e.origin.name === 'magpie-tasks' && e.text.startsWith(MAGPIE_TASKS_RELAY)) return next(e)
     let context = e.context
     try {
       if (CONTINUING_ORIGINS.has(e.origin.kind)) await markTurn($, 'continue', e.text)
-      else if (e.command !== undefined || SLASH_COMMAND.test(e.text.trim())) await markTurn($, 'command', e.text)
+      else if (SLASH_COMMAND.test(e.text.trim())) await markTurn($, 'command', e.text)
       else {
         const routed = await routePrompt($, e.text, e.origin.kind)
         if (routed?.advisor) context = [...(e.context ?? []), ADVISOR_NOTE]
@@ -820,8 +836,9 @@ export const register: Register = (on) => {
   })
 
   // A turn's outcome is journaled; a subagent run's routing state ends with
-  // it, while its band line stays, marked done, for whoever reads its
-  // transcript. The main loop's lives for the session.
+  // it (its open checks wait in `held` for a resumed run), while its band
+  // line stays, marked done, for whoever reads its transcript. The main
+  // loop's lives for the session.
   on('turn.complete', async ($, e, next) => {
     try {
       await endTurn($, e)
@@ -836,20 +853,31 @@ export const register: Register = (on) => {
         $.ui.invalidate('ui.render')
       }
     }
-    const done = await next(e)
-    // The main loop's recap is rewritten after the turn is handed on, off the
-    // path of the next prompt; updates run one at a time, in turn order.
-    if (!e.agentId) {
-      recapChain = recapChain
-        .then(() => updateRecap($, e.answer))
-        .catch((err) => $.ui.log(`jev: recap not updated (${(err as Error)?.name ?? 'error'})`, { to: 'debug' }))
+    return next(e)
+  })
+
+  // Another plugin's note is no one's message: Jev's view drops it by its text.
+  on('session.append', { door: 'note' }, ($, e, next) => {
+    if (e.origin.kind === 'plugin') {
+      for (const b of e.message.content) {
+        const text = b.type === 'text' && typeof b.text === 'string' ? b.text.trim() : ''
+        if (!text) continue
+        notes.delete(text)
+        notes.add(text)
+      }
+      for (const old of notes) {
+        if (notes.size <= NOTES_KEPT) break
+        notes.delete(old)
+      }
     }
-    return done
+    return next(e)
   })
 
   on('session.end', ($, e, next) => {
     loops.clear()
+    notes.clear()
     band.clear()
+    held.clear()
     pinned = null
     mainTag = null
     return next(e)

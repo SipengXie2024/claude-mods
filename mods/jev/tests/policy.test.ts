@@ -19,13 +19,14 @@ const HIGH_DEFAULT_MODELS = ['claude-mythos-5-1', 'claude-opus-4-8', null] as co
 test('model scale: the 5.5 models read the default-medium table; Mythos, Fable, earlier Opus and an unknown model the default-high one', () => {
   for (const m of ['claude-opus-5-5', 'claude-opus-5-5[1m]', 'claude-sonnet-5-5', 'opus']) assert.equal(modelScale(m), 'medium-default', m);
   for (const m of ['claude-mythos-5-1', 'claude-fable-5-1', 'claude-opus-5', 'claude-opus-4-8', null]) assert.equal(modelScale(m), 'high-default', String(m));
+  for (const m of ['claude-mythos-5-2', 'claude-fable-5-2', 'claude/claude-mythos-5-2', 'claude-fable-5-2[1m]']) assert.equal(modelScale(m), 'fable-5.2', m);
   for (const m of ['gpt-6-astra', 'gpt-6-astra-900k']) assert.equal(modelScale(m), 'astra', m);
 });
 
-test('task: Astra starts code and prose at medium, research at high, routine work low; deep code and research at xhigh, never max', () => {
+test('task: Astra starts code and prose at medium, research at high, routine work low; deep code at xhigh and deep research at max', () => {
   const start: Array<[TaskType, Effort, Effort]> = [
     ['chat', 'low', 'low'], ['operate', 'low', 'medium'], ['explain', 'medium', 'high'], ['write', 'medium', 'high'],
-    ['design', 'medium', 'high'], ['code', 'medium', 'xhigh'], ['research', 'high', 'xhigh'],
+    ['design', 'medium', 'high'], ['code', 'medium', 'xhigh'], ['research', 'high', 'max'],
   ];
   for (const [taskType, base, deep] of start) {
     assert.equal(taskEffort(profile({ taskType }), ALL, 'gpt-6-astra').effort, base, `Astra ${taskType}`);
@@ -34,9 +35,9 @@ test('task: Astra starts code and prose at medium, research at high, routine wor
   assert.equal(taskEffort(profile({ taskType: 'code', typeConfidence: 0.1 }), ALL, 'gpt-6-astra').effort, 'high', 'an unsure kind starts at high on Astra too');
 });
 
-test('task: each kind starts at its base on its model\'s table (Opus 5.5 low where failures show, Mythos a step up)', () => {
+test('task: each kind starts at its base on its model\'s table (Opus 5.5 low for code and chat, Mythos a step up)', () => {
   const opus55: Array<[TaskType, Effort]> = [
-    ['chat', 'low'], ['operate', 'low'], ['explain', 'medium'], ['write', 'medium'], ['design', 'low'], ['code', 'low'], ['research', 'medium'],
+    ['chat', 'low'], ['operate', 'medium'], ['explain', 'medium'], ['write', 'medium'], ['design', 'medium'], ['code', 'low'], ['research', 'medium'],
   ];
   const highDefault: Array<[TaskType, Effort]> = [
     ['chat', 'low'], ['operate', 'low'], ['explain', 'medium'], ['write', 'medium'], ['design', 'medium'], ['code', 'medium'], ['research', 'high'],
@@ -62,7 +63,7 @@ test('task: without deep reasoning the task level never exceeds its base, whatev
 
 test('task: a task that needs something worked out starts at its kind\'s deep level, never at max', () => {
   const opus55: Array<[TaskType, Effort]> = [
-    ['chat', 'low'], ['operate', 'medium'], ['explain', 'high'], ['write', 'high'], ['design', 'medium'], ['code', 'high'], ['research', 'xhigh'],
+    ['chat', 'low'], ['operate', 'high'], ['explain', 'high'], ['write', 'high'], ['design', 'high'], ['code', 'high'], ['research', 'xhigh'],
   ];
   const highDefault: Array<[TaskType, Effort]> = [
     ['chat', 'low'], ['operate', 'medium'], ['explain', 'high'], ['write', 'high'], ['design', 'high'], ['code', 'xhigh'], ['research', 'xhigh'],
@@ -162,7 +163,7 @@ test('ablations switch off exactly one rule each and are recorded in the policy 
   try {
     setDeepThresholds({ yes: 0.88, no: 0.3 });
     assert.deepEqual([...ABLATABLE], ['r1', 'dissat']);
-    assert.equal(policyVersion(), 'policy.v13');
+    assert.equal(policyVersion(), 'policy.v17');
     assert.equal(taskEffort(deepResearch, ALL).effort, 'xhigh');
 
     setAblations(['r1']);
@@ -170,11 +171,11 @@ test('ablations switch off exactly one rule each and are recorded in the policy 
     // r2, r4 and stuck no longer exist: they are ignored like any unknown name
     setAblations(['r2', 'r4', 'stuck']);
     assert.deepEqual(getAblations(), []);
-    assert.equal(policyVersion(), 'policy.v13');
+    assert.equal(policyVersion(), 'policy.v17');
 
     setAblations(['dissat', 'bogus', 'r1']);
     assert.deepEqual(getAblations(), ['r1', 'dissat']);
-    assert.equal(policyVersion(), 'policy.v13-ablate:r1,dissat');
+    assert.equal(policyVersion(), 'policy.v17-ablate:r1,dissat');
   } finally {
     setAblations([]);
     setDeepThresholds({ yes: 0.5, no: 0.3 });
@@ -332,10 +333,37 @@ test('follow-up: shadow mode and the dissat ablation record the signal but never
     assert.equal(shadow.effort, 'medium');
     assert.deepEqual(shadow.followUp, { p: 0.99, threshold: 0.98, yes: true, prevMax: 'max', streak: 1, hiLosses: 1, advisor: false, shadow: true });
     setAblations(['dissat']);
-    assert.equal(policyVersion(), 'policy.v13-ablate:dissat');
+    assert.equal(policyVersion(), 'policy.v17-ablate:dissat');
     const ablated = followUpEffort(fu());
     assert.equal(ablated.effort, 'medium');
     assert.equal(ablated.followUp.shadow, true);
     assert.equal(ablated.followUp.yes, true);
   });
+});
+
+test('task: Mythos and Fable 5.2 follow their own table, code at medium, research at high, deep research at max', () => {
+  const starts: Array<[TaskType, Effort, Effort]> = [
+    ['chat', 'low', 'low'], ['operate', 'low', 'high'], ['explain', 'medium', 'high'], ['write', 'medium', 'high'],
+    ['design', 'medium', 'high'], ['code', 'medium', 'high'], ['research', 'high', 'max'],
+  ];
+  for (const model of ['claude/claude-mythos-5-2', 'claude-fable-5-2']) {
+    for (const [taskType, base, deep] of starts) {
+      assert.equal(taskEffort(profile({ taskType }), ALL, model).effort, base, `${model} ${taskType}`);
+      assert.equal(taskEffort(profile({ taskType, typeConfidence: 0.9, deep: 0.99 }), ALL, model).effort, deep, `${model} deep ${taskType}`);
+    }
+  }
+});
+
+test('task: Gemini 4 Argon follows its own three-level table and never starts above high', () => {
+  const starts: Array<[TaskType, Effort, Effort]> = [
+    ['chat', 'low', 'low'], ['operate', 'low', 'medium'], ['explain', 'medium', 'high'], ['write', 'medium', 'high'],
+    ['design', 'medium', 'high'], ['code', 'medium', 'high'], ['research', 'high', 'high'],
+  ];
+  for (const model of ['antigravity/gemini-4-argon', 'gemini-4-argon']) {
+    assert.equal(modelScale(model), 'argon', model);
+    for (const [taskType, base, deep] of starts) {
+      assert.equal(taskEffort(profile({ taskType }), ALL, model).effort, base, `${model} ${taskType}`);
+      assert.equal(taskEffort(profile({ taskType, typeConfidence: 0.9, deep: 0.99 }), ALL, model).effort, deep, `${model} deep ${taskType}`);
+    }
+  }
 });

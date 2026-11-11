@@ -1,14 +1,8 @@
 import assert, { test } from './assert';
-import { checkId, describeToolInput, shellSegments } from '../src/describe';
+import { checkId, shellSegments } from '../src/describe';
 import { dateDebugCommands } from './fixtures';
 
 const isCheck = (command: string) => checkId(command) !== null;
-
-test('describeToolInput renders the useful part of each tool input', () => {
-  assert.equal(describeToolInput('Bash', { command: 'npm   test' }), 'npm test');
-  assert.equal(describeToolInput('Edit', { file_path: 'src/a.ts', old_string: 'x' }), 'src/a.ts');
-  assert.equal(describeToolInput('Grep', { pattern: 'TODO', path: 'src' }), '"TODO" in src');
-});
 
 test('decision 4: the known runners are checks, after env, wrappers and launcher prefixes', () => {
   for (const command of [
@@ -55,12 +49,11 @@ test('decision 4 (B8): the remote command of ssh, docker exec and sh -c is judge
   ]) assert.ok(!isCheck(command), command);
 });
 
-test('decision 4: identity is the full command, whitespace normalized, never the 160-char summary', () => {
+test('decision 4: identity is the full command, whitespace normalized', () => {
   assert.equal(checkId('npm   test'), checkId('npm test'));
   assert.notEqual(checkId('npm test'), checkId('npm test -- --grep a'));
   assert.notEqual(checkId('cd a && npm test'), checkId('cd b && npm test'));
   const long = (tail: string) => `cd /repo/${'deep/'.repeat(40)}pkg && npm test -- ${tail}`;
-  assert.ok(describeToolInput('Bash', { command: long('a') }) === describeToolInput('Bash', { command: long('b') }), 'the summaries clip to the same text');
   assert.notEqual(checkId(long('a')), checkId(long('b')));
   assert.match(checkId('npm test')!, /^[0-9a-f]{20}$/);
 });

@@ -1,10 +1,11 @@
 import { clampEffort, fromRank, maxEffort, minEffort, rank, shift, type Effort } from './effort';
+import { isArgon, openAIModelScale, type OpenAIModelScale } from './model';
 import type { TaskType } from './questions';
 import type { FollowUpRecord, TaskProfile } from './types';
 
 /**
  * Pure mapping from evidence and Jev signals to an effort level
- * (policy.v13, 2026-11-03).
+ * (policy.v17, 2026-11-10).
  *
  * The start comes from the task kind, read from a table per model: a level
  * name is not the same amount of thinking on every model, and Opus 5.5
@@ -31,7 +32,7 @@ export interface Bounds {
 }
 
 /** Version of this policy, recorded on every decision for provenance. */
-export const POLICY_VERSION = 'policy.v13';
+export const POLICY_VERSION = 'policy.v17';
 
 /**
  * Rules an A/B run can switch off to measure them:
@@ -73,13 +74,17 @@ export interface TypePrefs {
 
 /**
  * Which table a model follows: Opus, Sonnet and Haiku 5.5 default to medium;
- * Mythos, Fable and earlier Opus models to high; OpenAI's GPT-6 Astra (routed
- * by the Hermes port) has its own.
+ * Mythos and Fable 5.2 (one model, two safeguard settings) have their own;
+ * other Mythos, Fable and earlier Opus models default to high.
+ * GPT-6 Astra 和 GPT-6.1 Sol 分别使用各自的任务表。
  */
-export type ModelScale = 'medium-default' | 'high-default' | 'astra';
+export type ModelScale = 'medium-default' | 'high-default' | 'fable-5.2' | 'argon' | OpenAIModelScale;
 
 export function modelScale(model: string | null): ModelScale {
-  if (model !== null && /gpt-6-astra/i.test(model)) return 'astra';
+  const openAI = openAIModelScale(model);
+  if (openAI !== null) return openAI;
+  if (model !== null && /claude-(fable|mythos)-5-2(?:\[1m\])?$/i.test(model)) return 'fable-5.2';
+  if (isArgon(model)) return 'argon';
   return model !== null && /claude-(opus|sonnet|haiku)-5-5|^(opus|sonnet|haiku)(\[1m\])?$/i.test(model) ? 'medium-default' : 'high-default';
 }
 
@@ -88,10 +93,35 @@ export function modelScale(model: string | null): ModelScale {
  * (SWE-bench Pro subset: low 87.4%, and low then high on the failures about
  * 97%), research at medium (DRACO: low 13.3 points below medium), reading and
  * shaping visuals low (its low reads charts better than Opus 5 at its
- * highest); bug hunts and deep research go to high and xhigh. Mythos 5.1
+ * highest); bug hunts and deep research go to high and xhigh. Operations and
+ * design start at medium: the person's labels put 5 of 11 operations and 8 of
+ * 9 design prompts that started low at medium or above (eval/context-report.md,
+ * 2026-11-09). Mythos 5.1
  * (Fable 5.1's numbers) and earlier Opus: research and visuals at high
  * (DeepResearch Bench II, Chartography), coding from medium up to xhigh, where
  * Fable 5.1 scores best on FrontierCode and Terminal-Bench.
+ *
+ * Fable / Mythos 5.2 (Artificial Analysis v5.0.1 per-level runs, low / medium /
+ * high / xhigh / max, 2026-11-10): coding gains most from medium to high
+ * (FrontierCode 2.0 38.4 / 41.3 / 49.1 / 47.6 / 48.8; Anthropic's own run
+ * peaks at xhigh, 49.1), so code starts at medium and deep code at high.
+ * Research keeps rising to max (HLE-Diamond 60.8 / 66.3 / 73.8 / 75.8 / 80.2,
+ * CritPt hard 60.0 / 61.5 / 73.0 / 73.5 / 76.5, Terminal-Bench-Science 53.8 /
+ * 60.5 / 70.0 / 67.6 / 73.3), and Anthropic names max for open-ended science and
+ * mathematics: research starts at high, deep research at max. Operations are
+ * level from low to medium (AutomationBench-AA 68.0 / 68.8 / 71.4, Terminal-Bench
+ * 4.0 54.5 / 55.1 / 59.6), so they start low and deep operations skip to high.
+ * Prose and knowledge work rise steadily (AA-Briefcase 1563 / 1622 / 1677 /
+ * 1738 / 1785) and start at medium. At high and above the model thinks before
+ * every reply, a greeting included, so chat stays low.
+ *
+ * Gemini 4 Argon offers low / medium / high only (Google's default medium);
+ * Magpie sends a higher request as high (2026-11-10: `--effort max` → high).
+ * Per-level data is thin: FrontierCode 2.0 21.5 / 23.5 / 26.3 and Zapier
+ * AutomationBench medium 50.1 / high 51.3; its Arena Text results (1522 ± 5
+ * overall, above Opus 5.5) are at high. Prose, design and code start at medium
+ * and go to high when deep; research starts at high; operations stay low and
+ * go to medium; chat low. To be recalibrated on the person's ratings.
  *
  * GPT-6 Astra (Artificial Analysis per-level runs, low / medium / high / xhigh /
  * max): its low falls far below medium on coding (FrontierCode 2.0 26 / 37 /
@@ -101,16 +131,19 @@ export function modelScale(model: string | null): ModelScale {
  * 1505), so prose and explanations start at medium. Research starts at high
  * (HLE-Diamond 45 / 53 / 59 / 62 / 64). Routine operations stay low (OpenAI:
  * low for "execution-oriented coding" and tool use). No per-level visual
- * benchmark exists; OpenAI names medium for slides. Max is never a start:
- * it costs about twice xhigh's output tokens (52k vs 27k per task).
+ * benchmark exists; OpenAI names medium for slides.
+ * Astra 和 Sol 的困难研究从 max 开始：Terminal-Bench Science 的 xhigh/max
+ * 分别为 55/63 和 50/58。Sol 的解释、写作、设计从 high 开始，复杂任务用
+ * xhigh；AA-Briefcase 的 medium/high/xhigh 为 1360/1469/1503。
+ * 任务类型与评测的对应属于策略推断，来源与限制记录在 ../BENCHMARKS.md。
  */
 export const TYPE_PREFS: Record<ModelScale, Record<TaskType, TypePrefs>> = {
   'medium-default': {
     chat: { floor: 'low', base: 'low', deep: 'low' },
-    operate: { floor: 'low', base: 'low', deep: 'medium' },
+    operate: { floor: 'low', base: 'medium', deep: 'high' },
     explain: { floor: 'low', base: 'medium', deep: 'high' },
     write: { floor: 'low', base: 'medium', deep: 'high' },
-    design: { floor: 'low', base: 'low', deep: 'medium' },
+    design: { floor: 'low', base: 'medium', deep: 'high' },
     code: { floor: 'low', base: 'low', deep: 'high' },
     research: { floor: 'medium', base: 'medium', deep: 'xhigh' },
   },
@@ -123,6 +156,24 @@ export const TYPE_PREFS: Record<ModelScale, Record<TaskType, TypePrefs>> = {
     code: { floor: 'medium', base: 'medium', deep: 'xhigh' },
     research: { floor: 'medium', base: 'high', deep: 'xhigh' },
   },
+  'fable-5.2': {
+    chat: { floor: 'low', base: 'low', deep: 'low' },
+    operate: { floor: 'low', base: 'low', deep: 'high' },
+    explain: { floor: 'low', base: 'medium', deep: 'high' },
+    write: { floor: 'low', base: 'medium', deep: 'high' },
+    design: { floor: 'low', base: 'medium', deep: 'high' },
+    code: { floor: 'low', base: 'medium', deep: 'high' },
+    research: { floor: 'medium', base: 'high', deep: 'max' },
+  },
+  argon: {
+    chat: { floor: 'low', base: 'low', deep: 'low' },
+    operate: { floor: 'low', base: 'low', deep: 'medium' },
+    explain: { floor: 'low', base: 'medium', deep: 'high' },
+    write: { floor: 'low', base: 'medium', deep: 'high' },
+    design: { floor: 'low', base: 'medium', deep: 'high' },
+    code: { floor: 'low', base: 'medium', deep: 'high' },
+    research: { floor: 'medium', base: 'high', deep: 'high' },
+  },
   astra: {
     chat: { floor: 'low', base: 'low', deep: 'low' },
     operate: { floor: 'low', base: 'low', deep: 'medium' },
@@ -130,7 +181,16 @@ export const TYPE_PREFS: Record<ModelScale, Record<TaskType, TypePrefs>> = {
     write: { floor: 'low', base: 'medium', deep: 'high' },
     design: { floor: 'low', base: 'medium', deep: 'high' },
     code: { floor: 'medium', base: 'medium', deep: 'xhigh' },
-    research: { floor: 'medium', base: 'high', deep: 'xhigh' },
+    research: { floor: 'medium', base: 'high', deep: 'max' },
+  },
+  'sol-6.1': {
+    chat: { floor: 'low', base: 'low', deep: 'low' },
+    operate: { floor: 'low', base: 'low', deep: 'medium' },
+    explain: { floor: 'low', base: 'high', deep: 'xhigh' },
+    write: { floor: 'low', base: 'high', deep: 'xhigh' },
+    design: { floor: 'low', base: 'high', deep: 'xhigh' },
+    code: { floor: 'medium', base: 'medium', deep: 'xhigh' },
+    research: { floor: 'medium', base: 'high', deep: 'max' },
   },
 };
 

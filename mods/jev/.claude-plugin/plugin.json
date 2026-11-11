@@ -1,7 +1,7 @@
 {
   "name": "jev",
-  "version": "0.1.0",
-  "description": "Jev effort routing for Opus and Mythos (policy.v13): start effort per prompt from per-model kind tables that start low and hold a raised level while the task goes on, judged with the conversation's recent turns and a Haiku-written rolling recap, follow-up fault raise, and a raise carried into the next prompt when a check fails again after a code change and still fails at the turn's end; the level never moves within a turn.",
+  "version": "0.2.0",
+  "description": "Jev effort routing for Opus, Mythos, GPT-6 Astra and GPT-6.1 Sol (policy.v15): start effort per prompt from per-model kind tables that start low and hold a raised level while the task goes on, judged by OpenAI's Decisions API over the conversation as Claude Code holds it (user messages and final replies, newest last, in one request with the follow-up fault question), and a raise carried into the next prompt, or a subagent's next run, when a check fails again after a code change and still fails at the turn's end; subagents whose brief opens with the magpie-tasks marker, and that plugin's relay prompts, are left alone; the OpenAI key is read from JEV_API_KEY_FILE only; the level never moves within a turn.",
   "author": {
     "name": "sipeng"
   }

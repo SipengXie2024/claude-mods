@@ -1,40 +1,6 @@
-/** One-line renderings of Claude Code tool inputs/results, which Bash commands are checks, and which edit files. */
+/** Which Bash commands are checks, and which edit files. */
 
 import { hash20 } from './hash';
-
-const clip = (s: string, n: number) => (s.length <= n ? s : `${s.slice(0, n - 1)}…`);
-
-export function describeToolInput(tool: string, input: unknown): string {
-  const i = (input ?? {}) as Record<string, unknown>;
-  const str = (k: string) => (typeof i[k] === 'string' ? (i[k] as string) : '');
-  switch (tool) {
-    case 'Bash': return clip(str('command').replace(/\s+/g, ' '), 160);
-    case 'Read': case 'Write': case 'Edit': case 'MultiEdit': case 'NotebookEdit':
-      return str('file_path') || str('notebook_path');
-    case 'Grep': return `"${clip(str('pattern'), 80)}"${str('path') ? ` in ${str('path')}` : ''}`;
-    case 'Glob': return str('pattern');
-    case 'WebFetch': return str('url');
-    case 'WebSearch': return str('query');
-    case 'Task': case 'Agent': return str('description') || clip(str('prompt'), 100);
-    default: {
-      const json = JSON.stringify(input ?? {});
-      return clip(json === '{}' ? '' : json, 120);
-    }
-  }
-}
-
-export function stringifyResult(response: unknown): string {
-  if (response == null) return '';
-  if (typeof response === 'string') return response;
-  if (Array.isArray(response)) {
-    return response.map((b) => (b && typeof b === 'object' && 'text' in b ? String((b as { text: unknown }).text) : JSON.stringify(b))).join('\n');
-  }
-  const r = response as Record<string, unknown>;
-  if (typeof r.stdout === 'string' || typeof r.stderr === 'string') {
-    return [r.stdout, r.stderr].filter((x) => typeof x === 'string' && x).join('\n');
-  }
-  return JSON.stringify(response);
-}
 
 // ── Checks ─────────────────────────────────────────────────────────────────
 //

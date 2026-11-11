@@ -1,49 +1,62 @@
 import assert, { test } from './assert';
-import { jevEndpointAllowed, modConfig, parseEnvFile } from '../src/config';
+import { keyFilePath, modConfig, parseEnvFile } from '../src/config';
 import { hash20 } from '../src/hash';
 
 test('parseEnvFile: comments, export, quotes and trailing comments', () => {
   const env = parseEnvFile([
-    '# Jev backend',
-    'JEV_BASE_URL=http://127.0.0.1:18013/v1/systemone',
+    '# Jev',
+    'JEV_API_KEY_FILE=~/.config/jev-opus/openai-jev.key',
     'export JEV_API_KEY="k-123"',
     "JEV_OPUS_ABLATE='r1, stuck'",
     'JEV_DEADLINE_MS=3500   # p50 1.6 s',
-    'JEV_FALLBACK_BASE_URL="http://127.0.0.1:18016/v1" # local',
-    "JEV_MODEL='lingdt-decision-1.0'   # the fallback's model",
+    'JEV_OPUS_DEEP_YES="0.85" # gpt-6-luna',
+    "JEV_MODEL='gpt-6-luna'   # the Decisions model",
     'not a line',
     '',
   ].join('\n'));
   assert.deepEqual(env, {
-    JEV_BASE_URL: 'http://127.0.0.1:18013/v1/systemone',
+    JEV_API_KEY_FILE: '~/.config/jev-opus/openai-jev.key',
     JEV_API_KEY: 'k-123',
     JEV_OPUS_ABLATE: 'r1, stuck',
     JEV_DEADLINE_MS: '3500',
-    JEV_FALLBACK_BASE_URL: 'http://127.0.0.1:18016/v1',
-    JEV_MODEL: 'lingdt-decision-1.0',
+    JEV_OPUS_DEEP_YES: '0.85',
+    JEV_MODEL: 'gpt-6-luna',
   });
 });
 
-test('modConfig: jev-opus defaults; no key means heuristics only', () => {
+test('modConfig: defaults; no key means heuristics only', () => {
   const c = modConfig({});
-  assert.equal(c.jev, null);
+  assert.equal(c.jevKeyFile, null);
+  assert.equal(c.staleKey, false);
+  assert.deepEqual(c.jev, { model: 'gpt-6-luna', deadlineMs: 10_000, breakerThreshold: 3, breakerCooldownMs: 30_000, confidence: 'recompute' });
   assert.deepEqual(c.bounds, { min: 'low', max: 'high' });
   assert.deepEqual(c.followUp, { mode: 'on', yes: 0.75, advisor: true });
   assert.equal(c.explore, 0.1);
-  const keyed = modConfig({ JEV_BASE_URL: 'http://127.0.0.1:18013/v1/systemone', JEV_API_KEY: 'k', JEV_FALLBACK_BASE_URL: 'http://127.0.0.1:18016/v1', JEV_FALLBACK_API_KEY: 'k2' });
-  assert.equal(keyed.jev?.deadlineMs, 6000, 'decision 6: the primary waits 6 s by default');
-  assert.equal(keyed.jevFallback?.deadlineMs, 2500);
+});
+
+test('modConfig: the key comes from JEV_API_KEY_FILE only; JEV_API_KEY is noted as stale and never taken as a key', () => {
+  assert.equal(modConfig({ JEV_API_KEY_FILE: '~/.config/jev-opus/openai-jev.key' }).jevKeyFile, '~/.config/jev-opus/openai-jev.key');
+  assert.deepEqual([modConfig({ JEV_API_KEY: 'k' }).jevKeyFile, modConfig({ JEV_API_KEY: 'k' }).staleKey], [null, true]);
+  assert.deepEqual([modConfig({ JEV_API_KEY: 'k', JEV_API_KEY_FILE: '/keys/jev' }).jevKeyFile, modConfig({ JEV_API_KEY: 'k', JEV_API_KEY_FILE: '/keys/jev' }).staleKey], ['/keys/jev', true]);
+  assert.equal(modConfig({ JEV_API_KEY: '  ' }).staleKey, false, 'a blank value is none');
+  assert.ok(!JSON.stringify(modConfig({ JEV_API_KEY: 'k-123' })).includes('k-123'), 'the value is not kept');
+});
+
+test('keyFilePath: ~/ is the home folder, a relative path the config folder', () => {
+  assert.equal(keyFilePath('~/.config/jev-opus/openai-jev.key', '/home/u', '/cfg'), '/home/u/.config/jev-opus/openai-jev.key');
+  assert.equal(keyFilePath('/keys/jev', '/home/u', '/cfg'), '/keys/jev');
+  assert.equal(keyFilePath('openai-jev.key', '/home/u', '/cfg'), '/cfg/openai-jev.key');
 });
 
 test('modConfig: the live .env keys', () => {
   const c = modConfig({
-    JEV_BASE_URL: 'http://127.0.0.1:18013/v1/systemone', JEV_API_KEY: 'k', JEV_DEADLINE_MS: '3500',
+    JEV_API_KEY_FILE: '~/.config/jev-opus/openai-jev.key', JEV_MODEL: 'gpt-6-luna-2', JEV_DEADLINE_MS: '3500',
     JEV_OPUS_MIN_EFFORT: 'medium', JEV_OPUS_MAX_EFFORT: 'max', JEV_OPUS_DEEP_YES: '0.61', JEV_OPUS_DEEP_NO: '0.2',
     JEV_OPUS_DISSATISFACTION: 'shadow', JEV_OPUS_DISSAT_YES: '0.8', JEV_OPUS_DISSAT_ADVISOR: '0', JEV_OPUS_ABLATE: 'R1,stuck',
     JEV_OPUS_EXPLORE: '0.25',
   });
-  assert.equal(c.jev?.baseUrl, 'http://127.0.0.1:18013/v1/systemone');
-  assert.equal(c.jev?.deadlineMs, 3500);
+  assert.equal(c.jev.model, 'gpt-6-luna-2');
+  assert.equal(c.jev.deadlineMs, 3500);
   assert.deepEqual(c.bounds, { min: 'medium', max: 'max' });
   assert.deepEqual(c.deep, { yes: 0.61, no: 0.2 });
   assert.deepEqual(c.followUp, { mode: 'shadow', yes: 0.8, advisor: false });
@@ -55,28 +68,6 @@ test('modConfig: the live .env keys', () => {
   assert.deepEqual(modConfig({ JEV_OPUS_MIN_EFFORT: 'max', JEV_OPUS_MAX_EFFORT: 'low' }).bounds, { min: 'low', max: 'max' }, 'misordered bounds swap');
 });
 
-test('modConfig: Jev stays off unless JEV_BASE_URL points at an allowed host', () => {
-  assert.equal(modConfig({ JEV_API_KEY: 'k' }).jev, null, 'no URL no longer means TypeSafe hosted');
-  assert.equal(modConfig({ JEV_API_KEY: 'k', JEV_BASE_URL: 'https://api.typesafe.ai/v1/systemone' }).jev, null);
-  assert.equal(modConfig({ JEV_API_KEY: 'k', JEV_BASE_URL: 'https://api.typesafe.ai/v1/systemone' }).jevRefusedHost, 'api.typesafe.ai');
-  assert.equal(modConfig({ JEV_API_KEY: 'k' }).jevRefusedHost, '(unset)');
-  assert.equal(modConfig({}).jevRefusedHost, null, 'no key: nothing refused');
-  assert.equal(modConfig({ JEV_API_KEY: 'k', JEV_BASE_URL: 'http://127.0.0.1:18013/v1/systemone' }).jevRefusedHost, null);
-  assert.equal(modConfig({ JEV_API_KEY: 'k', JEV_BASE_URL: 'http://172.21.0.1:18014/v1/systemone' }).jev?.baseUrl, 'http://172.21.0.1:18014/v1/systemone');
-  const listed = modConfig({ JEV_API_KEY: 'k', JEV_BASE_URL: 'http://100.93.153.4:8013/v1/systemone', JEV_ALLOWED_HOSTS: ' 100.93.153.4 , mac ' });
-  assert.equal(listed.jev?.baseUrl, 'http://100.93.153.4:8013/v1/systemone');
-});
-
-test('jevEndpointAllowed: hosts compare exactly, never by prefix or userinfo', () => {
-  assert.equal(jevEndpointAllowed('http://localhost:8013/v1/systemone'), true);
-  assert.equal(jevEndpointAllowed('http://[::1]:8013/v1/systemone'), true);
-  assert.equal(jevEndpointAllowed('http://127.0.0.1.evil.example/v1/systemone'), false);
-  assert.equal(jevEndpointAllowed('http://127.0.0.1@evil.example/v1/systemone'), false);
-  assert.equal(jevEndpointAllowed('ftp://127.0.0.1/v1/systemone'), false);
-  assert.equal(jevEndpointAllowed('not a url'), false);
-  assert.equal(jevEndpointAllowed(undefined), false);
-});
-
 test('hash20: stable 20-hex identities that differ for nearby inputs', () => {
   assert.match(hash20(''), /^[0-9a-f]{20}$/);
   assert.equal(hash20('Bash:npm test'), hash20('Bash:npm test'));
@@ -85,40 +76,4 @@ test('hash20: stable 20-hex identities that differ for nearby inputs', () => {
   assert.equal(seen.size, 2000);
   assert.notEqual(hash20('ab'), hash20('ba'));
   assert.notEqual(hash20('测试'), hash20('测验'));
-});
-
-test('modConfig: JEV_FALLBACK_FORMAT=openai-decisions selects the Decisions wire format', () => {
-  const c = modConfig({
-    JEV_API_KEY: 'k1', JEV_BASE_URL: 'http://127.0.0.1:18016/v1/systemone',
-    JEV_ALLOWED_HOSTS: 'api.openai.com',
-    JEV_FALLBACK_API_KEY: 'k2', JEV_FALLBACK_BASE_URL: 'https://api.openai.com/v1/decisions', JEV_FALLBACK_MODEL: 'gpt-6-luna', JEV_FALLBACK_FORMAT: 'openai-decisions',
-  });
-  assert.equal(c.jev?.format, 'systemone');
-  assert.equal(c.jevFallback?.format, 'openai-decisions');
-  assert.equal(c.jevFallback?.model, 'gpt-6-luna');
-  assert.equal(modConfig({ JEV_API_KEY: 'k1', JEV_BASE_URL: 'http://127.0.0.1:1/v1', JEV_FORMAT: 'openai' }).jev?.format, 'systemone', 'only the exact name selects it');
-});
-
-test('modConfig: JEV_FALLBACK_* names a second endpoint under the same host rule', () => {
-  const both = modConfig({
-    JEV_API_KEY: 'k1', JEV_BASE_URL: 'https://maas-api.antdigital.com/v1/systemone', JEV_MODEL: 'lingdt-decision-1.0', JEV_DEADLINE_MS: '3000',
-    JEV_ALLOWED_HOSTS: 'maas-api.antdigital.com',
-    JEV_FALLBACK_API_KEY: 'k2', JEV_FALLBACK_BASE_URL: 'http://127.0.0.1:18016/v1/systemone', JEV_FALLBACK_DEADLINE_MS: '10000',
-  });
-  assert.equal(both.jev?.baseUrl, 'https://maas-api.antdigital.com/v1/systemone');
-  assert.equal(both.jev?.model, 'lingdt-decision-1.0');
-  assert.equal(both.jev?.deadlineMs, 3000);
-  assert.equal(both.jevFallback?.baseUrl, 'http://127.0.0.1:18016/v1/systemone');
-  assert.equal(both.jevFallback?.apiKey, 'k2');
-  assert.equal(both.jevFallback?.model, 'jev-latest');
-  assert.equal(both.jevFallback?.deadlineMs, 10000);
-  assert.equal(both.jevRefusedHost, null);
-  assert.equal(modConfig({ JEV_API_KEY: 'k1', JEV_BASE_URL: 'http://127.0.0.1:18016/v1/systemone' }).jevFallback, null, 'no fallback key: none');
-  const refused = modConfig({
-    JEV_API_KEY: 'k1', JEV_BASE_URL: 'http://127.0.0.1:18016/v1/systemone',
-    JEV_FALLBACK_API_KEY: 'k2', JEV_FALLBACK_BASE_URL: 'https://api.typesafe.ai/v1/systemone',
-  });
-  assert.equal(refused.jevFallback, null);
-  assert.equal(refused.jevRefusedHost, 'api.typesafe.ai');
-  assert.equal(modConfig({ TYPESAFE_API_KEY: 'k', JEV_FALLBACK_BASE_URL: 'http://127.0.0.1:1/v1/systemone' }).jevFallback, null, 'TYPESAFE_API_KEY is the primary key only');
 });

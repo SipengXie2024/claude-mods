@@ -4,6 +4,26 @@ const ALIAS = /^(opus|sonnet|haiku|fable|mythos)(\[1m\])?$/i
 
 const title = (family: string) => family[0]!.toUpperCase() + family.slice(1).toLowerCase()
 
+export type OpenAIModelScale = 'astra' | 'sol-6.1'
+
+/** Magpie 使用 provider/model 标识；Hermes 的 Astra 标识还带有上下文长度。 */
+export function openAIModelScale(model: string | null): OpenAIModelScale | null {
+  const id = model?.split('/').at(-1) ?? ''
+  if (/^gpt-6-astra(?:-900k)?(?:\[1m\])?$/i.test(id)) return 'astra'
+  if (/^gpt-6\.1-sol(?:\[1m\])?$/i.test(id)) return 'sol-6.1'
+  return null
+}
+
+/** Gemini 4 Argon under Magpie's Antigravity provider (`antigravity/gemini-4-argon`). */
+export function isArgon(model: string | null): boolean {
+  return /(?:^|\/)gemini-4-argon(?:-trial)?(?:\[1m\])?$/i.test(model ?? '')
+}
+
+/** jev/ 网关自行设置推理强度，避免重复判断覆盖它的设置。 */
+export function isRoutedModel(model: string): boolean {
+  return !/^jev\//i.test(model) && (/opus|mythos/i.test(model) || openAIModelScale(model) !== null || isArgon(model))
+}
+
 /**
  * A model as the band names it: `claude-opus-5-5` → `Opus 5.5`,
  * `claude-fable-5-1[1m]` → `Fable 5.1 (1M)`, the alias `opus` → `Opus`.

@@ -1,41 +1,28 @@
 import { isEffort, type Effort } from './effort';
-import { DEFAULT_DEADLINE_MS, type ConfidenceMode, type JevClientOptions, type WireFormat } from './jev';
+import { DEFAULT_DEADLINE_MS, DEFAULT_MODEL, type ConfidenceMode, type JevClientOptions } from './jev';
 import { DEEP_DEFAULTS, normalizeBounds, setAblations, setDeepThresholds, setDissatThreshold, type Bounds } from './policy';
 
 /**
- * The mod's settings, read from jev-opus's own `.env` (same keys, same
- * defaults as jev-opus src/config.ts). Only the file counts: the hooks module
- * reads no other environment for these keys.
+ * The mod's settings, read from jev-opus's `.env`. Only the file counts: the
+ * hooks module reads no other environment for these keys.
  */
 export interface ModConfig {
-  /** null without an API key or an allowed JEV_BASE_URL: heuristics only */
-  jev: JevClientOptions | null;
-  /** The stand-in asked when the primary fails (JEV_FALLBACK_*); null when unset or not allowed. */
-  jevFallback: JevClientOptions | null;
-  /** The refused endpoint's host when a key is set but its base URL is unset or not allowed, so the
-   * fallback to heuristics can be reported instead of happening silently. */
-  jevRefusedHost: string | null;
+  /** Jev's client options except the key (OpenAI's Decisions API is the one service) */
+  jev: Omit<JevClientOptions, 'apiKey'>;
+  /** JEV_API_KEY_FILE: the path of the file that holds the OpenAI key; null without one: heuristics only */
+  jevKeyFile: string | null;
+  /** JEV_API_KEY is set: a key of the service jev-opus used before, never read and never sent */
+  staleKey: boolean;
   bounds: Bounds;
   deep: { yes: number; no: number };
   followUp: { mode: 'on' | 'shadow' | null; yes: number; advisor: boolean };
   ablate: string[];
   /** probability that a human prompt's start level moves one step for exploration (JEV_OPUS_EXPLORE) */
   explore: number;
-  /** the model that rewrites the rolling recap after each main-loop turn (JEV_RECAP_MODEL, an alias or id) */
-  recapModel: string;
-  /** an OpenAI-compatible chat endpoint that writes the recap when recapModel gives no text (JEV_RECAP_FALLBACK_*); null unless all three are set and the host is allowed */
-  recapFallback: RecapFallback | null;
-}
-
-export interface RecapFallback {
-  baseUrl: string;
-  apiKey: string;
-  model: string;
 }
 
 /** Default JEV_OPUS_EXPLORE. */
 export const EXPLORE_DEFAULT = 0.1;
-const FALLBACK_DEADLINE_MS = 2_500;
 
 /** KEY=VALUE lines; `#` comments, `export ` prefixes and matching quotes (an inline comment may follow them) allowed. */
 export function parseEnvFile(text: string): Record<string, string> {
@@ -67,81 +54,29 @@ function effort(raw: string | undefined, fallback: Effort): Effort {
   return isEffort(raw) ? raw : fallback;
 }
 
-/** Hosts that stay on machines we run: loopback and the sub2api Docker bridge. */
-export const LOCAL_JEV_HOSTS = ['127.0.0.1', 'localhost', '[::1]', '172.21.0.1'];
-
 /**
- * Whether `url` may receive Jev state (whole prompts and tool output): http(s)
- * to a local host or one listed in `extraHosts` (comma-separated
- * JEV_ALLOWED_HOSTS). Anything else, a missing URL included, keeps Jev off, so
- * a lost or mistyped config never sends a conversation to a hosted API.
+ * The key file's absolute path: `~/` is the home folder, a relative path is
+ * taken from the config folder.
  */
-export function jevEndpointAllowed(url: string | undefined, extraHosts = ''): boolean {
-  if (!url) return false;
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return false;
-  }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
-  const extra = extraHosts.split(',').map((h) => h.trim().toLowerCase()).filter(Boolean);
-  return [...LOCAL_JEV_HOSTS, ...extra].includes(parsed.hostname.toLowerCase());
-}
-
-function endpointHost(url: string): string {
-  if (!url) return '(unset)';
-  try {
-    return new URL(url).host;
-  } catch {
-    return '(invalid)';
-  }
-}
-
-/**
- * One endpoint's client options from its key set: JEV_BASE_URL / JEV_API_KEY /
- * JEV_MODEL / JEV_DEADLINE_MS / JEV_FORMAT (`openai-decisions` for OpenAI's
- * Decisions API, anything else System One) for the primary, the same names with a
- * JEV_FALLBACK_ prefix for the stand-in. Breaker and confidence settings are
- * shared. `refusedHost` is set when a key exists but the URL is not allowed.
- */
-function endpoint(env: Record<string, string>, prefix: '' | 'FALLBACK_'): { options: JevClientOptions | null; refusedHost: string | null } {
-  const apiKey = env[`JEV_${prefix}API_KEY`] || (prefix ? '' : env.TYPESAFE_API_KEY) || '';
-  const baseUrl = env[`JEV_${prefix}BASE_URL`] || '';
-  const allowed = jevEndpointAllowed(baseUrl, env.JEV_ALLOWED_HOSTS);
-  return {
-    options: apiKey && allowed
-      ? {
-        apiKey,
-        baseUrl,
-        model: env[`JEV_${prefix}MODEL`] || 'jev-latest',
-        // Jev sits in the request path, so the budget is small; the fallback is asked only after the primary failed.
-        deadlineMs: int(env[`JEV_${prefix}DEADLINE_MS`], prefix ? FALLBACK_DEADLINE_MS : DEFAULT_DEADLINE_MS),
-        breakerThreshold: int(env.JEV_BREAKER_THRESHOLD, 3, 1),
-        breakerCooldownMs: int(env.JEV_BREAKER_COOLDOWN_MS, 30_000),
-        confidence: (env.JEV_CONFIDENCE === 'server' ? 'server' : 'recompute') as ConfidenceMode,
-        format: (env[`JEV_${prefix}FORMAT`] === 'openai-decisions' ? 'openai-decisions' : 'systemone') as WireFormat,
-      }
-      : null,
-    refusedHost: apiKey && !allowed ? endpointHost(baseUrl) : null,
-  };
-}
-
-function recapFallback(env: Record<string, string>): RecapFallback | null {
-  const baseUrl = env.JEV_RECAP_FALLBACK_BASE_URL?.trim().replace(/\/+$/, '') ?? '';
-  const apiKey = env.JEV_RECAP_FALLBACK_API_KEY?.trim() ?? '';
-  const model = env.JEV_RECAP_FALLBACK_MODEL?.trim() ?? '';
-  return baseUrl && apiKey && model && jevEndpointAllowed(baseUrl, env.JEV_ALLOWED_HOSTS) ? { baseUrl, apiKey, model } : null;
+export function keyFilePath(path: string, home: string, configDir: string): string {
+  if (path.startsWith('~/')) return `${home}/${path.slice(2)}`;
+  return path.startsWith('/') ? path : `${configDir}/${path}`;
 }
 
 export function modConfig(env: Record<string, string>): ModConfig {
-  const primary = endpoint(env, '');
-  const fallback = endpoint(env, 'FALLBACK_');
   const dissat = (env.JEV_OPUS_DISSATISFACTION ?? '').trim().toLowerCase();
   return {
-    jev: primary.options,
-    jevFallback: fallback.options,
-    jevRefusedHost: primary.refusedHost ?? fallback.refusedHost,
+    jev: {
+      model: env.JEV_MODEL?.trim() || DEFAULT_MODEL,
+      // Jev sits in the prompt's path: the deadline bounds how long a prompt waits for it.
+      deadlineMs: int(env.JEV_DEADLINE_MS, DEFAULT_DEADLINE_MS),
+      breakerThreshold: int(env.JEV_BREAKER_THRESHOLD, 3, 1),
+      breakerCooldownMs: int(env.JEV_BREAKER_COOLDOWN_MS, 30_000),
+      confidence: (env.JEV_CONFIDENCE === 'server' ? 'server' : 'recompute') as ConfidenceMode,
+    },
+    // The key is read from its file only: JEV_API_KEY in jev-opus's .env belongs to the service it used before.
+    jevKeyFile: env.JEV_API_KEY_FILE?.trim() || null,
+    staleKey: Boolean(env.JEV_API_KEY?.trim()),
     bounds: normalizeBounds({ min: effort(env.JEV_OPUS_MIN_EFFORT, 'low'), max: effort(env.JEV_OPUS_MAX_EFFORT, 'high') }),
     deep: { yes: unit(env.JEV_OPUS_DEEP_YES, DEEP_DEFAULTS.yes), no: unit(env.JEV_OPUS_DEEP_NO, DEEP_DEFAULTS.no) },
     followUp: {
@@ -152,8 +87,6 @@ export function modConfig(env: Record<string, string>): ModConfig {
     },
     ablate: (env.JEV_OPUS_ABLATE || '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean),
     explore: unit(env.JEV_OPUS_EXPLORE, EXPLORE_DEFAULT),
-    recapModel: env.JEV_RECAP_MODEL?.trim() || 'haiku',
-    recapFallback: recapFallback(env),
   };
 }
 

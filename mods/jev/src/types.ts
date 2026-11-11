@@ -3,9 +3,9 @@ import type { JevResult } from './jev';
 import type { TaskType } from './questions';
 
 /**
- * Jev result plus the fields the validating client adds. On older clients
- * `signals` is absent and every answer is present (treat those as valid);
- * the validating client omits missing/invalid answers instead.
+ * Jev result plus the fields the validating client adds. Without `signals`
+ * every present answer counts as valid; the validating client omits
+ * missing/invalid answers instead.
  */
 export type JevResponse = JevResult & {
   /** per-question evidence quality; undefined means an older client */
@@ -64,10 +64,10 @@ export interface EffortDecision {
   source: 'jev' | 'heuristic' | 'pinned' | 'local';
   jevLatencyMs: number;
   jevError?: string;
-  /** which Jev endpoint answered (or failed last) */
+  /** which Jev service answered (or failed) */
   jevProvider?: string;
-  /** the primary endpoint's error when the fallback was asked */
-  jevFallbackFrom?: string;
+  /** what Jev read: the conversation's message count, and the input tokens OpenAI counted and read from its cache */
+  jevUsage?: { messages: number; inputTokens: number; cachedTokens: number };
   profile?: TaskProfile;
   policyVersion?: string;
   /** versions of the Jev question sets this decision could draw on */
@@ -76,6 +76,6 @@ export interface EffortDecision {
   followUp?: FollowUpRecord;
   /** the start level exploration moved, and the level the policy chose */
   explore?: { p: number; from: Effort; to: Effort };
-  /** a repeat check failure from the previous turn raised this prompt's start */
+  /** a repeat check failure from the previous turn (a subagent's previous run) raised this start */
   carry?: { from: Effort; to: Effort; checks: number };
 }

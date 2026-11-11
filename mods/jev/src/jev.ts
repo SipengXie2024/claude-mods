@@ -1,19 +1,22 @@
 /**
- * TypeSafe Jev System-1 client (port of jev-opus src/jev/client.ts).
+ * Jev client for OpenAI's Decisions API (POST https://api.openai.com/v1/decisions).
  *
- * Wire format:
- *   POST { state, model, questions: { name: { type, instructions, criteria? } } }
- *   →   { model, answers: { name: {...} }, usage: { input_tokens, output_tokens } }
- * An endpoint with format 'openai-decisions' speaks OpenAI's Decisions API
- * (POST /v1/decisions) instead; decisionsRequest and decisionsAnswers
- * translate at the wire, so everything above the client sees System One.
+ *   POST { model, input: [{ role, content }, ...], questions: [{ name, type, ... }] }
+ *   →   { model, answers: [{ name, type, ... }], usage: { input_tokens, input_tokens_details: { cached_tokens } } }
+ *
+ * `input` is the conversation as a message array, newest last: OpenAI reuses
+ * the cached prefix when messages are appended, and does not when the same
+ * text is sent as one string (measured 2026-11-09). decisionsAnswers turns
+ * the answers into the per-question shape validateAnswers checks.
  *
  * Never throws: any transport/validation failure yields `failed: true` with
- * per-question `signals`, so callers can fall back to heuristics. One overall
+ * per-question `signals`, so callers keep their heuristics. One overall
  * deadline bounds the call; a circuit breaker skips the fetch entirely while
  * Jev is failing repeatedly. The network and clock come from the hook that
  * asks (JevIo), since a hooks module has neither fetch nor timers of its own.
  */
+
+import type { JevMessage } from './dialogue';
 
 export type JevQuestion =
   | { type: 'noul'; instructions: string }
@@ -40,53 +43,20 @@ export interface JevResult {
   circuitOpen?: boolean;
   latencyMs: number;
   inputTokens: number;
+  /** input tokens OpenAI read from its prompt cache */
+  cachedTokens: number;
   /** The endpoint that produced this result (JevClientOptions.label). */
   provider?: string;
-  /** Set on a fallback client's result: why the primary was not used. */
-  fallbackFrom?: string;
 }
 
 export interface JevLike {
   readonly enabled: boolean;
-  ask(state: string, questions: Record<string, JevQuestion>): Promise<JevResult>;
+  ask(input: readonly JevMessage[], questions: Record<string, JevQuestion>): Promise<JevResult>;
 }
 
 const clamp01 = (n: number) => Math.min(1, Math.max(0, Number.isFinite(n) ? n : 0));
 const num01 = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1;
 const SCORE_EPSILON = 1e-6;
-
-export function neutralAnswers(questions: Record<string, JevQuestion>): Record<string, JevAnswer> {
-  const out: Record<string, JevAnswer> = {};
-  for (const [name, q] of Object.entries(questions)) {
-    if (q.type === 'noul') out[name] = { kind: 'noul', p: 0.5 };
-    else if (q.type === 'choice') out[name] = { kind: 'choice', choice: Object.keys(q.criteria)[0] ?? '', confidence: 0, probabilities: {} };
-    else out[name] = { kind: 'score', score: (q.criteria.length - 1) / 2, confidence: 0, probabilities: {} };
-  }
-  return out;
-}
-
-export function parseAnswers(raw: unknown, questions: Record<string, JevQuestion>): Record<string, JevAnswer> {
-  const all = (raw ?? {}) as Record<string, Record<string, unknown> | undefined>;
-  const neutral = neutralAnswers(questions);
-  const out: Record<string, JevAnswer> = {};
-  for (const [name, q] of Object.entries(questions)) {
-    const a = all[name];
-    if (!a) { out[name] = neutral[name]!; continue; }
-    const probabilities = (typeof a.probabilities === 'object' && a.probabilities ? a.probabilities : {}) as Record<string, number>;
-    if (q.type === 'noul') {
-      out[name] = { kind: 'noul', p: clamp01(Number(a.noul ?? 0.5)) };
-    } else if (q.type === 'choice') {
-      const keys = Object.keys(q.criteria);
-      const choice = typeof a.choice === 'string' && keys.includes(a.choice) ? a.choice : keys[0] ?? '';
-      out[name] = { kind: 'choice', choice, confidence: clamp01(Number(a.confidence ?? 0)), ...(a.confidence === undefined ? { confidenceMissing: true as const } : {}), probabilities };
-    } else {
-      const top = q.criteria.length - 1;
-      const score = Math.min(top, Math.max(0, Number(a.score ?? top / 2)));
-      out[name] = { kind: 'score', score: Number.isFinite(score) ? score : top / 2, confidence: clamp01(Number(a.confidence ?? 0)), ...(a.confidence === undefined ? { confidenceMissing: true as const } : {}), probabilities };
-    }
-  }
-  return out;
-}
 
 export type ConfidenceMode = 'recompute' | 'server';
 
@@ -173,18 +143,19 @@ export function validateAnswers(
   return { answers, signals };
 }
 
-/** The request and response shape an endpoint speaks (JEV_FORMAT / JEV_FALLBACK_FORMAT). */
-export type WireFormat = 'systemone' | 'openai-decisions';
+/** Lone surrogates (e.g. from a naive slice upstream) make a request body invalid; replace them. */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+const wellFormed = (s: string) => s.replace(LONE_SURROGATE, '\uFFFD');
 
 /**
- * A System One ask as an OpenAI Decisions request: noul becomes a predicate,
- * a choice's criteria become its choices in the order the question set lists
- * them (the order shifts the probabilities), a score's criteria its levels.
+ * An ask as an OpenAI Decisions request: noul becomes a predicate, a choice's
+ * criteria become its choices in the order the question set lists them (the
+ * order shifts the probabilities), a score's criteria its levels.
  */
-export function decisionsRequest(state: string, model: string, questions: Record<string, JevQuestion>): unknown {
+export function decisionsRequest(input: readonly JevMessage[], model: string, questions: Record<string, JevQuestion>): unknown {
   return {
     model,
-    input: state,
+    input: input.map((m) => ({ role: m.role, content: wellFormed(m.content) })),
     questions: Object.entries(questions).map(([name, q]) =>
       q.type === 'noul' ? { name, type: 'predicate', instructions: q.instructions }
         : q.type === 'choice' ? { name, type: 'choice', instructions: q.instructions, choices: Object.entries(q.criteria).map(([value, description]) => ({ value, description })) }
@@ -199,8 +170,8 @@ function probabilityMap(raw: unknown): unknown {
 }
 
 /**
- * OpenAI Decisions answers (an array, one entry per question) in System
- * One's shape, for validateAnswers. A refusal or an unknown answer type is
+ * OpenAI Decisions answers (an array, one entry per question) in the
+ * per-question shape validateAnswers checks. A refusal or an unknown answer type is
  * left out, so its question counts as missing.
  */
 export function decisionsAnswers(raw: unknown): Record<string, unknown> {
@@ -227,11 +198,13 @@ export interface JevIo {
   sleep(ms: number, signal: AbortSignal): Promise<void>;
 }
 
+/** The one Jev service: OpenAI's Decisions API. */
+export const DECISIONS_URL = 'https://api.openai.com/v1/decisions';
+export const DEFAULT_MODEL = 'gpt-6-luna';
+
 export interface JevClientOptions {
   apiKey: string;
-  baseUrl: string;
-  /** Name recorded on each result (default: the endpoint's host). */
-  label?: string;
+  /** Decisions model (JEV_MODEL, default gpt-6-luna). */
   model?: string;
   /** Overall deadline for one ask(). */
   deadlineMs?: number;
@@ -241,54 +214,41 @@ export interface JevClientOptions {
   breakerCooldownMs?: number;
   /** Where answer confidence comes from (JEV_CONFIDENCE). */
   confidence?: ConfidenceMode;
-  /** The wire format the endpoint speaks (default 'systemone'). */
-  format?: WireFormat;
 }
 
 const TIMEOUT = 'timeout' as const;
 const SLEEP_REJECTED = 'sleep-rejected' as const;
 
-/** The primary endpoint's deadline (JEV_DEADLINE_MS): StartLux answers 89% of asks within 4 s, 95.5% within 8 s. */
-export const DEFAULT_DEADLINE_MS = 6_000;
+/**
+ * The deadline of one ask (JEV_DEADLINE_MS). Measured on gpt-6-luna
+ * (2026-11-09): 54K input tokens 0.45 s, 214K 1.2 s, 422K 3.2 s, 861K 8.3 s;
+ * Jev's input is a part of Claude Code's context (at most 872K tokens under
+ * claude-magpie), so 10 s covers the largest one.
+ */
+export const DEFAULT_DEADLINE_MS = 10_000;
 
-function hostOf(url: string): string {
-  try {
-    return new URL(url).host;
-  } catch {
-    return url;
-  }
-}
-
-/** A Jev endpoint, or a chain of them, that a hook binds its I/O to. */
-export interface JevSource {
-  readonly enabled: boolean;
-  bind(io: JevIo): JevLike;
-}
+/** Recorded on each result: which service answered. */
+const PROVIDER = new URL(DECISIONS_URL).host;
 
 export class JevClient {
   private readonly apiKey: string;
-  private readonly baseUrl: string;
-  readonly label: string;
+  readonly label = PROVIDER;
   private readonly model: string;
   private readonly deadlineMs: number;
   private readonly breakerThreshold: number;
   private readonly breakerCooldownMs: number;
   private readonly confidenceMode: ConfidenceMode;
-  private readonly format: WireFormat;
   private consecutiveFailures = 0;
   private breakerOpenUntil = 0;
   private probing = false;
 
   constructor(opts: JevClientOptions) {
     this.apiKey = opts.apiKey;
-    this.baseUrl = opts.baseUrl;
-    this.label = opts.label ?? hostOf(opts.baseUrl);
-    this.model = opts.model ?? 'jev-latest';
+    this.model = opts.model ?? DEFAULT_MODEL;
     this.deadlineMs = opts.deadlineMs ?? DEFAULT_DEADLINE_MS;
     this.breakerThreshold = Math.max(1, opts.breakerThreshold ?? 3);
     this.breakerCooldownMs = opts.breakerCooldownMs ?? 30_000;
     this.confidenceMode = opts.confidence ?? 'recompute';
-    this.format = opts.format ?? 'systemone';
   }
 
   get enabled(): boolean {
@@ -297,7 +257,7 @@ export class JevClient {
 
   /** The client with one hook's I/O bound, as the router asks it. */
   bind(io: JevIo): JevLike {
-    return { enabled: this.enabled, ask: (state, questions) => this.ask(state, questions, io) };
+    return { enabled: this.enabled, ask: (input, questions) => this.ask(input, questions, io) };
   }
 
   private noteSuccess(): void {
@@ -315,28 +275,30 @@ export class JevClient {
     this.probing = false;
   }
 
-  async ask(state: string, questions: Record<string, JevQuestion>, io: JevIo): Promise<JevResult> {
-    if (!this.enabled) {
-      return { answers: {}, signals: missingSignals(questions), failed: true, error: 'JEV_API_KEY not set', latencyMs: 0, inputTokens: 0, provider: this.label };
-    }
+  private failure(questions: Record<string, JevQuestion>, error: string, latencyMs: number, extra: Partial<JevResult> = {}): JevResult {
+    return { answers: {}, signals: missingSignals(questions), failed: true, error, latencyMs, inputTokens: 0, cachedTokens: 0, provider: this.label, ...extra };
+  }
+
+  async ask(input: readonly JevMessage[], questions: Record<string, JevQuestion>, io: JevIo): Promise<JevResult> {
+    if (!this.enabled) return this.failure(questions, 'no key', 0);
     const start = await io.now();
     // Circuit breaker: while open, fail without fetching. After the cooldown,
     // the first real call becomes the single recovery probe.
     if (this.breakerOpenUntil > 0 && (start < this.breakerOpenUntil || this.probing)) {
-      return { answers: {}, signals: missingSignals(questions), failed: true, error: 'circuit open', circuitOpen: true, latencyMs: 0, inputTokens: 0, provider: this.label };
+      return this.failure(questions, 'circuit open', 0, { circuitOpen: true });
     }
     const probe = this.breakerOpenUntil > 0;
     if (probe) this.probing = true;
     // A probe that ends without noteSuccess or noteFailure (its hook's clock
     // rejected) must not leave the breaker probing, and so open, for good.
     try {
-      return await this.attempt(state, questions, io, start);
+      return await this.attempt(input, questions, io, start);
     } finally {
       if (probe) this.probing = false;
     }
   }
 
-  private async attempt(state: string, questions: Record<string, JevQuestion>, io: JevIo, start: number): Promise<JevResult> {
+  private async attempt(input: readonly JevMessage[], questions: Record<string, JevQuestion>, io: JevIo, start: number): Promise<JevResult> {
     let lastError = 'request failed';
     let signals = missingSignals(questions);
     // $.http.fetch takes no signal: the deadline is a race, and a fetch that
@@ -344,10 +306,10 @@ export class JevClient {
     const stop = new AbortController();
     const deadline: Promise<typeof TIMEOUT | typeof SLEEP_REJECTED> = io.sleep(this.deadlineMs, stop.signal).then(() => TIMEOUT, () => SLEEP_REJECTED);
     try {
-      const fetched = io.fetch(this.baseUrl, {
+      const fetched = io.fetch(DECISIONS_URL, {
         method: 'POST',
         headers: { Authorization: `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(this.format === 'openai-decisions' ? decisionsRequest(state, this.model, questions) : { state, model: this.model, questions }),
+        body: JSON.stringify(decisionsRequest(input, this.model, questions)),
       });
       fetched.catch(() => {});
       const res = await Promise.race([fetched, deadline]);
@@ -360,15 +322,15 @@ export class JevClient {
       } else if (!res.ok) {
         lastError = `Jev HTTP ${res.status}: ${res.text.slice(0, 200)}`;
       } else {
-        const data = JSON.parse(res.text) as { answers?: unknown; usage?: { input_tokens?: number } };
-        const raw = this.format === 'openai-decisions' ? decisionsAnswers(data.answers) : data.answers;
-        const parsed = validateAnswers(raw, questions, { confidence: this.confidenceMode });
+        const data = JSON.parse(res.text) as { answers?: unknown; usage?: { input_tokens?: number; input_tokens_details?: { cached_tokens?: number } } };
+        const parsed = validateAnswers(decisionsAnswers(data.answers), questions, { confidence: this.confidenceMode });
         signals = parsed.signals;
         const inputTokens = data.usage?.input_tokens ?? 0;
+        const cachedTokens = data.usage?.input_tokens_details?.cached_tokens ?? 0;
         const latencyMs = Math.max(0, (await io.now()) - start);
         if (Object.values(signals).includes('valid')) {
           this.noteSuccess();
-          return { answers: parsed.answers, signals, failed: false, latencyMs, inputTokens, provider: this.label };
+          return { answers: parsed.answers, signals, failed: false, latencyMs, inputTokens, cachedTokens, provider: this.label };
         }
         lastError = 'no valid answers in response';
       }
@@ -379,34 +341,6 @@ export class JevClient {
     }
     const end = await io.now();
     this.noteFailure(end);
-    return { answers: {}, signals, failed: true, error: lastError, latencyMs: Math.max(0, end - start), inputTokens: 0, provider: this.label };
-  }
-}
-
-/**
- * A primary client with a stand-in. The fallback is asked only after the
- * primary's result is `failed` (deadline, HTTP error, no valid answers, or its
- * circuit open), so one ask costs at most both deadlines. Each client keeps
- * its own circuit breaker: a primary that is down is skipped at once and the
- * fallback answers alone until the primary's probe succeeds. The result is the
- * fallback's, carrying the primary's error as `fallbackFrom` and the summed
- * latency.
- */
-export class JevFallback implements JevSource {
-  constructor(private readonly primary: JevClient, private readonly fallback: JevClient) {}
-
-  get enabled(): boolean {
-    return this.primary.enabled || this.fallback.enabled;
-  }
-
-  bind(io: JevIo): JevLike {
-    return { enabled: this.enabled, ask: (state, questions) => this.ask(state, questions, io) };
-  }
-
-  async ask(state: string, questions: Record<string, JevQuestion>, io: JevIo): Promise<JevResult> {
-    const first = await this.primary.ask(state, questions, io);
-    if (!first.failed) return first;
-    const second = await this.fallback.ask(state, questions, io);
-    return { ...second, latencyMs: first.latencyMs + second.latencyMs, fallbackFrom: first.error ?? 'request failed' };
+    return { ...this.failure(questions, lastError, Math.max(0, end - start)), signals };
   }
 }
