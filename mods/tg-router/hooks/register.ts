@@ -1,6 +1,7 @@
-import type { EngineInterface, Register, Timer } from 'claude-code'
+import type { EngineInterface, Next, PromptSubmitInput, Register, Timer } from 'claude-code'
 import { describeTool, parseChannelTag, renderFinal, renderLive, type EndReason, type Turn } from '../src/card'
-import { CHANNEL_SERVER, DISPATCH, FORWARD, routerDeny, TERMINAL_CHAT } from '../src/gate'
+import { CHANNEL_SERVER, DISPATCH, FORWARD, FORWARD_LONG, routerDeny, TERMINAL_CHAT } from '../src/gate'
+import { channelBody, indexPath, MAGPIE_GATEWAY, messageKind, ownerOf, RATING_TEXT, readIndex, terminalHintLine, workerHintLine, workerOfAgent, type MagpieIndex } from '../src/magpie'
 import { answerNotPosted, followUp, handedBack, lostWorker, routerContext, takeOver, terminalAnswer, terminalContext, workerBrief } from '../src/prompts'
 import * as tasks from '../src/tasks'
 import * as tg from '../src/telegram'
@@ -24,6 +25,11 @@ import type { TgIo } from '../src/telegram'
 // completion notice (its answer is its turn.complete); only a run woken later
 // does, and that notice is dropped. (A `system` notice row from
 // $.session.append is kept in the transcript but not drawn in the terminal.)
+//
+// Under claude-magpie (ANTHROPIC_BASE_URL is the Magpie gateway) the magpie-tasks plugin sits inside
+// this mod: workers start without a fixed model and with a request header magpie-tasks routes by;
+// follow-ups go to the executor magpie-tasks' index names for the task; replies to magpie-tasks'
+// own messages, to tasks it turned into long tasks, and scores (评分 N) are handed on to it.
 
 export const SHOW_AFTER = 30_000
 export const EDIT_EVERY = 10_000
@@ -74,10 +80,11 @@ function enqueue(t: Tracked, op: () => Promise<void>): Promise<void> {
 
 function io($: EngineInterface): TgIo {
   return {
+    routerStateDir: () => $.env.get('TG_ROUTER_STATE_DIR'),
     stateDir: () => $.env.get('TELEGRAM_STATE_DIR'),
     home: () => $.env.get('HOME'),
     read: async (path) => String(await $.fs.read(path)),
-    fetch: (url, init) => $.http.fetch(url, init),
+    run: (argv, init) => $.process.run(argv, init),
     log: async (line) => {
       try {
         await $.ui.log(`tg-router: ${line}`, { to: 'debug' })
@@ -87,6 +94,24 @@ function io($: EngineInterface): TgIo {
 }
 
 const kv = ($: EngineInterface): tasks.Kv => ({ get: (k) => $.store.get(k), set: (k, v) => $.store.set(k, v) })
+
+/** Whether this session runs under claude-magpie; set at session.start, or on first use after a reload. */
+let magpie: boolean | null = null
+async function magpieActive($: EngineInterface): Promise<boolean> {
+  magpie ??= (await $.env.get('ANTHROPIC_BASE_URL')) === MAGPIE_GATEWAY
+  return magpie
+}
+
+/** magpie-tasks' Telegram index, read afresh: magpie-tasks writes it from other hooks and sessions. */
+async function magpieIndex($: EngineInterface): Promise<MagpieIndex> {
+  const path = indexPath((await $.env.get('HOME')) ?? '', await $.env.get('MAGPIE_TASKS_STATE_DIR'))
+  return readIndex({ exists: (p) => $.fs.exists(p), read: async (p) => String(await $.fs.read(p)) }, path)
+}
+
+/** Whether magpie-tasks turned the task of worker `name` into a long task, led by an architect session. */
+async function isLong($: EngineInterface, name: string): Promise<boolean> {
+  return (await magpieActive($)) && ownerOf(await magpieIndex($), name)?.long === true
+}
 
 function clip(text: string): string {
   return text.length <= MAX_TEXT ? text : `${text.slice(0, MAX_TEXT)}…（后面还有 ${text.length - MAX_TEXT} 字，见终端）`
@@ -167,6 +192,11 @@ async function taskFor($: EngineInterface, agentId: string): Promise<tasks.Task 
   const row = (await $.agent.list()).find((a) => a.id === agentId)
   const task = row?.name ? await tasks.byName(kv($), row.name) : undefined
   if (!task) {
+    // an executor magpie-tasks put in the worker's place answers under the worker's task; the
+    // task keeps the worker's own loop id
+    const worker = (await magpieActive($)) ? workerOfAgent(await magpieIndex($), agentId) : undefined
+    const replaced = worker ? await tasks.byName(kv($), worker) : undefined
+    if (replaced) return { ...replaced, agentId }
     notWorkers.add(agentId)
     return undefined
   }
@@ -174,13 +204,20 @@ async function taskFor($: EngineInterface, agentId: string): Promise<tasks.Task 
   return { ...task, agentId }
 }
 
-type DispatchArgs = { chat_id?: unknown; message_id?: unknown; title?: unknown; ack?: unknown }
+type DispatchArgs = { chat_id?: unknown; message_id?: unknown; title?: unknown; ack?: unknown; model?: unknown; model_reason?: unknown }
 
 async function dispatch($: EngineInterface, a: DispatchArgs): Promise<string> {
   const messageId = Number(a.message_id)
   const title = typeof a.title === 'string' ? a.title.trim() : ''
   const ack = typeof a.ack === 'string' ? a.ack.trim() : ''
   if (!title || !ack) throw new Error('dispatch 需要 title 和 ack')
+  const model = typeof a.model === 'string' ? a.model.trim() : ''
+  // one line, no closing bracket: magpie-tasks reads the reason up to the first "]"
+  const reason = typeof a.model_reason === 'string' ? a.model_reason.replace(/\s+/g, ' ').replace(/]/g, '）').trim() : ''
+  if (Boolean(model) !== Boolean(reason)) throw new Error('dispatch 的 model 和 model_reason 要一起给（model_reason 写用户要求这个模型的原话），或者都不给')
+  const magpieMode = await magpieActive($)
+  // outside claude-magpie every worker runs on WORKER_MODEL; a chosen model exists only there
+  if (model && !magpieMode) throw new Error('dispatch 的 model 只在 claude-magpie 下可用；不给 model，worker 用默认模型')
   const key = reqKey(String(a.chat_id), messageId)
   const req = requests.get(key)
   if (!req) throw new Error(`没有等待派活的 Telegram 消息 ${key}（只能派发本次会话收到、还没派过的消息）`)
@@ -189,8 +226,17 @@ async function dispatch($: EngineInterface, a: DispatchArgs): Promise<string> {
   // the task exists before the worker starts, so even a first run that ends at once finds it
   await tasks.create(kv($), { name, title, chatId: req.chatId, rootId: messageId, request: req.text, messageIds: [messageId], createdAt: now })
   const terminal = req.chatId === TERMINAL_CHAT
+  // under claude-magpie, magpie-tasks routes the model by the header; a model the person named
+  // travels in the brief as [model <id>] (the Agent input takes only aliases) with their words as the reason
+  const prompt = magpieMode
+    ? [
+        `[magpie-tasks-request daily chat=${req.chatId} message=${messageId} worker=${name}]`,
+        ...(model ? [`[model ${model}]`, `[model-reason user: ${reason}]`] : []),
+        workerBrief(title, req.text, terminal, true),
+      ].join('\n')
+    : workerBrief(title, req.text, terminal)
   const spawned = await $.agent
-    .spawn({ prompt: workerBrief(title, req.text, terminal), description: title, name, model: WORKER_MODEL })
+    .spawn({ prompt, description: title, name, ...(magpieMode ? {} : { model: WORKER_MODEL }) })
     .catch(async (err) => {
       await tasks.remove(kv($), name)
       throw err
@@ -217,7 +263,10 @@ async function dispatch($: EngineInterface, a: DispatchArgs): Promise<string> {
  */
 async function deliver($: EngineInterface, owner: tasks.Task, req: Request, now: number): Promise<boolean> {
   await tasks.addFollowUp(kv($), owner.name, req.messageId, req.text, now)
-  const sent = await $.session.send({ to: owner.name, text: followUp(req.messageId, req.text) })
+  // magpie-tasks may have put another executor in the worker's place
+  const current = (await magpieActive($)) ? ownerOf(await magpieIndex($), owner.name) : undefined
+  const to = current && current.ownerAgentId !== owner.agentId ? { agentId: current.ownerAgentId } : owner.name
+  const sent = await $.session.send({ to, text: followUp(req.messageId, req.text) })
   if (sent.isDelivered) {
     requests.delete(reqKey(req.chatId, req.messageId))
     await tasks.setState(kv($), owner.name, 'running', now)
@@ -239,6 +288,10 @@ async function forward($: EngineInterface, a: ForwardArgs): Promise<string> {
   if (!req) throw new Error(`没有等待处理的 Telegram 消息 ${key}`)
   const owner = typeof a.worker === 'string' ? await tasks.byName(kv($), a.worker.trim()) : undefined
   if (!owner || owner.chatId !== req.chatId || owner.state === 'lost') throw new Error(`这个聊天里没有名为 ${String(a.worker)} 的未结束任务`)
+  if (await isLong($, owner.name)) {
+    const taskId = ownerOf(await magpieIndex($), owner.name)!.taskId
+    throw new Error(`「${owner.title}」已转为长期任务，消息要交给它的架构师：调用 ${FORWARD_LONG}，task 为 ${taskId}`)
+  }
   const now = await $.clock.now()
   if (!(await deliver($, owner, req, now))) {
     return `${lostWorker(owner.title)} Call ${DISPATCH} with chat_id ${req.chatId} and message_id ${req.messageId}.`
@@ -291,6 +344,11 @@ async function ensureTools($: EngineInterface): Promise<void> {
           message_id: { type: 'string', description: 'message_id of the Telegram message that holds the request' },
           title: { type: 'string', description: 'a short Chinese title, a few words' },
           ack: { type: 'string', description: 'one Chinese sentence for the person: the object and the expected result' },
+          // a chosen model exists only under claude-magpie (magpie-tasks routes it)
+          ...((await magpieActive($)) ? {
+            model: { type: 'string', description: 'only when the person explicitly asks for a model: its model ID; give model_reason with it' },
+            model_reason: { type: 'string', description: 'with model: the person\'s own words asking for that model' },
+          } : {}),
         },
         required: ['chat_id', 'message_id', 'title', 'ack'],
       },
@@ -315,9 +373,33 @@ async function ensureTools($: EngineInterface): Promise<void> {
   toolsReady = true
 }
 
+/**
+ * Leaves a channel message to magpie-tasks, inside this mod: a reply to one of its messages, a reply
+ * to a task it turned into a long task, or a score. `worker` names this mod's task the message
+ * replies to, for magpie-tasks to find it. Should magpie-tasks pass the message on rather than drop
+ * it, the Router reads it as any other request, with its context, and may dispatch it.
+ */
+async function handOn($: EngineInterface, e: PromptSubmitInput, next: Next<'prompt.submit'>, req: Request, now: number, worker: string | undefined) {
+  const key = reqKey(req.chatId, req.messageId)
+  requests.set(key, req)
+  armed = { ...req, at: now }
+  const context = [
+    ...(e.context ?? []),
+    routerContext(await tasks.openTasks(kv($), req.chatId), now, true),
+    ...(worker ? [workerHintLine(worker)] : []),
+  ]
+  const r = await next({ ...e, context })
+  if (r.drop !== undefined) {
+    requests.delete(key)
+    if (armed?.chatId === req.chatId && armed.messageId === req.messageId) armed = null
+  }
+  return r
+}
+
 export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
     const out = await next(e)
+    magpie = (await $.env.get('ANTHROPIC_BASE_URL')) === MAGPIE_GATEWAY
     await ensureTools($)
     inbox = await inboxDir($)
     await tasks.prune(kv($), await $.clock.now())
@@ -346,7 +428,8 @@ export const register: Register = (on) => {
       while (requests.has(reqKey(TERMINAL_CHAT, messageId))) messageId++
       requests.set(reqKey(TERMINAL_CHAT, messageId), { chatId: TERMINAL_CHAT, messageId, text: e.text })
       const open = await tasks.openTasks(kv($), TERMINAL_CHAT)
-      return next({ ...e, context: [...(e.context ?? []), terminalContext(messageId, open, now)] })
+      const magpieMode = await magpieActive($)
+      return next({ ...e, context: [...(e.context ?? []), terminalContext(messageId, open, now, magpieMode), ...(magpieMode ? [terminalHintLine(messageId)] : [])] })
     }
     // a follow-up a worker handed back, resubmitted by handBack below
     const handed = o?.kind === 'plugin' && o.name === PLUGIN
@@ -365,17 +448,23 @@ export const register: Register = (on) => {
 
     // a handed-back follow-up still replies to its task's message: it must not go back to that worker
     const owner = !handed && tag.replyTo !== undefined ? await tasks.byMessage(kv($), tag.chatId, tag.replyTo) : undefined
+    if (!handed && (await magpieActive($))) {
+      const index = await magpieIndex($)
+      const kind = tag.replyTo !== undefined ? messageKind(index, tag.chatId, tag.replyTo) : undefined
+      const long = owner !== undefined && ownerOf(index, owner.name)?.long === true
+      if (kind !== undefined || long || RATING_TEXT.test(channelBody(e.text))) return handOn($, e, next, req, now, owner?.name)
+    }
     if (owner) {
       if (await deliver($, owner, req, now)) return { drop: `tg-router: 已转给 worker（${owner.title}）` }
       await tg.send(io($), tag.chatId, `这件事（${owner.title}）原来的 worker 已经不在了，可能是会话重启过。已转给前台重新派活。`, tag.messageId, true)
       armed = { ...requests.get(reqKey(tag.chatId, tag.messageId))!, at: now }
-      return next({ ...e, context: [...(e.context ?? []), routerContext(await tasks.openTasks(kv($), tag.chatId), now), lostWorker(owner.title)] })
+      return next({ ...e, context: [...(e.context ?? []), routerContext(await tasks.openTasks(kv($), tag.chatId), now, await magpieActive($)), lostWorker(owner.title)] })
     }
 
     // handBack already holds the follow-up's own text for dispatch
     if (!handed) requests.set(reqKey(tag.chatId, tag.messageId), req)
     armed = { ...req, at: now }
-    return next({ ...e, context: [...(e.context ?? []), routerContext(await tasks.openTasks(kv($), tag.chatId), now)] })
+    return next({ ...e, context: [...(e.context ?? []), routerContext(await tasks.openTasks(kv($), tag.chatId), now, await magpieActive($))] })
   })
 
   on('turn.start', async ($, e, next) => {
@@ -392,6 +481,9 @@ export const register: Register = (on) => {
   })
 
   on('tool.call', async ($, e, next) => {
+    // magpie-tasks starts the acceptance, diagnosis and hand-over subagents of daily tasks itself;
+    // its $.agent.spawn reaches this hook as an Agent call of the main conversation.
+    if (e.tool === 'Agent' && next.origin.plugin === 'magpie-tasks') return next(e)
     const deny = routerDeny(e as never, inbox ?? (await inboxDir($)))
     if (deny) return { deny }
     // registered tools: the engine's types list built-in names only

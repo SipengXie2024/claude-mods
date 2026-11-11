@@ -737,6 +737,11 @@ bot.command('status', async ctx => {
 // Security mirrors the text-reply path: allowFrom must contain the sender.
 bot.on('callback_query:data', async ctx => {
   const data = ctx.callbackQuery.data
+  const rate = /^rate:([1-5]|skip)$/.exec(data)
+  if (rate) {
+    await handleRating(ctx, rate[1]!)
+    return
+  }
   const m = /^perm:(allow|deny|more):([a-km-z]{5})$/.exec(data)
   if (!m) {
     await ctx.answerCallbackQuery().catch(() => {})
@@ -790,6 +795,42 @@ bot.on('callback_query:data', async ctx => {
     await ctx.editMessageText(`${msg.text}\n\n${label}`).catch(() => {})
   }
 })
+
+// Rating buttons magpie-tasks puts under its daily rating invitation: callback data `rate:<1-5>` or
+// `rate:skip`. A score reaches the session as the person's reply to the invitation carrying the bare
+// digit the invitation asks for; the buttons give way to the choice, so one invitation is rated once.
+// A button press has no message of its own, so the invitation's message_id stands in for it.
+async function handleRating(ctx: Context, choice: string): Promise<void> {
+  const access = loadAccess()
+  const senderId = String(ctx.from!.id)
+  if (!access.allowFrom.includes(senderId)) {
+    await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+    return
+  }
+  const msg = ctx.callbackQuery?.message
+  if (!msg) {
+    await ctx.answerCallbackQuery({ text: 'The message is no longer available.' }).catch(() => {})
+    return
+  }
+  const label = choice === 'skip' ? '已跳过' : `已评分 ${choice}`
+  await ctx.answerCallbackQuery({ text: label }).catch(() => {})
+  if ('text' in msg && msg.text) await ctx.editMessageText(`${msg.text}\n\n${label}`).catch(() => {})
+  if (choice === 'skip') return
+  void mcp.notification({
+    method: 'notifications/claude/channel',
+    params: {
+      content: choice,
+      meta: {
+        chat_id: String(msg.chat.id),
+        message_id: String(msg.message_id),
+        reply_to_message_id: String(msg.message_id),
+        user: ctx.from!.username ?? senderId,
+        user_id: senderId,
+        ts: new Date().toISOString(),
+      },
+    },
+  })
+}
 
 bot.on('message:text', async ctx => {
   await handleInbound(ctx, ctx.message.text, undefined)

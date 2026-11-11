@@ -3,12 +3,20 @@
 A single long-running Claude Code session, reachable from a Telegram chat, that
 works as a Router: it hands each request to a background worker, so several
 requests run at once and a new message never waits for the last one to finish.
+It starts through `claude-magpie` and runs on Opus 5.5; the
+[magpie-tasks](../../mods/magpie-tasks) plugin picks each worker's model and
+thinking effort, checks and integrates its result, and connects the chat to the
+long tasks that run in their own architect sessions.
 
 ```
-phone ──Telegram──▶ claude-telegram (resident pane, cwd $HOME)
+phone ──Telegram──▶ claude-telegram (resident pane, cwd $HOME, claude-magpie, Opus 5.5)
                       ├─ tg-channel: messages in (with the id of the message they reply to), replies out
                       ├─ tg-router: dispatch, follow-up routing, answers and progress cards
-                      │    └─ one background worker (Opus subagent) per request
+                      │    └─ magpie-tasks (inside tg-router): model per worker by routing rules,
+                      │         acceptance and integration, decisions, scores
+                      │         └─ one background worker (subagent) per request, plus its checkers
+                      ├─ long tasks: messages go to each task's architect session (claude --bg),
+                      │    its answers come back as replies
                       └─ herdr / tmux: look at and steer the other agent panes
 ```
 
@@ -37,6 +45,61 @@ a known thread go straight to their worker).
 
 Tasks are kept in the mod's store and dropped 14 days after their last message.
 
+## Models, checks and integration (magpie-tasks)
+
+The Router's main loop runs on Opus 5.5 with JEV setting its effort per message.
+A worker's model is not fixed: magpie-tasks asks Jev which routing rule the
+request fits and starts the worker on that rule's model and effort, and tells
+you in one silent reply, e.g. `模型：Opus 5.5 · xhigh · 规则 code-change（Jev 置信度 0.82；需要深入推理）`.
+When you ask for a model yourself ("用 Sol 6.1 做"), the Router passes it to
+`dispatch` with your words as the reason, and that model is used as given. A
+request that fits no rule first gets an assessment worker that recommends a
+model; your reply confirms it, and an executor starts on the confirmed model.
+
+A worker that changes a project first asks magpie-tasks for a worktree
+(`open_worktree`) and works only there. It ends each answer with a status line.
+When it reports done, an independent acceptance worker reruns its verification
+and checks the result against your request once; on a pass the change is
+applied to the project's working tree (no commit, no push) and you get the
+files and the verification under your request. A failed check goes back to the
+worker once, and the fixed result waits for your yes before it is applied. A
+worker that reports itself blocked gets one independent diagnosis, which may
+continue it, move it to another model, or ask you. Replies to magpie-tasks'
+own messages reach whichever agent now answers for the task.
+
+## Long tasks
+
+Every interactive `claude-magpie` window becomes a long task with an architect
+session of its own (see magpie-tasks). From the chat:
+
+- **A reply to a long task's message** goes straight to its architect, and the
+  architect's answer comes back as a reply. A message that replies to nothing
+  but continues a long task is forwarded by the Router (`forward_long`); the
+  Router's context lists the open long tasks. A stopped architect session is
+  resumed with the message.
+- **Questions a long task needs you to decide** (a file conflict between two of
+  its workers, an integration conflict, no progress, an interruption) arrive as
+  messages; your reply is read as an answer and carried out in the architect's
+  session before the architect reads it.
+- **A daily task that turns into design work**: the Router asks magpie-tasks
+  for an architect recommendation (`recommend_architect`), discusses it with
+  you, and after you confirm a model turns the task into a long task
+  (`promote_task`), keeping its ID, messages and worktree. You get
+  `已转为长期任务，架构师 <model>：claude attach <id>`.
+
+## Scores
+
+Once a day, at 21:00 local time, one task completed that day gets an
+invitation under its completion message, with buttons 1–5 and 跳过:
+`可以给「…」打个分吗？点下面的分数，或回复 1–5；不想评就点“跳过”。`
+Tap a score or reply with a digit; 跳过 or no answer skips it. You can also score any task at any time
+by replying `评分 N` to one of its messages. Every two weeks magpie-tasks looks
+at the last two weeks of records and sends a calibration reminder only when a
+routing rule shows the same problem in at least three tasks (rework after a
+failed check, diagnosis or a model change, a score of 2 or lower, a result you
+called unsuitable), when a substitute model succeeded at least three times
+where the rule's model had not, or when you stated an opinion about a model.
+
 ## Typing in the session's own terminal
 
 A message typed in the `claude-telegram` pane (or sent to it through Remote
@@ -57,7 +120,8 @@ free for the next message. Nothing goes to Telegram for it:
 
 ## The Router does no work
 
-`tg-router` refuses every main-loop tool call except `dispatch`, the channel's
+`tg-router` refuses every main-loop tool call except `dispatch`, `forward`,
+magpie-tasks' `forward_long`, `recommend_architect` and `promote_task`, the channel's
 tools, `TaskStop`, `ToolSearch`, `SendMessage`, Read of a photo in the channel's
 inbox, and Bash whose every command is `herdr` or `tmux` (piped only into
 `head`, `tail`, `grep`, `wc`, `sort`, `cut`; no `$(…)`, backticks, `>`, `&`,
@@ -65,7 +129,8 @@ inbox, and Bash whose every command is `herdr` or `tmux` (piped only into
 `if-shell`, `pipe-pane`, `source-file`).
 DeepSeek's ablation saw a single session with a subagent tool keep the work for
 itself under a neutral prompt in 5 of 5 runs, so this rule is code, not prompt.
-This also holds for what you type in the pane itself. Workers keep every tool.
+This also holds for what you type in the pane itself. Workers keep every tool
+except the Router's own (`dispatch`, `forward` and magpie-tasks' three).
 
 ## Why one dedicated session
 
@@ -75,16 +140,22 @@ This also holds for what you type in the pane itself. Workers keep every tool.
 - So the token lives only in a separate state folder, `~/.claude/channels/telegram-live/`.
   Ordinary sessions read the default `~/.claude/channels/telegram/`, find no
   token and exit at startup; only the launcher points the channel at `telegram-live/`.
-- The launcher turns the official `telegram` plugin off for this session
-  (`--settings`), so only `tg-channel` polls the token.
+- The launcher hands `TELEGRAM_STATE_DIR` to `tg-channel` alone, through the
+  MCP config's `env`, and names the same folder for tg-router as
+  `TG_ROUTER_STATE_DIR`. It passes no `--settings`: `claude-magpie` passes its
+  gateway settings that way, and of several `--settings` only the last applies.
+  The official `telegram` plugin therefore stays enabled in this session, reads
+  the default folder, finds no token and exits, as in any other session.
 - The resident session runs with `--dangerously-skip-permissions`: nobody is at
   the terminal to answer a permission prompt. Keep the chat allowlist tight.
 
 ## The channel (tg-channel)
 
 [`tg-channel/`](tg-channel) is the official plugin's `server.ts` (Apache-2.0,
-see its `NOTICE`) with one change: an inbound message also carries
-`reply_to_message_id`. The launcher starts it as the MCP server `tg-channel`
+see its `NOTICE`) with two changes: an inbound message also carries
+`reply_to_message_id`, and a press of a rating button (`rate:<1-5>`, `rate:skip`)
+replaces the buttons with the choice and reaches the session as the digit,
+replying to the invitation. The launcher starts it as the MCP server `tg-channel`
 through `--mcp-config`. It is not on Claude Code's approved channel list, so it
 loads with `--dangerously-load-development-channels server:tg-channel`, and
 Claude Code asks for one confirmation in the pane at each start. The startup
@@ -103,17 +174,28 @@ messages still arrive (checked with Claude Code 2.1.316).
    chmod 600 ~/.claude/channels/telegram-live/.env
    ```
    Make sure `~/.claude/channels/telegram/.env` does not hold it.
-3. Copy [`claude-telegram`](claude-telegram) to a folder on `PATH` (e.g. `~/.local/bin/`).
-   Set `CLAUDE_MODS` if this repository is not at `~/claude-mods`. It needs `bun` and `jq`.
-4. Pair your account while `claude-telegram` is not running: start an ordinary
+3. Install magpie-tasks after jev and subagent-opus, so it is the innermost of
+   the three (`claude plugin install` appends a plugin to `enabledPlugins`, and
+   the innermost plugin decides a subagent's model and effort):
+   ```
+   claude plugin install jev@sipeng-mods
+   claude plugin install subagent-opus@sipeng-mods
+   claude plugin install magpie-tasks@sipeng-mods
+   ```
+   An installed magpie-tasks that comes before either of them reports the order
+   at startup and stays off; uninstall and install it again to fix that.
+4. Copy [`claude-telegram`](claude-telegram) to a folder on `PATH` (e.g. `~/.local/bin/`).
+   Set `CLAUDE_MODS` if this repository is not at `~/claude-mods`. It needs
+   `claude-magpie`, `bun` and `jq`.
+5. Pair your account while `claude-telegram` is not running: start an ordinary
    session with `TELEGRAM_STATE_DIR=$HOME/.claude/channels/telegram-live`, send
    the bot a message, and approve the code with `/telegram:access`. That
    session's own telegram server polls the live token, which would stop the
    channel of a running `claude-telegram`; quit it once you are paired.
-5. Start it in a pane that stays open (herdr, tmux, screen): `claude-telegram`,
+6. Start it in a pane that stays open (herdr, tmux, screen): `claude-telegram`,
    and confirm the development-channel prompt, then name the session with
    `/rename telegram`.
-6. After a restart, pick the same conversation up with `claude-telegram --resume telegram`.
+7. After a restart, pick the same conversation up with `claude-telegram --resume telegram`.
 
 ## Progress cards
 

@@ -1,14 +1,15 @@
-import type { HttpInit, HttpResponse } from 'claude-code'
-
 // Bot API calls for cards, acks and worker answers. Send and edit only: the
 // channel server owns getUpdates, and a second poller would steal its updates.
 
 /** The host calls this module needs; register.ts builds it from $. */
 export type TgIo = {
+  /** TG_ROUTER_STATE_DIR: the launcher's name for the channel's state folder, read by this mod alone */
+  routerStateDir: () => Promise<string | undefined>
+  /** TELEGRAM_STATE_DIR */
   stateDir: () => Promise<string | undefined>
   home: () => Promise<string | undefined>
   read: (path: string) => Promise<string>
-  fetch: (url: string, init: HttpInit) => Promise<HttpResponse>
+  run: (argv: readonly string[], init: { stdin: string; timeoutMs: number }) => Promise<{ exitCode: number; stdout: string; stderr: string }>
   log: (line: string) => Promise<void>
 }
 
@@ -23,9 +24,14 @@ function parseEnvFile(text: string): Record<string, string> {
   return out
 }
 
-/** The channel's state folder: TELEGRAM_STATE_DIR, else the channel's default. */
-export async function stateDir(io: Pick<TgIo, 'stateDir' | 'home'>): Promise<string> {
-  return (await io.stateDir()) ?? `${(await io.home()) ?? ''}/.claude/channels/telegram`
+/**
+ * The channel's state folder: TG_ROUTER_STATE_DIR, else TELEGRAM_STATE_DIR, else the channel's
+ * default. claude-telegram hands TELEGRAM_STATE_DIR to its channel server alone, so the official
+ * telegram plugin of the same session never reads the live folder; it names the folder for this mod
+ * as TG_ROUTER_STATE_DIR.
+ */
+export async function stateDir(io: Pick<TgIo, 'routerStateDir' | 'stateDir' | 'home'>): Promise<string> {
+  return (await io.routerStateDir()) || (await io.stateDir()) || `${(await io.home()) ?? ''}/.claude/channels/telegram`
 }
 
 /** The bot token from the channel's state folder, read once per module load. */
@@ -41,18 +47,52 @@ export function token(io: TgIo): Promise<string | null> {
   return tokenP
 }
 
+// A curl configuration value in double quotes: curl's config parser reads \\, \", \n, \r, \t
+// and \v inside quotes.
+function curlQuoted(value: string): string {
+  const escaped = value.replace(/[\\"\n\r\t\v]/g, c => ({ '\\': '\\\\', '"': '\\"', '\n': '\\n', '\r': '\\r', '\t': '\\t', '\v': '\\v' })[c]!)
+  return `"${escaped}"`
+}
+
+/**
+ * The curl configuration of one Bot API POST with a JSON body; curl prints the answer, a newline
+ * and the HTTP status.
+ */
+export function botApiCurlConfig(token: string, method: string, body: unknown): string {
+  return [
+    `url = ${curlQuoted(`https://api.telegram.org/bot${token}/${method}`)}`,
+    'header = "content-type: application/json"',
+    `data-binary = ${curlQuoted(JSON.stringify(body))}`,
+    'silent',
+    'show-error',
+    'max-time = 30',
+    'write-out = "\\n%{http_code}"',
+    '',
+  ].join('\n')
+}
+
+/**
+ * One Bot API call. The Bot API takes the token in the URL path, and the engine's debug log
+ * records the URL of every $.http.fetch, so the request goes through curl with its configuration
+ * on standard input: $.process.run logs the command name and the number of arguments, never the
+ * arguments or the input.
+ */
 async function call(io: TgIo, method: string, body: Record<string, unknown>): Promise<Record<string, any> | null> {
   const t = await token(io)
   if (!t) return null
   try {
-    const r = await io.fetch(`https://api.telegram.org/bot${t}/${method}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body), // plain text: no parse_mode, so "_" or "*" never breaks a send
-    })
-    if (r.ok) return JSON.parse(r.text) as Record<string, any>
+    // plain text: no parse_mode, so "_" or "*" never breaks a send
+    const r = await io.run(['curl', '--config', '-'], { stdin: botApiCurlConfig(t, method, body), timeoutMs: 60000 })
+    if (r.exitCode !== 0) {
+      await io.log(`${method} curl exited ${r.exitCode}`)
+      return null
+    }
+    const cut = r.stdout.lastIndexOf('\n')
+    const status = Number(r.stdout.slice(cut + 1))
+    const text = r.stdout.slice(0, Math.max(cut, 0))
+    if (status >= 200 && status <= 299) return JSON.parse(text) as Record<string, any>
     // Telegram answers 400 when an edit would not change the text: not a failure
-    if (!r.text.includes('message is not modified')) await io.log(`${method} ${r.status}`)
+    if (!text.includes('message is not modified')) await io.log(`${method} ${status}`)
   } catch (err) {
     await io.log(`${method} ${err instanceof Error ? err.name : 'error'}`).catch(() => {})
   }

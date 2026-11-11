@@ -1,26 +1,38 @@
 #!/usr/bin/env bash
-# The only Claude session allowed to talk to Telegram, run as a Router: each
-# request goes to a background worker (mods/tg-router), and a reply to any
-# message of a request reaches that request's worker.
+# The only Claude session allowed to talk to Telegram, run as a Router under
+# claude-magpie: each request goes to a background worker (mods/tg-router), a
+# reply to any message of a request reaches that request's worker, and the
+# magpie-tasks plugin routes each worker's model and hands long tasks to their
+# architect sessions.
 # Telegram allows one poller per bot token, and every new channel server kills
 # the previous one. The token lives only in telegram-live/, so ordinary
 # sessions (which use the default channels/telegram/ dir) exit at startup
 # without polling; this launcher points the channel at telegram-live/.
+#
+# - claude-magpie passes its gateway settings with --settings, and of several
+#   --settings only the last applies, so this launcher passes none. The
+#   official telegram plugin therefore stays enabled here; it reads the default
+#   channels/telegram/, which holds no token, and exits at startup.
+# - TELEGRAM_STATE_DIR reaches the channel server alone, through the MCP
+#   config's env; tg-router reads the same folder as TG_ROUTER_STATE_DIR.
+# - MAGPIE_TASKS_ROLE=router makes magpie-tasks treat this session as the
+#   Router rather than a long-task window.
+# - The Router runs on Opus 5.5 (Magpie's default model is Astra).
 cd "$HOME" || exit 1
-export TELEGRAM_STATE_DIR="$HOME/.claude/channels/telegram-live"
 CLAUDE_MODS="${CLAUDE_MODS:-$HOME/claude-mods}"
 CHANNEL_DIR="$CLAUDE_MODS/examples/claude-telegram/tg-channel"
+LIVE="$HOME/.claude/channels/telegram-live"
+export MAGPIE_TASKS_ROLE=router
+export TG_ROUTER_STATE_DIR="$LIVE"
 
 # The channel is tg-channel, a copy of the official telegram plugin's server
 # that also reports which message a message replies to. It is not on the
 # approved channel list, so it loads as a development channel: Claude Code asks
-# for one confirmation at each start. The official plugin stays installed for
-# other sessions but is off here, or its server would poll the same token.
-mcp_config=$(jq -nc --arg dir "$CHANNEL_DIR" \
-  '{mcpServers: {"tg-channel": {command: "bun", args: ["run", "--cwd", $dir, "--shell=bun", "--silent", "start"]}}}')
+# for one confirmation at each start.
+mcp_config=$(jq -nc --arg dir "$CHANNEL_DIR" --arg live "$LIVE" \
+  '{mcpServers: {"tg-channel": {command: "bun", args: ["run", "--cwd", $dir, "--shell=bun", "--silent", "start"], env: {TELEGRAM_STATE_DIR: $live}}}}')
 
-exec claude --dangerously-skip-permissions \
-  --settings '{"enabledPlugins":{"telegram@claude-plugins-official":false}}' \
+exec claude-magpie --model 'claude/claude-opus-5-5[1m]' --dangerously-skip-permissions \
   --mcp-config "$mcp_config" \
   --dangerously-load-development-channels server:tg-channel \
   --plugin-dir "$CLAUDE_MODS/mods/tg-router" \

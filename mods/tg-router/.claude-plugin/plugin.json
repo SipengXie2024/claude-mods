@@ -1,7 +1,7 @@
 {
   "name": "tg-router",
-  "version": "0.1.0",
-  "description": "Telegram Router: dispatches each request to a background worker, routes replies to that worker, posts its answers, and shows a progress card per run; load with --plugin-dir in the claude-telegram session only.",
+  "version": "0.2.0",
+  "description": "Telegram Router: dispatches each request to a background worker, routes replies to that worker, posts its answers, and shows a progress card per run; under claude-magpie it leaves worker models, long tasks, decisions and scores to magpie-tasks. Load with --plugin-dir in the claude-telegram session only.",
   "author": {
     "name": "sipeng"
   }

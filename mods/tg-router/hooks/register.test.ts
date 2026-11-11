@@ -7,7 +7,17 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 const STATE = '/state/telegram-live'
 const TOKEN = '123456:AAbbCCddEEffGGhhIIjjKKllMMnnOOppQQ'
 
-type Call = { method: string; body: Record<string, any> }
+type Call = { method: string; body: Record<string, any>; argv: readonly string[] }
+
+// The Bot API request a curl configuration on standard input describes (src/telegram.ts).
+function curlRequest(config: string): { method: string; body: Record<string, any> } {
+  const value = (key: string) => {
+    const m = new RegExp(`^${key} = "((?:[^"\\\\]|\\\\.)*)"$`, 'm').exec(config)
+    if (!m) throw new Error(`no ${key} in the curl configuration`)
+    return m[1]!.replace(/\\(.)/g, (_, c: string) => ({ n: '\n', r: '\r', t: '\t', v: '\v' } as Record<string, string>)[c] ?? c)
+  }
+  return { method: value('url').split('/').pop()!, body: JSON.parse(value('data-binary')) }
+}
 
 interface World {
   calls: Call[]
@@ -23,13 +33,15 @@ interface World {
   routed: { text: string; context?: readonly string[]; origin: any }[]
   /** names the mod registered as tools */
   registered: string[]
+  /** each registered tool's input schema, by name */
+  schemas: Record<string, any>
   clock: ReturnType<typeof mock.clock>
   /** what Telegram answers next */
   fail: 'no' | 'http400' | 'throw' | 'notModified'
 }
 
-function world(on: On, o: { token?: boolean } = {}): World {
-  const w: World = { calls: [], spawns: [], sendsToAgents: [], deliver: true, denySpawn: false, routed: [], registered: [], clock: mock.clock(on, { now: 1_000 }), fail: 'no' }
+function world(on: On, o: { token?: boolean; magpie?: boolean } = {}): World {
+  const w: World = { calls: [], spawns: [], sendsToAgents: [], deliver: true, denySpawn: false, routed: [], registered: [], schemas: {}, clock: mock.clock(on, { now: 1_000 }), fail: 'no' }
   // the kit's spawn answers no agentId; each spawn's loop is `a-<n>` in the agent list
   on('agent.spawn', ($, e) => {
     if (w.denySpawn) return { deny: 'no workers now' }
@@ -44,21 +56,23 @@ function world(on: On, o: { token?: boolean } = {}): World {
     return w.deliver ? { isDelivered: true as const } : { isDelivered: false as const, reason: 'no agent by that id' }
   })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
-  on('tool.register', ($, e) => (w.registered.push(e.name), { value: { tool: `mcp__tg-router__${e.name}` } }))
-  mock.env(on, { HOME: '/home/u', TELEGRAM_STATE_DIR: STATE })
+  on('tool.register', ($, e) => (w.registered.push(e.name), (w.schemas[e.name] = e.inputSchema), { value: { tool: `mcp__tg-router__${e.name}` } }))
+  // claude-magpie starts the session against the Magpie gateway (src/magpie.ts MAGPIE_GATEWAY)
+  mock.env(on, { HOME: '/home/u', TELEGRAM_STATE_DIR: STATE, ...(o.magpie ? { ANTHROPIC_BASE_URL: 'http://127.0.0.1:3425' } : {}) })
   mock.store(on)
   on('fs.read', ($, e) =>
     e.path === `${STATE}/.env` && o.token !== false
       ? { value: `TELEGRAM_BOT_TOKEN=${TOKEN}\nTELEGRAM_ACCESS_MODE=x\n` }
       : { deny: `ENOENT ${e.path}` })
   let nextId = 500
-  on('http.fetch', ($, e) => {
-    const method = e.url.split('/').pop()!
-    w.calls.push({ method, body: JSON.parse(e.init?.body ?? '{}') })
+  on('process.run', ($, e) => {
+    if (e.argv[0] !== 'curl') throw new Error(`unexpected command ${e.argv[0]}`)
+    w.calls.push({ ...curlRequest(e.init?.stdin ?? ''), argv: e.argv })
     if (w.fail === 'throw') throw new Error('network down')
-    if (w.fail === 'http400') return { value: { status: 400, ok: false, headers: {}, text: '{"ok":false,"description":"Bad Request: chat not found"}' } }
-    if (w.fail === 'notModified') return { value: { status: 400, ok: false, headers: {}, text: '{"ok":false,"description":"Bad Request: message is not modified"}' } }
-    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ok: true, result: { message_id: nextId++ } }) } }
+    const answer = (status: number, text: string) => ({ value: { exitCode: 0, stdout: `${text}\n${status}`, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    if (w.fail === 'http400') return answer(400, '{"ok":false,"description":"Bad Request: chat not found"}')
+    if (w.fail === 'notModified') return answer(400, '{"ok":false,"description":"Bad Request: message is not modified"}')
+    return answer(200, JSON.stringify({ ok: true, result: { message_id: nextId++ } }))
   })
   on('ui.log', () => ({ value: undefined }))
   on('prompt.submit', ($, e) => {
@@ -94,6 +108,15 @@ const complete = ($: any, turnId: string, reason = 'answer', durationMs = 45_000
   $.turn.complete({ turnId, answer: 'done', durationMs, isAborted: reason === 'aborted', reason })
 const sends = (w: World) => w.calls.filter((c) => c.method === 'sendMessage')
 const edits = (w: World) => w.calls.filter((c) => c.method === 'editMessageText')
+
+test('the bot token reaches curl on standard input, never in its arguments', async ($, on) => {
+  const w = world(on)
+  await telegramTurn($, 't-token')
+  await bash($, '运行全部单元测试')
+  await w.clock.advance(33_000)
+  expect(sends(w).length).toBe(1)
+  expect(sends(w)[0]!.argv).toEqual(['curl', '--config', '-'])
+})
 
 describe('when a card appears', () => {
   test('a telegram turn over 30 s sends one card, replying to the request', async ($, on) => {
@@ -677,5 +700,36 @@ describe('messages typed in the terminal', () => {
     await typed($, '直接改一下文件')
     const r = await $.tool.call({ tool: 'Edit', file_path: '/x', old_string: 'a', new_string: 'b' } as never)
     expect(r.deny).toBeTruthy()
+  })
+
+  test('outside claude-magpie dispatch offers no model, refuses one, and starts the worker on Opus', async ($, on) => {
+    const w = world(on)
+    await $.session.start({ cwd: '/home/u', surface: null, isInteractive: true })
+    expect(Object.keys(w.schemas['dispatch']!.properties)).toEqual(['chat_id', 'message_id', 'title', 'ack'])
+    await typed($, '用 Sonnet 看看这个报错')
+    const id = terminalId(w)
+    expect(w.routed.at(-1)!.context!.join('\n')).not.toContain('[tg-router terminal message_id=')
+    const refused = await $.tool.call({ tool: DISPATCH, chat_id: 'tui', message_id: id, title: '看报错', ack: '收到。', model: 'claude/claude-sonnet-5-5', model_reason: '用 Sonnet 看看这个报错' } as never)
+    expect(refused.deny).toContain('只在 claude-magpie 下可用')
+    expect(w.spawns.length).toBe(0)
+    await $.tool.call({ tool: DISPATCH, chat_id: 'tui', message_id: id, title: '看报错', ack: '收到。' } as never)
+    expect(w.spawns[0]!.model).toBe('opus')
+  })
+
+  test('under claude-magpie each typed message carries its message_id for magpie-tasks, and a named model goes with its reason', async ($, on) => {
+    const w = world(on, { magpie: true })
+    await $.session.start({ cwd: '/home/u', surface: null, isInteractive: true })
+    expect(Object.keys(w.schemas['dispatch']!.properties)).toEqual(['chat_id', 'message_id', 'title', 'ack', 'model', 'model_reason'])
+    await typed($, '用 Sonnet 看看这个报错')
+    const first = terminalId(w)
+    expect(w.routed.at(-1)!.context).toContain(`[tg-router terminal message_id=${first}]`)
+    await typed($, '再看看测试')
+    const second = terminalId(w)
+    expect(second).not.toBe(first)
+    expect(w.routed.at(-1)!.context).toContain(`[tg-router terminal message_id=${second}]`)
+    await $.tool.call({ tool: DISPATCH, chat_id: 'tui', message_id: first, title: '看报错', ack: '收到。', model: 'claude/claude-sonnet-5-5', model_reason: '用 Sonnet 看看这个报错' } as never)
+    // The Agent input takes only aliases, so the named model travels in the brief for magpie-tasks.
+    expect(w.spawns[0]!.model).toBe(undefined)
+    expect(w.spawns[0]!.prompt).toContain('[model claude/claude-sonnet-5-5]\n[model-reason user: 用 Sonnet 看看这个报错]')
   })
 })

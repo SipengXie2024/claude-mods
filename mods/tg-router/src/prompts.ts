@@ -1,8 +1,12 @@
 import { DISPATCH, FORWARD, TERMINAL_CHAT } from './gate'
 import type { Task } from './tasks'
 
-/** The first prompt of a worker: its rules, then the request as the person sent it. */
-export function workerBrief(title: string, request: string, terminal = false): string {
+/**
+ * The first prompt of a worker: its rules, then the request as the person sent it. Under
+ * claude-magpie (`magpie`) magpie-tasks gives the worker its worktree (open_worktree) and the report
+ * lines that end each answer, so the brief leaves both to the task rules magpie-tasks appends.
+ */
+export function workerBrief(title: string, request: string, terminal = false, magpie = false): string {
   const where = terminal
     ? `You are a worker for one task the person typed in the terminal of the Router session: "${title}".
 The person's original message is at the end of this prompt; read it, not only the title.
@@ -24,17 +28,26 @@ The person's original message is at the end of this prompt; read it, not only th
   If one is not about this task, do not work on it: put a line
   HANDBACK <its message_id>: <one-sentence reason>
   in your final answer. The host gives it back to the Router and removes the line.`
+  const isolation = magpie
+    ? `- The task rules magpie-tasks appends below say where to change a project and which status lines
+  end each answer; follow them.`
+    : `- Before you edit a git repository that another task or a person may also be editing,
+  work in your own worktree and branch.`
   return `${where}
-- Before you edit a git repository that another task or a person may also be editing,
-  work in your own worktree and branch.
+${isolation}
 - Do the whole task and verify it. Report failures as failures.
 
 The original message:
 ${request}`
 }
 
+/** How the Router asks for a model the person named, under claude-magpie. */
+const MODEL_RULE = `- When the person explicitly asks for a particular model for a request, pass ${DISPATCH} model (the Magpie
+  model ID, for example codex/gpt-6.1-sol) and model_reason (the person's own words asking for it).
+  Otherwise leave both out: magpie-tasks' routing rules choose the worker's model.`
+
 /** What rides beside each message typed in the Router session's terminal. */
-export function terminalContext(messageId: number, open: Task[], now: number): string {
+export function terminalContext(messageId: number, open: Task[], now: number, magpie = false): string {
   const list = open.length
     ? open.map((t) => `- ${t.title}（${t.state === 'running' ? '进行中' : '已答复'}，${Math.max(0, Math.round((now - t.lastAt) / 60_000))} 分钟前；worker ${t.name}）`).join('\n')
     : '（没有）'
@@ -47,7 +60,7 @@ Reply to the person in Chinese.
   (to: the worker name) and tell the person in one sentence. If SendMessage says the worker is gone, dispatch the message.
 - Questions about panes or other sessions: answer with herdr or tmux commands.
 - Plain chat that asks for no work: answer in one or two sentences.
-- Never wait with sleep or polling; end the turn when nothing is left to do.
+- Never wait with sleep or polling; end the turn when nothing is left to do.${magpie ? `\n${MODEL_RULE}` : ''}
 Open terminal tasks:
 ${list}`
 }
@@ -64,7 +77,7 @@ const fmtTask = (t: Task, now: number) => {
 }
 
 /** What rides beside each Telegram prompt that reaches the Router. */
-export function routerContext(open: Task[], now: number): string {
+export function routerContext(open: Task[], now: number, magpie = false): string {
   const list = open.length ? open.map((t) => fmtTask(t, now)).join('\n') : '（没有）'
   return `You are the Router of this Telegram chat. You do no work yourself; the host refuses other tools.
 Reply to the person in Chinese.
@@ -80,7 +93,7 @@ Reply to the person in Chinese.
 - Questions about panes or other sessions: answer with herdr or tmux commands.
 - Plain chat that asks for no work: answer in one or two sentences with the reply tool.
 - A worker's completion notice needs no Telegram message: the host already posted its answer.
-- Never wait with sleep or polling; end the turn when nothing is left to do.
+- Never wait with sleep or polling; end the turn when nothing is left to do.${magpie ? `\n${MODEL_RULE}` : ''}
 Open tasks:
 ${list}`
 }

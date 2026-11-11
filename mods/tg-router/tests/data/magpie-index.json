@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "messages": {
+    "7051661301:958": {
+      "taskId": "d-20261101-a1b2c3",
+      "kind": "magpie"
+    },
+    "7051661301:970": {
+      "taskId": "d-20261101-a1b2c3",
+      "kind": "decision",
+      "decisionId": "q-20261101-d4e5f6"
+    },
+    "7051661301:990": {
+      "taskId": "d-20261101-a1b2c3",
+      "kind": "rating"
+    },
+    "7051661301:1046": {
+      "taskId": "d-20261105-g7h8i9",
+      "kind": "long"
+    },
+    "7051661301:1105": {
+      "taskId": "d-20261105-g7h8i9",
+      "kind": "long"
+    },
+    "7051661301:1109": {
+      "taskId": "l-20261105-j1k2l3",
+      "kind": "long",
+      "decisionId": "q-20261105-m4n5o6"
+    }
+  },
+  "workers": {
+    "tg-7051661301-953": {
+      "taskId": "d-20261101-a1b2c3",
+      "ownerAgentId": "a4923915573cfbe20",
+      "long": false
+    },
+    "tg-7051661301-1043": {
+      "taskId": "d-20261105-g7h8i9",
+      "ownerAgentId": "a5e594d0cf7083f43",
+      "long": true
+    }
+  },
+  "agents": {
+    "a83b0057bf058d018": "tg-7051661301-953",
+    "a4923915573cfbe20": "tg-7051661301-953",
+    "a5e594d0cf7083f43": "tg-7051661301-1043"
+  }
+}
