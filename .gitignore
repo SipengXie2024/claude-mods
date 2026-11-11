@@ -4,3 +4,5 @@ node_modules/
 *.packed.html
 *.artifact.html
 __pycache__/
+# Copies of third-party web pages kept as research evidence; only their derived data and notes are committed.
+.planning/research/**/sources/

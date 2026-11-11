@@ -1,0 +1,50 @@
+{
+  "gpt-6.1-sol": {
+    "release_date": "2026-09-29",
+    "evidence": "Official release and API guidance; independent AA max/xhigh task scores.",
+    "retention": "Suggested main model for complex coding and knowledge work; at max its AA Briefcase, HLE and Omniscience scores exceed Terra max.",
+    "limits": "No task-set validation in Magpie. Exact immutable checkpoint not disclosed."
+  },
+  "gpt-6-astra": {
+    "release_date": "2026-09-03",
+    "evidence": "Official release with math, coding, browsing, screen grounding and professional-work results; AA max/xhigh.",
+    "retention": "Suggested for demanding math/research and difficult integrated engineering; strongest AA HLE and science scores among the three priority candidates at max.",
+    "limits": "No direct architecture-planning benchmark. max is not best on every metric."
+  },
+  "gpt-6.1-terra": {
+    "release_date": "2026-10-26",
+    "evidence": "Official visual/computer-use and factuality results; independent AA max comparison to Sol max.",
+    "retention": "Suggested for image/screen workflows and bounded tool-based coding or science tasks; AA max equals Sol max on displayed TB4 and TBScience, with lower aggregate API cost.",
+    "limits": "AA knowledge reliability and agentic knowledge-work scores trail Sol. Vendor visual parity lacks exact chart values in the text."
+  },
+  "gpt-6-sol": {
+    "release_date": "2026-09-22",
+    "evidence": "Official task results with explicit effort; current guide and pricing.",
+    "retention": "Documented none-effort support unlike Sol 6.1; this is an interface/behavior option. Public evidence gives stronger general task results for Sol 6.1.",
+    "limits": "No independent current scores for this model collected by this subtask. Visual encoding updated 2026-09-25."
+  },
+  "gpt-6-luna": {
+    "release_date": "2026-09-22",
+    "evidence": "Official max DeepSWE and high AutomationBench relative improvement; official targeted high-volume role; current lowest API prices among these eight.",
+    "retention": "Suggested for focused, high-volume work when its observed quality suffices; has native none effort.",
+    "limits": "API price does not identify subscription charge. No independent current scores collected here. Visual encoding updated 2026-09-25."
+  },
+  "gpt-5.6-sol": {
+    "release_date": "2026-07-09",
+    "evidence": "Official full benchmark table including coding, math, PDFs, visual reasoning, browsing and professional work; later Astra comparisons.",
+    "retention": "No contemporary overall advantage established against Sol 6.1 or Astra. Historical DeepSWE 72.7 exceeds the separately published GPT-6 Sol 68.8, but conditions/effort are not matched.",
+    "limits": "Old tables use benchmark revisions and partially unspecified efforts. Agents Last Exam text/table disagree. Chat model variant is different from API/Codex/Work variant."
+  },
+  "gpt-5.6-terra": {
+    "release_date": "2026-07-09",
+    "evidence": "Official full table and direct Terra 6.1 comparisons.",
+    "retention": "No current task or cost advantage established against Terra 6.1 in the reviewed sources.",
+    "limits": "Absence of an advantage in this bounded review is not evidence of domination on every user task."
+  },
+  "gpt-5.6-luna": {
+    "release_date": "2026-07-09",
+    "evidence": "Official full table and GPT-6 Luna high-effort workflow improvement.",
+    "retention": "No current general advantage established against GPT-6 Luna. Historical DeepSWE 67.2 versus GPT-6 Luna 66.6 is a separately reported result with unmatched effort.",
+    "limits": "No independent same-harness latest comparison collected here."
+  }
+}

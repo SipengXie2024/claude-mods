@@ -1,0 +1,27 @@
+[
+  {
+    "topic": "GPT-6 Astra Terminal-Bench-Science 0.1",
+    "values": "64.6% in Sep 3 Astra release (best over efforts); 68.1% in Sep 29 Sol 6.1 release (effort not explicit in text); 63% at max on AA comparison retrieved Nov 7.",
+    "resolution": "Preserved as separate measurements. Original pages do not disclose enough identical run conditions to identify the cause of the difference; no averaging or substitution."
+  },
+  {
+    "topic": "Terra 6.1 vs Sol 6.1 scientific terminal workflows",
+    "values": "Oct 26 manufacturer prose: Terra max surpasses Sol 6.1. AA max comparison: both displayed at 58%.",
+    "resolution": "Manufacturer and independent measurements are separate; rounded AA scores establish neither exact equality nor significant superiority."
+  },
+  {
+    "topic": "GPT-6.1 Terra Terminal-Bench 4.0",
+    "values": "Manufacturer max 50.3%; AA max displayed 56%.",
+    "resolution": "Keep source and conditions attached; detailed matching harness not available on the manufacturer text."
+  },
+  {
+    "topic": "GPT-5.6 Sol Agents' Last Exam",
+    "values": "Same July 9 release: prose 53.6; summary table 52.7%. Later Astra release quotes 53.6%.",
+    "resolution": "Not used as a quantitative ranking basis; the source does not explain the discrepancy."
+  },
+  {
+    "topic": "Benchmark revision changes",
+    "values": "Old Terminal-Bench 2.1 vs current 4.0; FrontierCode 1.1 vs 2.0; AA Index 4.1/4.1.1 vs 5.0.1; GDPval-AA v2 vs AA-Briefcase v1.1; OSWorld 2.0 vs 2.1.",
+    "resolution": "Versioned separately. Percentages and Elo across these revisions cannot be read as a time-series performance change."
+  }
+]

@@ -1,0 +1,192 @@
+{
+  "/tmp/model-routing-research-3bnbvq4u/aa-exa-fetch-6up2cfdm/pages.txt": {
+    "file": "sources/45ad0ebcbd2ad0ed.txt",
+    "sha256": "45ad0ebcbd2ad0eda05c59870a51db8ee46d13241747a3cf127d15ee96e1734b",
+    "original_path": "/tmp/model-routing-research-3bnbvq4u/aa-exa-fetch-6up2cfdm/pages.txt"
+  },
+  "/tmp/model-routing-research-3bnbvq4u/aa-fable-opus-s9ov_a6y/page.md": {
+    "file": "sources/ace60c51ab87a72b.md",
+    "sha256": "ace60c51ab87a72b8be4fad13d5110c0f53e1a1f69e68e51e2e93bcfb2a88362",
+    "original_path": "/tmp/model-routing-research-3bnbvq4u/aa-fable-opus-s9ov_a6y/page.md"
+  },
+  "/tmp/model-routing-research-3bnbvq4u/aa-sonnet-opus-_dnknb40/page.md": {
+    "file": "sources/1c5950929faa83d0.md",
+    "sha256": "1c5950929faa83d0b2665bb1a5107a26b9201770094ff78125843e5d40c5a657",
+    "original_path": "/tmp/model-routing-research-3bnbvq4u/aa-sonnet-opus-_dnknb40/page.md"
+  },
+  "/tmp/model-routing-research-3bnbvq4u/aa-haiku-luna-s161kpmt/page.md": {
+    "file": "sources/a3228ec3457daf7b.md",
+    "sha256": "a3228ec3457daf7bdfb3d893cabb2f1bcd544c9533c3ee68e349c501442147a4",
+    "original_path": "/tmp/model-routing-research-3bnbvq4u/aa-haiku-luna-s161kpmt/page.md"
+  },
+  "/tmp/model-routing-research-3bnbvq4u/aa-terra-opus-l1byri87/page.md": {
+    "file": "sources/a3cd8bb275afeaa9.md",
+    "sha256": "a3cd8bb275afeaa97537c867012323fffcd8994622a367810377832d1dcddee1",
+    "original_path": "/tmp/model-routing-research-3bnbvq4u/aa-terra-opus-l1byri87/page.md"
+  },
+  "/tmp/anthropic-evidence.Q4RWs1/frontiercode/page.txt": {
+    "file": "sources/f63ea308bc0fbc36.txt",
+    "sha256": "f63ea308bc0fbc3645fab5984e62d0c4ac5ec4067111a556c1841664135b7483",
+    "original_path": "/tmp/anthropic-evidence.Q4RWs1/frontiercode/page.txt"
+  },
+  "/tmp/anthropic-evidence.Q4RWs1/tbscience/page.txt": {
+    "file": "sources/780e3c8fa1fccb5a.txt",
+    "sha256": "780e3c8fa1fccb5a00df84a2780d2bcd5a45ac1681d035344eb6f40cb26f8a0c",
+    "original_path": "/tmp/anthropic-evidence.Q4RWs1/tbscience/page.txt"
+  },
+  "/tmp/anthropic-evidence.Q4RWs1/sonnet55-card/page.txt": {
+    "file": "sources/0c323e8812e9002e.txt",
+    "sha256": "0c323e8812e9002ea19fafc02d7e7184bccce0834134c82083e0781ccddca8d9",
+    "original_path": "/tmp/anthropic-evidence.Q4RWs1/sonnet55-card/page.txt"
+  },
+  "/tmp/anthropic-evidence.Q4RWs1/opus55-rawpdf/card.txt": {
+    "file": "sources/95a7b26f5d449707.txt",
+    "sha256": "95a7b26f5d4497072d973935ccb674978149f16db396d425b4b544581fcbc728",
+    "original_path": "/tmp/anthropic-evidence.Q4RWs1/opus55-rawpdf/card.txt"
+  },
+  "/tmp/anthropic-evidence.Q4RWs1/fable51-rawpdf/card.txt": {
+    "file": "sources/2709a1fd8f09da02.txt",
+    "sha256": "2709a1fd8f09da026601300b4c611cc298b21b1753f4fc527b8cbb5f48b56793",
+    "original_path": "/tmp/anthropic-evidence.Q4RWs1/fable51-rawpdf/card.txt"
+  },
+  "/tmp/anthropic-evidence.Q4RWs1/haiku55-rawpdf/card.txt": {
+    "file": "sources/2b58db2b9c4cd059.txt",
+    "sha256": "2b58db2b9c4cd059f974e54e5d6600658db279e520e3d31aec419a849a65ae52",
+    "original_path": "/tmp/anthropic-evidence.Q4RWs1/haiku55-rawpdf/card.txt"
+  },
+  "/tmp/anthropic-evidence.Q4RWs1/codepanel/page.txt": {
+    "file": "sources/c6851096458f6f19.txt",
+    "sha256": "c6851096458f6f19a339b930132fa34a5f0e75380b6c1856230c90d5f5f709fa",
+    "original_path": "/tmp/anthropic-evidence.Q4RWs1/codepanel/page.txt"
+  },
+  "/tmp/magpie-openai-evidence.f9MqPC/aa-astra/page.txt": {
+    "file": "sources/ce9ea5afbb8d110c.txt",
+    "sha256": "ce9ea5afbb8d110cf667dabe7e245d8d6a682ff0e6c61d202b260c748fc5fbd3",
+    "original_path": "/tmp/magpie-openai-evidence.f9MqPC/aa-astra/page.txt"
+  },
+  "/tmp/magpie-openai-evidence.f9MqPC/aa-sol61/page.txt": {
+    "file": "sources/1561b3be9b65b2c8.txt",
+    "sha256": "1561b3be9b65b2c8d7416eb6064805a36f62723e00c15e79a45dc3a02c0bebfc",
+    "original_path": "/tmp/magpie-openai-evidence.f9MqPC/aa-sol61/page.txt"
+  },
+  "/tmp/magpie-openai-evidence.f9MqPC/aa-terra-sol/page.txt": {
+    "file": "sources/c48d8ffe0822d279.txt",
+    "sha256": "c48d8ffe0822d2799664d011f8217281235d5c26dd2ff17c7c3cb8bdfabfd43d",
+    "original_path": "/tmp/magpie-openai-evidence.f9MqPC/aa-terra-sol/page.txt"
+  },
+  "/tmp/magpie-openai-evidence.f9MqPC/gpt56/page.txt": {
+    "file": "sources/3a6c61d3c410d151.txt",
+    "sha256": "3a6c61d3c410d151d33dab714adf565665457926d050318e19bfeaab6047041b",
+    "original_path": "/tmp/magpie-openai-evidence.f9MqPC/gpt56/page.txt"
+  },
+  "/tmp/magpie-openai-evidence.f9MqPC/astra/page.txt": {
+    "file": "sources/1af8f1f9c47befe1.txt",
+    "sha256": "1af8f1f9c47befe1f53defbfebd4d779b062f2eccf90273192997cbfef2c7136",
+    "original_path": "/tmp/magpie-openai-evidence.f9MqPC/astra/page.txt"
+  },
+  "/tmp/magpie-openai-evidence.f9MqPC/gpt6family/page.txt": {
+    "file": "sources/b717d572dd6badae.txt",
+    "sha256": "b717d572dd6badaeb2391dd7b7fc4de4cfce737b71dc7796741e7d426a1d4258",
+    "original_path": "/tmp/magpie-openai-evidence.f9MqPC/gpt6family/page.txt"
+  },
+  "/tmp/magpie-openai-evidence.f9MqPC/official-sol61.txt": {
+    "file": "sources/52c22f9ce60b4990.txt",
+    "sha256": "52c22f9ce60b4990d71b0b0a42c88a42c59a19c9dcd1fa24ec18326f040a9ccc",
+    "original_path": "/tmp/magpie-openai-evidence.f9MqPC/official-sol61.txt"
+  },
+  "/tmp/magpie-openai-evidence.f9MqPC/terra61/page.txt": {
+    "file": "sources/96648f4d10250ad6.txt",
+    "sha256": "96648f4d10250ad689702c16ca6edd874b59eacf444f1836ca41c1111bfdc4d5",
+    "original_path": "/tmp/magpie-openai-evidence.f9MqPC/terra61/page.txt"
+  },
+  "/tmp/model-routing-research-3bnbvq4u/livebench-data-5bupy1ak/table.csv": {
+    "file": "sources/a790e07b2ed710fb.csv",
+    "sha256": "a790e07b2ed710fbaa90eec799fcdfcbc04e4d37c16f7dc45cb3071717694d02",
+    "original_path": "/tmp/model-routing-research-3bnbvq4u/livebench-data-5bupy1ak/table.csv"
+  },
+  "/tmp/model-routing-research-3bnbvq4u/arena-exa-2c7sj396/pages.txt": {
+    "file": "sources/9aafe85826900702.txt",
+    "sha256": "9aafe85826900702fa047699c778dc2e1929c8ea2c3f538377f023a83a60721c",
+    "original_path": "/tmp/model-routing-research-3bnbvq4u/arena-exa-2c7sj396/pages.txt"
+  },
+  "/tmp/model-routing-research-3bnbvq4u/designarena-_kosjti0/page.md": {
+    "file": "sources/e859e8d3761abe4d.md",
+    "sha256": "e859e8d3761abe4d50b0487c5cb3da80b9e9d007a85dc3f903f270b78ff3d3a8",
+    "original_path": "/tmp/model-routing-research-3bnbvq4u/designarena-_kosjti0/page.md"
+  },
+  "/tmp/model-routing-research-3bnbvq4u/designarena-slides-ooue_pt6/page.md": {
+    "file": "sources/d94b7c10433ff9c0.md",
+    "sha256": "d94b7c10433ff9c05a2b1f4347343b46eff5c10a65842e4a532d32d78de2741e",
+    "original_path": "/tmp/model-routing-research-3bnbvq4u/designarena-slides-ooue_pt6/page.md"
+  },
+  "/tmp/model-routing-research-3bnbvq4u/matharena-sol-xqvyeokm/page.md": {
+    "file": "sources/4337e35e5ceae529.md",
+    "sha256": "4337e35e5ceae529cab3e9523d7b17d34f05a97904c52a3bf3b190041c764a6c",
+    "original_path": "/tmp/model-routing-research-3bnbvq4u/matharena-sol-xqvyeokm/page.md"
+  },
+  "/tmp/model-routing-research-3bnbvq4u/matharena-opus-wb1s0azp/page.md": {
+    "file": "sources/4fbcea39d1f6c7eb.md",
+    "sha256": "4fbcea39d1f6c7eb74e94dd0bfcec0fdd770763db332094700674d38c93d00e9",
+    "original_path": "/tmp/model-routing-research-3bnbvq4u/matharena-opus-wb1s0azp/page.md"
+  },
+  "/tmp/model-routing-research-3bnbvq4u/leanlean-10rsr1dr/page.md": {
+    "file": "sources/98800792e91276a4.md",
+    "sha256": "98800792e91276a4d20b6977522d9ff6b7778f2e8d94913d8e21fad73f5cbe2d",
+    "original_path": "/tmp/model-routing-research-3bnbvq4u/leanlean-10rsr1dr/page.md"
+  },
+  "/tmp/model-routing-research-3bnbvq4u/codepanel-board-1xe7s7tn/page.md": {
+    "file": "sources/bd89e1bf49403631.md",
+    "sha256": "bd89e1bf49403631b37348f037a2acefc9e93a16271524fff2371a56cbca77f5",
+    "original_path": "/tmp/model-routing-research-3bnbvq4u/codepanel-board-1xe7s7tn/page.md"
+  },
+  "/tmp/model-routing-research-3bnbvq4u/aa-method-stczbf3j/page.md": {
+    "file": "sources/d584ef3aac6e2923.md",
+    "sha256": "d584ef3aac6e2923f6c7f6bb67e432debf11acdb008c80d074c4698e5f97d5a7",
+    "original_path": "/tmp/model-routing-research-3bnbvq4u/aa-method-stczbf3j/page.md"
+  },
+  "/tmp/model-routing-research-3bnbvq4u/aa-v5-f23o3odz/page.md": {
+    "file": "sources/2d3a896ef38e50ed.md",
+    "sha256": "2d3a896ef38e50ed42ac0eabd372e0d2e76988162f19ee7acf4c71b64fd82b48",
+    "original_path": "/tmp/model-routing-research-3bnbvq4u/aa-v5-f23o3odz/page.md"
+  },
+  "/tmp/model-routing-research-3bnbvq4u/livebench-5904okzh/page.md": {
+    "file": "sources/002890df951b68ff.md",
+    "sha256": "002890df951b68ffc7b1e7796a69aefdcc50a2dfc56ec1a3d8d8e6a292503e6d",
+    "original_path": "/tmp/model-routing-research-3bnbvq4u/livebench-5904okzh/page.md"
+  },
+  "/tmp/model-routing-research-3bnbvq4u/livebench-js-hm099ikf/app.js": {
+    "file": "sources/b4158e5400886ba8.js",
+    "sha256": "b4158e5400886ba821e3c3b284a4a0b36687ffd04faedbe8a0492cf29d79ee8f",
+    "original_path": "/tmp/model-routing-research-3bnbvq4u/livebench-js-hm099ikf/app.js"
+  },
+  "/tmp/model-routing-research-3bnbvq4u/designarena-method-q4ilx6mv/page.md": {
+    "file": "sources/36ff8fbd12f9bb93.md",
+    "sha256": "36ff8fbd12f9bb931f15e6edd018a60640a9e3d34eab0a2ea9f2393828242ff3",
+    "original_path": "/tmp/model-routing-research-3bnbvq4u/designarena-method-q4ilx6mv/page.md"
+  },
+  "/tmp/model-routing-research-3bnbvq4u/designarena-harness-okhv58sn/page.md": {
+    "file": "sources/18899d7a63218f4b.md",
+    "sha256": "18899d7a63218f4bb03da9fa5c0d410a6060f8df8ce2ad44fea88fa54c115b3c",
+    "original_path": "/tmp/model-routing-research-3bnbvq4u/designarena-harness-okhv58sn/page.md"
+  },
+  "/tmp/model-routing-research-3bnbvq4u/matharena-home-mco0n69t/page.md": {
+    "file": "sources/7b32938b17b6ff22.md",
+    "sha256": "7b32938b17b6ff22292fb8a386be2a8aca61b8d2952b4b2ab8d641da48da83f5",
+    "original_path": "/tmp/model-routing-research-3bnbvq4u/matharena-home-mco0n69t/page.md"
+  },
+  "/tmp/model-routing-research-3bnbvq4u/matharena-august-rp9piptl/page.md": {
+    "file": "sources/f82b909e7857dbe2.md",
+    "sha256": "f82b909e7857dbe2f32d887ca9ea1ddddaa9a84f727590bc09e6dba0a0081457",
+    "original_path": "/tmp/model-routing-research-3bnbvq4u/matharena-august-rp9piptl/page.md"
+  },
+  "/tmp/model-routing-research-3bnbvq4u/arxivlean-method-l7eyzw8x/page.md": {
+    "file": "sources/1010a050c9401b7d.md",
+    "sha256": "1010a050c9401b7de0755292af858ab014fd7ec5c898ea9342e5d645f551595e",
+    "original_path": "/tmp/model-routing-research-3bnbvq4u/arxivlean-method-l7eyzw8x/page.md"
+  },
+  "/tmp/model-routing-research-3bnbvq4u/codepanel-method-of_23t4y/page.md": {
+    "file": "sources/8d21c7255097ea7a.md",
+    "sha256": "8d21c7255097ea7ab1120580eeed739e92251da11fe29cfc9cd64c3741eb0451",
+    "original_path": "/tmp/model-routing-research-3bnbvq4u/codepanel-method-of_23t4y/page.md"
+  }
+}

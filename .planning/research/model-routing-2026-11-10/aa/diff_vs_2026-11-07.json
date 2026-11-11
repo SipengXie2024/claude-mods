@@ -1,0 +1,294 @@
+{
+ "changes": [
+  [
+   "AA-Briefcase v1.1",
+   "Claude Opus 5.5",
+   "max",
+   1800.0,
+   1801.0,
+   1.0
+  ],
+  [
+   "Time per Task",
+   "Claude Opus 5.5",
+   "max",
+   25.0,
+   25.2,
+   0.2
+  ],
+  [
+   "Time per Task",
+   "Claude Opus 5.5",
+   "xhigh",
+   15.9,
+   16.4,
+   0.5
+  ],
+  [
+   "Time per Task",
+   "GPT-6 Astra",
+   "max",
+   20.9,
+   22.8,
+   1.9
+  ],
+  [
+   "Time per Task",
+   "GPT-6 Astra",
+   "xhigh",
+   10.4,
+   11.5,
+   1.1
+  ],
+  [
+   "Time per Task",
+   "GPT-6 Astra",
+   "high",
+   9.1,
+   9.9,
+   0.8
+  ],
+  [
+   "Time per Task",
+   "Claude Opus 5.5",
+   "high",
+   9.2,
+   9.5,
+   0.3
+  ],
+  [
+   "Time per Task",
+   "GPT-6 Astra",
+   "medium",
+   6.5,
+   6.8,
+   0.3
+  ],
+  [
+   "Time per Task",
+   "Claude Opus 5.5",
+   "medium",
+   6.8,
+   7.2,
+   0.4
+  ],
+  [
+   "Time per Task",
+   "GPT-6 Astra",
+   "low",
+   3.5,
+   3.7,
+   0.2
+  ],
+  [
+   "Time per Task",
+   "GPT-6.1 Sol",
+   "max",
+   21.7,
+   19.5,
+   -2.2
+  ],
+  [
+   "Time per Task",
+   "GPT-6.1 Sol",
+   "xhigh",
+   9.8,
+   9.1,
+   -0.7
+  ],
+  [
+   "Time per Task",
+   "GPT-6.1 Sol",
+   "high",
+   7.0,
+   6.3,
+   -0.7
+  ],
+  [
+   "Time per Task",
+   "GPT-6.1 Sol",
+   "medium",
+   4.1,
+   3.7,
+   -0.4
+  ],
+  [
+   "Time per Task",
+   "GPT-6.1 Sol",
+   "low",
+   1.8,
+   1.7,
+   -0.1
+  ],
+  [
+   "Time per Task",
+   "Claude Fable 5.1",
+   "xhigh",
+   18.3,
+   19.4,
+   1.1
+  ],
+  [
+   "Time per Task",
+   "Claude Fable 5.1",
+   "max",
+   22.2,
+   22.5,
+   0.3
+  ],
+  [
+   "Time per Task",
+   "Claude Fable 5.1",
+   "high",
+   12.5,
+   13.3,
+   0.8
+  ],
+  [
+   "Time per Task",
+   "Claude Fable 5.1",
+   "medium",
+   9.2,
+   9.8,
+   0.6
+  ],
+  [
+   "Time per Task",
+   "Claude Fable 5.1",
+   "low",
+   7.1,
+   7.5,
+   0.4
+  ],
+  [
+   "Time per Task",
+   "Claude Sonnet 5.5",
+   "max",
+   31.5,
+   31.2,
+   -0.3
+  ],
+  [
+   "Time per Task",
+   "Claude Sonnet 5.5",
+   "high",
+   6.9,
+   7.2,
+   0.3
+  ],
+  [
+   "Time per Task",
+   "Claude Sonnet 5.5",
+   "medium",
+   3.6,
+   3.7,
+   0.1
+  ],
+  [
+   "AA-Briefcase v1.1",
+   "Claude Haiku 5.5",
+   "max",
+   1574.0,
+   1573.0,
+   -1.0
+  ],
+  [
+   "Time per Task",
+   "Claude Haiku 5.5",
+   "max",
+   16.1,
+   14.8,
+   -1.3
+  ],
+  [
+   "Time per Task",
+   "Claude Haiku 5.5",
+   "high",
+   6.6,
+   6.5,
+   -0.1
+  ],
+  [
+   "Time per Task",
+   "GPT-6 Luna",
+   "max",
+   12.5,
+   12.3,
+   -0.2
+  ],
+  [
+   "Time per Task",
+   "Claude Haiku 5.5",
+   "medium",
+   4.1,
+   4.0,
+   -0.1
+  ],
+  [
+   "Time per Task",
+   "GPT-6 Luna",
+   "xhigh",
+   7.4,
+   7.1,
+   -0.3
+  ],
+  [
+   "Time per Task",
+   "Claude Haiku 5.5",
+   "low",
+   2.2,
+   2.1,
+   -0.1
+  ],
+  [
+   "Time per Task",
+   "GPT-6 Luna",
+   "medium",
+   3.6,
+   3.4,
+   -0.2
+  ],
+  [
+   "Time per Task",
+   "GPT-6 Luna",
+   "non-reasoning",
+   1.9,
+   2.2,
+   0.3
+  ],
+  [
+   "AA-Briefcase v1.1",
+   "GPT-6.1 Terra",
+   "max",
+   1401.0,
+   1403.0,
+   2.0
+  ],
+  [
+   "Time per Task",
+   "GPT-6.1 Terra",
+   "max",
+   13.8,
+   13.5,
+   -0.3
+  ],
+  [
+   "Time per Task",
+   "GPT-6.1 Terra",
+   "xhigh",
+   6.2,
+   6.0,
+   -0.2
+  ],
+  [
+   "Time per Task",
+   "GPT-6.1 Terra",
+   "non-reasoning",
+   2.2,
+   2.3,
+   0.1
+  ]
+ ],
+ "unchanged": 468,
+ "old_unmatched": []
+}

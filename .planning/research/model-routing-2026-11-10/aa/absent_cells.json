@@ -1,0 +1,492 @@
+[
+ [
+  "Intelligence Index",
+  "GPT-6 Sol (Daybreak Blue)",
+  "max",
+  "lvl-gpt-6-sol-daybreak.txt",
+  ""
+ ],
+ [
+  "AA-Briefcase v1.1",
+  "GPT-6 Sol (Daybreak Blue)",
+  "max",
+  "lvl-gpt-6-sol-daybreak.txt",
+  ""
+ ],
+ [
+  "AutomationBench-AA",
+  "GPT-6 Sol (Daybreak Blue)",
+  "max",
+  "lvl-gpt-6-sol-daybreak.txt",
+  ""
+ ],
+ [
+  "Terminal-Bench 4.0",
+  "GPT-6 Sol (Daybreak Blue)",
+  "max",
+  "lvl-gpt-6-sol-daybreak.txt",
+  ""
+ ],
+ [
+  "FrontierCode 2.0",
+  "GPT-6 Sol (Daybreak Blue)",
+  "max",
+  "lvl-gpt-6-sol-daybreak.txt",
+  ""
+ ],
+ [
+  "AA-Omniscience v1.1",
+  "GPT-6 Sol (Daybreak Blue)",
+  "max",
+  "lvl-gpt-6-sol-daybreak.txt",
+  ""
+ ],
+ [
+  "GDP.pdf",
+  "GPT-6 Sol (Daybreak Blue)",
+  "max",
+  "lvl-gpt-6-sol-daybreak.txt",
+  ""
+ ],
+ [
+  "HLE-Diamond",
+  "GPT-6 Sol (Daybreak Blue)",
+  "max",
+  "lvl-gpt-6-sol-daybreak.txt",
+  ""
+ ],
+ [
+  "CritPt v2 (Hard Subset)",
+  "GPT-6 Sol (Daybreak Blue)",
+  "max",
+  "lvl-gpt-6-sol-daybreak.txt",
+  ""
+ ],
+ [
+  "Terminal-Bench-Science 0.1",
+  "GPT-6 Sol (Daybreak Blue)",
+  "max",
+  "lvl-gpt-6-sol-daybreak.txt",
+  ""
+ ],
+ [
+  "Cost per Task",
+  "GPT-6 Sol (Daybreak Blue)",
+  "max",
+  "lvl-gpt-6-sol-daybreak.txt",
+  ""
+ ],
+ [
+  "Cost to Run Intelligence Index",
+  "GPT-6 Sol (Daybreak Blue)",
+  "max",
+  "lvl-gpt-6-sol-daybreak.txt",
+  ""
+ ],
+ [
+  "Output Tokens per Task",
+  "GPT-6 Sol (Daybreak Blue)",
+  "max",
+  "lvl-gpt-6-sol-daybreak.txt",
+  ""
+ ],
+ [
+  "Reasoning Tokens per Task",
+  "GPT-6 Sol (Daybreak Blue)",
+  "max",
+  "lvl-gpt-6-sol-daybreak.txt",
+  ""
+ ],
+ [
+  "Output Tokens to Run Intelligence Index",
+  "GPT-6 Sol (Daybreak Blue)",
+  "max",
+  "lvl-gpt-6-sol-daybreak.txt",
+  ""
+ ],
+ [
+  "Time per Task",
+  "GPT-6 Sol (Daybreak Blue)",
+  "max",
+  "lvl-gpt-6-sol-daybreak.txt",
+  ""
+ ],
+ [
+  "Intelligence Index",
+  "GPT-6 Sol",
+  "xhigh",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "Intelligence Index",
+  "GPT-6 Sol",
+  "high",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "Intelligence Index",
+  "GPT-6 Sol",
+  "medium",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "Intelligence Index",
+  "GPT-6 Sol",
+  "low",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "FrontierCode 2.0",
+  "GPT-6 Sol",
+  "xhigh",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "FrontierCode 2.0",
+  "GPT-6 Sol",
+  "high",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "FrontierCode 2.0",
+  "GPT-6 Sol",
+  "medium",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "FrontierCode 2.0",
+  "GPT-6 Sol",
+  "low",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "AA-Omniscience v1.1",
+  "GPT-6 Sol",
+  "xhigh",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "AA-Omniscience v1.1",
+  "GPT-6 Sol",
+  "high",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "AA-Omniscience v1.1",
+  "GPT-6 Sol",
+  "medium",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "AA-Omniscience v1.1",
+  "GPT-6 Sol",
+  "low",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "HLE-Diamond",
+  "GPT-6 Sol",
+  "xhigh",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "HLE-Diamond",
+  "GPT-6 Sol",
+  "high",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "HLE-Diamond",
+  "GPT-6 Sol",
+  "medium",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "HLE-Diamond",
+  "GPT-6 Sol",
+  "low",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "CritPt v2 (Hard Subset)",
+  "GPT-6 Sol",
+  "xhigh",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "CritPt v2 (Hard Subset)",
+  "GPT-6 Sol",
+  "high",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "CritPt v2 (Hard Subset)",
+  "GPT-6 Sol",
+  "medium",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "CritPt v2 (Hard Subset)",
+  "GPT-6 Sol",
+  "low",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "Cost per Task",
+  "GPT-6 Sol",
+  "xhigh",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "Cost per Task",
+  "GPT-6 Sol",
+  "high",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "Cost per Task",
+  "GPT-6 Sol",
+  "medium",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "Cost per Task",
+  "GPT-6 Sol",
+  "low",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "Cost to Run Intelligence Index",
+  "GPT-6 Sol",
+  "xhigh",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "Cost to Run Intelligence Index",
+  "GPT-6 Sol",
+  "high",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "Cost to Run Intelligence Index",
+  "GPT-6 Sol",
+  "medium",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "Cost to Run Intelligence Index",
+  "GPT-6 Sol",
+  "low",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "Output Tokens per Task",
+  "GPT-6 Sol",
+  "xhigh",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "Output Tokens per Task",
+  "GPT-6 Sol",
+  "high",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "Output Tokens per Task",
+  "GPT-6 Sol",
+  "medium",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "Output Tokens per Task",
+  "GPT-6 Sol",
+  "low",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "Reasoning Tokens per Task",
+  "GPT-6 Sol",
+  "xhigh",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "Reasoning Tokens per Task",
+  "GPT-6 Sol",
+  "high",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "Reasoning Tokens per Task",
+  "GPT-6 Sol",
+  "medium",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "Reasoning Tokens per Task",
+  "GPT-6 Sol",
+  "low",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "Output Tokens to Run Intelligence Index",
+  "GPT-6 Sol",
+  "xhigh",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "Output Tokens to Run Intelligence Index",
+  "GPT-6 Sol",
+  "high",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "Output Tokens to Run Intelligence Index",
+  "GPT-6 Sol",
+  "medium",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "Output Tokens to Run Intelligence Index",
+  "GPT-6 Sol",
+  "low",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "Time per Task",
+  "GPT-6 Sol",
+  "xhigh",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "Time per Task",
+  "GPT-6 Sol",
+  "high",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "Time per Task",
+  "GPT-6 Sol",
+  "medium",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "Time per Task",
+  "GPT-6 Sol",
+  "low",
+  "lvl-gpt-6-sol.txt",
+  ""
+ ],
+ [
+  "Intelligence Index",
+  "GPT-6 Sol",
+  "non-reasoning",
+  "lvl-nonreasoning.txt",
+  ""
+ ],
+ [
+  "FrontierCode 2.0",
+  "GPT-6 Sol",
+  "non-reasoning",
+  "lvl-nonreasoning.txt",
+  ""
+ ],
+ [
+  "AA-Omniscience v1.1",
+  "GPT-6 Sol",
+  "non-reasoning",
+  "lvl-nonreasoning.txt",
+  ""
+ ],
+ [
+  "CritPt v2 (Hard Subset)",
+  "GPT-6 Sol",
+  "non-reasoning",
+  "lvl-nonreasoning.txt",
+  ""
+ ],
+ [
+  "Cost per Task",
+  "GPT-6 Sol",
+  "non-reasoning",
+  "lvl-nonreasoning.txt",
+  ""
+ ],
+ [
+  "Cost to Run Intelligence Index",
+  "GPT-6 Sol",
+  "non-reasoning",
+  "lvl-nonreasoning.txt",
+  ""
+ ],
+ [
+  "Output Tokens per Task",
+  "GPT-6 Sol",
+  "non-reasoning",
+  "lvl-nonreasoning.txt",
+  ""
+ ],
+ [
+  "Reasoning Tokens per Task",
+  "GPT-6 Sol",
+  "non-reasoning",
+  "lvl-nonreasoning.txt",
+  ""
+ ],
+ [
+  "Output Tokens to Run Intelligence Index",
+  "GPT-6 Sol",
+  "non-reasoning",
+  "lvl-nonreasoning.txt",
+  ""
+ ],
+ [
+  "Time per Task",
+  "GPT-6 Sol",
+  "non-reasoning",
+  "lvl-nonreasoning.txt",
+  ""
+ ]
+]

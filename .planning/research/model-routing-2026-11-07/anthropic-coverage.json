@@ -1,0 +1,150 @@
+{
+  "method": "Read-only public-source research; 4 official releases + 4 system cards + 2 legacy releases + 2 benchmark sites + 1 narrowly targeted review experiment. No model calls, no subscription quota conversion. Local catalog not treated as successful invocation.",
+  "conflicts": [
+    {
+      "topic": "TB-Science",
+      "detail": "Public scoreboard Fable 5.1 40.0 and Opus 5.5 63.3 versus Anthropic 52.6 and 58.7. Public landing page/raw HTML and exact-score search checked; public run-specific fallback and environment details not supplied there. Keep separate; exact causal explanation cannot be established from inspected public data."
+    },
+    {
+      "topic": "FrontierCode versions and effort",
+      "detail": "Current 2.0 (132 tasks) differs from launch 1.1 (Main 100 / Extended 150). Sonnet 5.5 xhigh 52.1 exceeds max 46.2 in 1.1; Opus 5.5 medium 54.6 versus max 54.4. Fable 5.1 September 1 best 50.9 differs from September 22 best 52.8; snapshot cannot be merged without underlying result history."
+    },
+    {
+      "topic": "GDPval and AutomationBench snapshots",
+      "detail": "Sonnet GDPval 1844 in Sep28 card vs 1840 in Oct7 card; Opus AutomationBench 40.0 in Sep22 release vs 42.5 in Sep28 card. Do not combine across evaluation/rating snapshots; parent handles AA primary methodology."
+    }
+  ],
+  "gaps": [
+    "No retrieved direct isolated architecture design benchmark for named models.",
+    "Research-math evidence is final-answer accuracy; no retrieved comparison of full proof soundness or original theorem discovery.",
+    "Chartography, BenchCAD and SWE multimodal do not establish visual aesthetics; design quality statements are vendor/early-user qualitative reports.",
+    "No retrieved dedicated summary/compaction/classification accuracy test supporting Haiku 5.5 small-task routing.",
+    "CodePanel medium-effort review experiment includes Opus/Sonnet/Haiku 5.5, lacks Fable 5.1 in the displayed comparison; current post omits fixture count and full harness details.",
+    "Some legacy model evidence is only official identification and historical comparison; no universal quality-retention reason inferred."
+  ],
+  "coverage": {
+    "claude-fable-5-1": {
+      "coverage": "Official release/system card; independent FrontierCode 2.0 and TB-Science; math, tools, visual understanding, knowledge work covered.",
+      "retention_evidence": "No demonstrated architecture or pure-math superiority over Opus 5.5 in inspected data; assess differences task by task.",
+      "evidence_urls": [
+        "https://assets.claude.com/0339e6a7c5c7b87f5c07798616dc32c215d14235.pdf",
+        "https://cognition.com/frontiercode",
+        "https://www.anthropic.com/claude-sonnet-5-5-system-card",
+        "https://www.terminal-bench-science.ai/"
+      ]
+    },
+    "claude-opus-5-5": {
+      "coverage": "Official release/system card; independent software, science and code review; research math; knowledge and visual task metrics.",
+      "retention_evidence": "Direct evaluated current-generation model; broad scope but no isolated architecture-quality benchmark.",
+      "evidence_urls": [
+        "https://assets.claude.com/fc1b44717c85dc068bc6ba5024219938094694bd.pdf",
+        "https://codepanel.ai/blog/claude-sonnet-5-5-review-results",
+        "https://cognition.com/frontiercode",
+        "https://www.anthropic.com/claude-sonnet-5-5-system-card",
+        "https://www.terminal-bench-science.ai/"
+      ]
+    },
+    "claude-sonnet-5-5": {
+      "coverage": "Official release/system card; independent software/review; research math and science; visual and knowledge work.",
+      "retention_evidence": "Task-specific quantitative evidence, with non-monotonic effort results.",
+      "evidence_urls": [
+        "https://codepanel.ai/blog/claude-sonnet-5-5-review-results",
+        "https://cognition.com/frontiercode",
+        "https://www.anthropic.com/claude-sonnet-5-5-system-card"
+      ]
+    },
+    "claude-haiku-5-5": {
+      "coverage": "Official release/system card; independent software/review; knowledge and chart understanding.",
+      "retention_evidence": "Official intended use includes summary/compaction/classification; no retrieved dedicated small-task accuracy benchmark.",
+      "evidence_urls": [
+        "https://assets.claude.com/e1080d6bf5ae2018ea3c2f414064be03232f5be5.pdf",
+        "https://codepanel.ai/blog/claude-sonnet-5-5-review-results",
+        "https://cognition.com/frontiercode"
+      ]
+    },
+    "claude-opus-5": {
+      "coverage": "Comparator in multiple current system cards; independent FrontierCode and science.",
+      "retention_evidence": "Official default fallback for biology/frontier-LLM work in Opus 5.5 runs; Toolathlon Pass@1 80.6 versus 77.8, setup caveats and no demonstrated significance.",
+      "evidence_urls": [
+        "https://assets.claude.com/0339e6a7c5c7b87f5c07798616dc32c215d14235.pdf",
+        "https://cognition.com/frontiercode",
+        "https://www.anthropic.com/claude-sonnet-5-5-system-card",
+        "https://www.terminal-bench-science.ai/"
+      ]
+    },
+    "claude-sonnet-5": {
+      "coverage": "Extensive comparator in Sonnet/Haiku system cards.",
+      "retention_evidence": "Sonnet 5.5 release explicitly names Sonnet 5 as cyber fallback; no broad quality advantage established.",
+      "evidence_urls": [
+        "https://www.anthropic.com/claude-sonnet-5-5-system-card"
+      ]
+    },
+    "claude-fable-5": {
+      "coverage": "Fable 5.1 system card and independent science comparator.",
+      "retention_evidence": "Historical FrontierCode 1.1 xhigh Main 53.5 and Extended 64.9 versus Fable 5.1 medium 50.9/63.6 in September 1 card; attributed to scope discipline. Later card changes Fable 5.1 best to 52.8; not proof of advantage over latest 5.5 models.",
+      "evidence_urls": [
+        "https://assets.claude.com/0339e6a7c5c7b87f5c07798616dc32c215d14235.pdf",
+        "https://www.terminal-bench-science.ai/"
+      ]
+    },
+    "claude-opus-4-8": {
+      "coverage": "Official release; current system-card comparator; independent FrontierCode/science.",
+      "retention_evidence": "Named cyber fallback for Fable 5.1/Opus 5.5; Toolathlon 79.9 versus latest 77.8 in internal harness, no significance claim.",
+      "identification_source": "https://www.anthropic.com/news/claude-opus-4-8",
+      "source_quote": "It builds on Opus 4.7 with improvements across benchmarks"
+    },
+    "claude-opus-4-7": {
+      "coverage": "Officially identified predecessor in Opus 4.8 release; targeted legacy search.",
+      "retention_evidence": "No verified current task-specific performance retention reason found within inspected sources.",
+      "identification_source": "https://www.anthropic.com/news/claude-opus-4-8",
+      "source_quote": "It builds on Opus 4.7 with improvements across benchmarks"
+    },
+    "claude-sonnet-4-6": {
+      "coverage": "Official release; historical user preference 70% over Sonnet 4.5, 59% over Opus 4.5, undisclosed sample/effort.",
+      "retention_evidence": "No verified quality advantage over 5.5 generation found.",
+      "identification_source": "https://www.anthropic.com/news/claude-sonnet-4-6",
+      "source_quote": "Users even preferred Sonnet 4.6 to Opus 4.5"
+    },
+    "claude-opus-4-6": {
+      "coverage": "Named in Sonnet 4.6 release and current evaluation grader setup; targeted legacy search.",
+      "retention_evidence": "No verified current task-specific performance retention reason found.",
+      "identification_source": "https://www.anthropic.com/news/claude-sonnet-4-6",
+      "source_quote": "Users even preferred Sonnet 4.6 to Opus 4.5"
+    },
+    "claude-opus-4-5": {
+      "coverage": "Named comparator in Sonnet 4.6 release; targeted legacy search.",
+      "retention_evidence": "No verified current task-specific performance retention reason found.",
+      "identification_source": "https://www.anthropic.com/news/claude-sonnet-4-6",
+      "source_quote": "Users even preferred Sonnet 4.6 to Opus 4.5"
+    },
+    "claude-haiku-4-5": {
+      "coverage": "Quantitative comparator in Haiku 5.5 system card.",
+      "retention_evidence": "No quality-based retention reason established by inspected benchmarks.",
+      "evidence_urls": [
+        "https://assets.claude.com/e1080d6bf5ae2018ea3c2f414064be03232f5be5.pdf"
+      ]
+    },
+    "claude-sonnet-4-5": {
+      "coverage": "Named comparator in Sonnet 4.6 release; targeted legacy search.",
+      "retention_evidence": "No verified current task-specific performance retention reason found.",
+      "identification_source": "https://www.anthropic.com/news/claude-sonnet-4-6",
+      "source_quote": "Users even preferred Sonnet 4.6 to Opus 4.5"
+    }
+  },
+  "search_files": [
+    "/tmp/anthropic-evidence.Q4RWs1/search-architecture.txt",
+    "/tmp/anthropic-evidence.Q4RWs1/search-fable.txt",
+    "/tmp/anthropic-evidence.Q4RWs1/search-frontier.txt",
+    "/tmp/anthropic-evidence.Q4RWs1/search-independent.txt",
+    "/tmp/anthropic-evidence.Q4RWs1/search-legacy-design.txt",
+    "/tmp/anthropic-evidence.Q4RWs1/search-legacy-review.txt",
+    "/tmp/anthropic-evidence.Q4RWs1/search-old.txt",
+    "/tmp/anthropic-evidence.Q4RWs1/search-older-opus.txt",
+    "/tmp/anthropic-evidence.Q4RWs1/search-opus55.txt",
+    "/tmp/anthropic-evidence.Q4RWs1/search-review.txt",
+    "/tmp/anthropic-evidence.Q4RWs1/search-science-discrepancy.txt",
+    "/tmp/anthropic-evidence.Q4RWs1/search-small55.txt",
+    "/tmp/anthropic-evidence.Q4RWs1/search-smalltasks.txt",
+    "/tmp/anthropic-evidence.Q4RWs1/search-tbscience.txt"
+  ]
+}
