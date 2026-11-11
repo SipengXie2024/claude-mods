@@ -1,0 +1,3 @@
+<channel source="tg-channel" chat_id="7051661301" message_id="1110" reply_to_message_id="1109" user="Victor_Xie" user_id="7051661301" ts="2026-11-05T05:31:28.000Z">
+去吧
+</channel>

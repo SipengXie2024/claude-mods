@@ -1,0 +1,41 @@
+{
+  "version": 2,
+  "plugins": {
+    "mm-one@probe-mkt": [
+      {
+        "scope": "user",
+        "installPath": "/tmp/magpie-probe-reverify-IotI/cfg/plugins/cache/probe-mkt/mm-one/0.0.1",
+        "version": "0.0.1",
+        "installedAt": "2026-11-09T08:56:29.392Z",
+        "lastUpdated": "2026-11-09T08:56:29.392Z"
+      }
+    ],
+    "aa-two@probe-mkt": [
+      {
+        "scope": "user",
+        "installPath": "/tmp/magpie-probe-reverify-IotI/cfg/plugins/cache/probe-mkt/aa-two/0.0.1",
+        "version": "0.0.1",
+        "installedAt": "2026-11-09T08:56:29.821Z",
+        "lastUpdated": "2026-11-09T08:56:29.821Z"
+      }
+    ],
+    "kk-three@probe-mkt": [
+      {
+        "scope": "user",
+        "installPath": "/tmp/magpie-probe-reverify-IotI/cfg/plugins/cache/probe-mkt/kk-three/0.0.1",
+        "version": "0.0.1",
+        "installedAt": "2026-11-09T08:56:41.488Z",
+        "lastUpdated": "2026-11-09T08:56:41.488Z"
+      }
+    ],
+    "cc-four@probe-mkt": [
+      {
+        "scope": "user",
+        "installPath": "/tmp/magpie-probe-reverify-IotI/cfg/plugins/cache/probe-mkt/cc-four/0.0.1",
+        "version": "0.0.1",
+        "installedAt": "2026-11-09T08:56:41.900Z",
+        "lastUpdated": "2026-11-09T08:56:41.900Z"
+      }
+    ]
+  }
+}

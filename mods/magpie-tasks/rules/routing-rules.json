@@ -1,0 +1,597 @@
+{
+  "version": "routing-rules.v5",
+  "date": "2026-11-10",
+  "source": ".planning/model-routing-table.md",
+  "thresholds": {
+    "ruleConfidence": 0.5,
+    "hardYes": 0.95,
+    "architectConfidence": 0.4
+  },
+  "models": {
+    "claude/claude-opus-5-5": {
+      "name": "Opus 5.5"
+    },
+    "claude/claude-sonnet-5-5": {
+      "name": "Sonnet 5.5"
+    },
+    "claude/claude-mythos-5-2": {
+      "name": "Mythos 5.2"
+    },
+    "claude/claude-haiku-5-5": {
+      "name": "Haiku 5.5"
+    },
+    "codex/gpt-6-astra": {
+      "name": "Astra"
+    },
+    "codex/gpt-6.1-sol": {
+      "name": "Sol 6.1"
+    },
+    "codex/gpt-6.1-terra": {
+      "name": "Terra 6.1"
+    },
+    "codex/gpt-6-luna": {
+      "name": "Luna 6"
+    },
+    "codex/gpt-6-sol": {
+      "name": "Sol 6"
+    },
+    "antigravity/gemini-4-argon": {
+      "name": "Argon"
+    }
+  },
+  "rules": [
+    {
+      "id": "architect",
+      "section": "2.1",
+      "condition": "需要持续讨论目标、模块职责、关键约束和方案取舍",
+      "role": "长期任务架构师",
+      "model": "claude/claude-opus-5-5",
+      "effort": null,
+      "deepEffort": null,
+      "raiseOrder": null,
+      "acceptance": "用户理解并认可关键设计，约束与未决问题有明确记录",
+      "evidence": "[E1]、[E2]、[E3]；综合间接证据，没有直接测试与用户共同设计的能力",
+      "use": "main",
+      "jevOption": false
+    },
+    {
+      "id": "route-assessment",
+      "section": "2.1",
+      "condition": "日常任务的执行者不能按规则直接确定：指定的模型没有规则给出的强度，规则的模型不在 Magpie 的模型列表中，或独立复核缺少条件",
+      "role": "评估子代理",
+      "model": "claude/claude-mythos-5-2",
+      "effort": "high",
+      "deepEffort": "high",
+      "raiseOrder": [
+        "high",
+        "max"
+      ],
+      "acceptance": "推荐模型与 effort，解释任务匹配依据及限制；实际执行者等待用户确认后创建",
+      "evidence": "[E12]、[E13]；AA Intelligence Index high 62，Opus 5.5 xhigh 57；综合推理能力作为间接依据，本配置只用于准备选模建议",
+      "use": "plugin",
+      "jevOption": false
+    },
+    {
+      "id": "daily-default",
+      "section": "2.1",
+      "condition": "日常请求没有匹配的执行规则",
+      "role": "执行子代理",
+      "model": "claude/claude-opus-5-5",
+      "effort": "medium",
+      "deepEffort": "high",
+      "raiseOrder": [
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "acceptance": "按任务说明完成，报告实际运行的验证及结果",
+      "evidence": "用户决定（2026-11-10）：没有匹配规则的日常请求多为一次性查询与简单操作，直接由一般任务的默认模型执行，不再评估与确认；起步 medium 与 JEV 给 Opus 5.5 操作类任务的起步档位一致；没有针对这类任务的评测",
+      "use": "plugin",
+      "jevOption": false
+    },
+    {
+      "id": "review-second",
+      "section": "2.1",
+      "condition": "委派说明写明要用不同模型复核或诊断，并用 [review-of …] 给出被复核的代理或模型",
+      "role": "审查或诊断子代理",
+      "model": null,
+      "effort": "medium",
+      "deepEffort": "high",
+      "raiseOrder": [
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "acceptance": "先排除原模型，再检查候选是否适合任务；直接核查原始材料与证据",
+      "evidence": "[E4]；模型组合的额外收益仍需个人任务证据，普通任务不自动增加复核代理",
+      "use": "subagent",
+      "jevOption": false
+    },
+    {
+      "id": "code-change",
+      "section": "2.2",
+      "condition": "交付的是程序本身：新功能、修复、重构或测试，验收看程序的行为；设计已经明确",
+      "role": "实施子代理",
+      "model": "claude/claude-opus-5-5",
+      "hardModel": "claude/claude-mythos-5-2",
+      "effort": "high",
+      "deepEffort": "high",
+      "raiseOrder": [
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "acceptance": "相关测试通过，实际行为符合要求，修改范围符合任务",
+      "evidence": "[E9]、[E12]、[E13]、[E14]、[E17]；短的编程题 Opus 5.5 更好（LiveBench coding 87.1，Mythos 5.2 的同一模型 Fable 5.2 为 79.2），长时间、大仓库的工作 Mythos 5.2 更好（官方 FrontierSWE v2 69.9%，Opus 62.3%；LiveBench long-agentic 82.9，Opus 72.8；AA FrontierCode 2.0 high 49.1%，Opus 5.5 xhigh 43.8%）；过去一个月判为 code-change 的 20 件委派中，Jev 深入推理概率达到 0.95 的 10 件中位数产出 142k token、运行 84 分钟，其余 10 件为 21k token、31 分钟（样本少，各件当时用的模型不同）",
+      "use": "subagent",
+      "jevOption": true
+    },
+    {
+      "id": "review",
+      "section": "2.2",
+      "condition": "检查已有工作有没有缺陷、核实结果是否属实，或查明失败原因",
+      "role": "审查或诊断子代理",
+      "model": "claude/claude-opus-5-5",
+      "effort": "medium",
+      "deepEffort": "high",
+      "raiseOrder": [
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "acceptance": "使用独立上下文；每项问题包含位置、触发条件和依据，区分已确认问题与待验证判断",
+      "evidence": "[E4]；CodePanel 缺陷召回率 Opus 5.5 90%（Sol 6.1 89%）；有不同模型要求时使用 `review-second`，官方审查技能遵循其自身流程",
+      "use": "subagent",
+      "jevOption": true
+    },
+    {
+      "id": "code-read",
+      "section": "2.2",
+      "condition": "只读地研究代码、仓库或系统怎样工作，或判断某项改动能否实现，产出结论或说明，不做修改",
+      "role": "调研子代理",
+      "model": "claude/claude-opus-5-5",
+      "effort": "medium",
+      "deepEffort": "high",
+      "raiseOrder": [
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "acceptance": "结论对应到具体的文件与代码位置，区分已经核实的事实与推断",
+      "evidence": "待校准：现有编程测评衡量的是修改代码，没有单独衡量只读理解的测评；用默认模型起步，按评分调整",
+      "use": "subagent",
+      "jevOption": true
+    },
+    {
+      "id": "design-advice",
+      "section": "2.2",
+      "condition": "提出工程、产品或工作流程方面的方案与建议并比较取舍，或把任务改写成专业做法；成果是方案，不做实施；方案成立与否取决于数学或科学论证时不属于这一类",
+      "role": "设计子代理",
+      "model": "claude/claude-mythos-5-2",
+      "effort": "high",
+      "deepEffort": "high",
+      "raiseOrder": [
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "acceptance": "方案写明取舍、依据与限制，能直接用于决定",
+      "evidence": "[E12]、[E13]；间接依据：AA Intelligence Index high 62（Opus 5.5 xhigh 57），衡量综合推理；没有直接衡量方案质量的测评",
+      "use": "subagent",
+      "jevOption": true
+    },
+    {
+      "id": "web-research",
+      "section": "2.2",
+      "condition": "上网收集资料、数据或测评成绩，并标明出处",
+      "role": "研究子代理",
+      "model": "claude/claude-opus-5-5",
+      "effort": "medium",
+      "deepEffort": "high",
+      "raiseOrder": [
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "acceptance": "每项资料有可访问的出处与访问日期，数字与原文一致",
+      "evidence": "[E16]、[E2]；待校准：LiveBench research Astra 85.2、Opus 5.5 85.0、Sonnet 5.5 83.6、Sol 6.1 83.5，前四名相差不到 2 分；BrowseComp 只有 OpenAI 自家模型的成绩；AA-Briefcase 知识交付 Sonnet 5.5 max 1813、Opus 1800",
+      "use": "subagent",
+      "jevOption": true
+    },
+    {
+      "id": "machine-ops",
+      "section": "2.2",
+      "condition": "在机器上查询状态、配置环境、修复构建或运行测量实验",
+      "role": "执行子代理",
+      "model": "claude/claude-sonnet-5-5",
+      "effort": "max",
+      "deepEffort": "max",
+      "raiseOrder": [
+        "max"
+      ],
+      "acceptance": "命令实际成功，最终环境或程序状态符合要求；测量保留命令与原始输出",
+      "evidence": "[E2]、[E12]；AA Terminal-Bench 4.0 Sonnet 5.5 max 63.6%（xhigh 57.1%、high 43.9%），Opus 5.5 high 56.6%、max 59.6%，Fable 5.2 xhigh 61.6%；Sonnet 5.5 只在 max 领先",
+      "use": "subagent",
+      "jevOption": true
+    },
+    {
+      "id": "batch-judge",
+      "section": "2.2",
+      "condition": "按同一套标准逐条判断、标注、评分或选择参数",
+      "role": "执行子代理",
+      "model": "claude/claude-opus-5-5",
+      "effort": "medium",
+      "deepEffort": "high",
+      "raiseOrder": [
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "acceptance": "每条结果符合给定标准，抽查结果一致；标准不清的条目单独列出",
+      "evidence": "待校准：没有对应测评；用默认模型起步，按评分调整",
+      "use": "subagent",
+      "jevOption": true
+    },
+    {
+      "id": "explain-write",
+      "section": "2.2",
+      "condition": "依据已有材料写笔记、讲解、说明或报告",
+      "role": "写作子代理",
+      "model": "antigravity/gemini-4-argon",
+      "effort": "high",
+      "deepEffort": "high",
+      "raiseOrder": [
+        "high"
+      ],
+      "acceptance": "用户能理解，结论忠于材料，关键条件与数字保留",
+      "evidence": "[E3]、[E15]；Arena Text 总榜 Argon high 1522±5（Opus 5.5 1506±6），中文与专家分榜分数更高但在误差范围内；Argon 只有 low、medium、high 三档；主对话已有固定模型时保持原模型",
+      "use": "subagent",
+      "jevOption": true
+    },
+    {
+      "id": "document-analysis",
+      "section": "2.2",
+      "condition": "阅读论文、PDF、多份材料或表格，核对数字与论断的出处",
+      "role": "研究子代理",
+      "model": "codex/gpt-6.1-sol",
+      "effort": "high",
+      "deepEffort": "high",
+      "raiseOrder": [
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "acceptance": "关键结论能追溯原文，数字与引用经过核对，冲突来源得到说明",
+      "evidence": "[E2]；文档推理直接相关；开放网络搜索质量需要另外验证",
+      "use": "subagent",
+      "jevOption": true
+    },
+    {
+      "id": "visual-build",
+      "section": "2.2",
+      "condition": "制作网页、幻灯片、动画或视频画面等需要视觉呈现的成果",
+      "role": "实施子代理",
+      "model": "claude/claude-opus-5-5",
+      "effort": "high",
+      "deepEffort": "high",
+      "raiseOrder": [
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "acceptance": "检查真实页面或渲染结果，同时验证内容、布局和功能",
+      "evidence": "[E8]；设计偏好测评，用户使用的具体制作工具可能不同",
+      "use": "subagent",
+      "jevOption": true
+    },
+    {
+      "id": "translation",
+      "section": "2.2",
+      "condition": "按术语表和翻译规范批量翻译文本",
+      "role": "执行子代理",
+      "model": "claude/claude-opus-5-5",
+      "effort": "medium",
+      "deepEffort": "high",
+      "raiseOrder": [
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "acceptance": "术语与格式符合规范，抽查译文忠实原文；无法翻译的条目单独列出",
+      "evidence": "待校准：没有翻译测评；这类工作此前由 DeepSeek-V4.1-Flash 运行，没有经过 Magpie",
+      "use": "subagent",
+      "jevOption": true
+    },
+    {
+      "id": "math",
+      "section": "2.3",
+      "condition": "求解数学问题、推导结果、设计需要数学论证的方案（例如密码学构造），或检查命题是否成立、寻找反例",
+      "role": "研究子代理",
+      "model": "codex/gpt-6.1-sol",
+      "effort": "max",
+      "deepEffort": "max",
+      "raiseOrder": [
+        "max"
+      ],
+      "acceptance": "核对条件与推导，能独立计算的部分进行复核；反例或逻辑依据可以检查，保留原命题含义",
+      "evidence": "[E5]；MathArena 最终答案与错误命题识别测评；推导完整性需要另外检查",
+      "use": "subagent",
+      "jevOption": true
+    },
+    {
+      "id": "science-compute",
+      "section": "2.3",
+      "condition": "用程序完成数据分析、数值计算、拟合或模拟",
+      "role": "研究或实施子代理",
+      "model": "claude/claude-mythos-5-2",
+      "effort": "high",
+      "deepEffort": "high",
+      "raiseOrder": [
+        "high",
+        "max"
+      ],
+      "acceptance": "保留输入、计算过程与复现命令，检查结果与单位、约束是否一致；关键假设与失败尝试完整交接",
+      "evidence": "[E12]、[E13]；AA Terminal-Bench-Science high 70.0%、max 73.3%（Astra high 59.5%、max 63.3%），CritPt hard high 73.0%（Astra 71.5%）",
+      "use": "subagent",
+      "jevOption": true
+    },
+    {
+      "id": "lean",
+      "section": "2.3",
+      "condition": "在 Lean 中构造新的正式证明，或简化已有证明",
+      "role": "实施子代理",
+      "model": "claude/claude-opus-5-5",
+      "effort": "high",
+      "deepEffort": "high",
+      "raiseOrder": [
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "acceptance": "Lean 检查通过，原命题语义与允许的假设保持不变；简化符合用户的可读性要求",
+      "evidence": "[E6]、[E7]；构造证明 Opus 5.5 领先但样本误差较宽；简化证明 Sol 6.1 max 压缩成绩更好，可由架构师通过 model_route 推荐",
+      "use": "subagent",
+      "jevOption": true
+    },
+    {
+      "id": "computer-use",
+      "section": "2.3",
+      "condition": "通过浏览器或桌面应用完成多步操作",
+      "role": "实施子代理",
+      "model": "codex/gpt-6.1-terra",
+      "effort": "medium",
+      "deepEffort": "high",
+      "raiseOrder": [
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "acceptance": "以实际页面、文件或应用状态验证完成情况，发现目标或权限变化时返回讨论",
+      "evidence": "[E9]、[E10]、[E11]；LiveBench browser Sol 6.1 93.3、Terra 6.1 93.1；目标与步骤明确时用 Terra 6.1，需要持续理解目标时用 Sol 6.1",
+      "use": "subagent",
+      "jevOption": true,
+      "deepModel": "codex/gpt-6.1-sol"
+    }
+  ],
+  "architect": {
+    "default": "claude/claude-opus-5-5",
+    "candidates": [
+      {
+        "model": "claude/claude-opus-5-5",
+        "name": "Opus 5.5",
+        "when": "需要持续讨论目标、模块职责、关键约束和方案取舍，主要工作是代码、系统设计、写作或综合判断",
+        "evidence": "路由表 `architect` 行：[E1] 仓库修改、[E2] 综合测评、[E3] 交流偏好",
+        "limits": "综合间接证据，没有直接测试与用户共同设计的能力"
+      },
+      {
+        "model": "claude/claude-mythos-5-2",
+        "name": "Mythos 5.2",
+        "when": "长期任务的主体是长时间自主执行、困难推理或深入的代码与科学工作，目标较清楚、需要的讨论较少",
+        "evidence": "[E12] AA Intelligence Index max 65（Opus 5.5 max 59）；[E14] LiveBench long-agentic 82.9（Opus 5.5 72.8）",
+        "limits": "没有交流与写作偏好的测评；high 及以上档位每次回复前都会思考，回复较慢；没有衡量长期设计讨论"
+      },
+      {
+        "model": "codex/gpt-6-astra",
+        "name": "Astra",
+        "when": "长期任务的主体是科学计算、数据分析、模拟或多步科学探索，设计讨论围绕计算方法展开",
+        "evidence": "[E2] Science：Astra high 59.5%、max 63.3%",
+        "limits": "测评衡量科学工具工作流，没有衡量长期设计讨论"
+      },
+      {
+        "model": "codex/gpt-6.1-sol",
+        "name": "Sol 6.1",
+        "when": "长期任务的主体是数学推导、命题核查或大量文档核对，设计讨论围绕论证与来源展开",
+        "evidence": "[E5] ArXivMath、BrokenArXiv；[E2] GDP.pdf",
+        "limits": "测评衡量最终答案与文档推理，没有衡量长期设计讨论"
+      }
+    ]
+  },
+  "reviewSecond": {
+    "effort": "medium",
+    "whenOriginalIncludes": {
+      "codex/gpt-6.1-sol": "claude/claude-opus-5-5"
+    },
+    "otherwise": "codex/gpt-6.1-sol",
+    "order": [
+      "claude/claude-opus-5-5",
+      "codex/gpt-6.1-sol",
+      "antigravity/gemini-4-argon"
+    ]
+  },
+  "substitutes": [
+    {
+      "id": "repo-alt",
+      "forRules": [
+        "code-change"
+      ],
+      "options": [
+        {
+          "model": "codex/gpt-6-astra",
+          "efforts": [
+            "xhigh",
+            "max"
+          ]
+        }
+      ],
+      "auto": true,
+      "note": "路由表规定由架构师依据任务和失败证据选择档位；日常任务由诊断建议的档位代替架构师的选择"
+    },
+    {
+      "id": "science-math-alt",
+      "forRules": [
+        "science-compute",
+        "math"
+      ],
+      "options": [
+        {
+          "model": "codex/gpt-6-astra",
+          "efforts": [
+            "high",
+            "max"
+          ]
+        },
+        {
+          "model": "codex/gpt-6.1-sol",
+          "efforts": "rule"
+        }
+      ],
+      "auto": true,
+      "note": "Astra 使用 high 或 max（此前科学规则的档位：Terminal-Bench-Science high 59.5%、max 63.3%），取不低于当前档位的一档；Sol 6.1 取 math-* 规则的强度"
+    },
+    {
+      "id": "assessment-alt",
+      "forRules": [
+        "route-assessment"
+      ],
+      "options": [
+        {
+          "model": "claude/claude-opus-5-5",
+          "efforts": [
+            "xhigh"
+          ]
+        }
+      ],
+      "auto": true
+    },
+    {
+      "id": "review-alt",
+      "forRules": [
+        "review"
+      ],
+      "options": [
+        {
+          "model": "claude/claude-opus-5-5",
+          "efforts": [
+            "medium"
+          ]
+        },
+        {
+          "model": "codex/gpt-6.1-sol",
+          "efforts": [
+            "medium"
+          ]
+        }
+      ],
+      "auto": true
+    },
+    {
+      "id": "writing-alt",
+      "forRules": [
+        "explain-write"
+      ],
+      "options": [
+        {
+          "model": "claude/claude-opus-5-5",
+          "efforts": [
+            "high",
+            "xhigh",
+            "max"
+          ]
+        }
+      ],
+      "auto": true,
+      "note": "Argon 不可用或额度用完时由 Opus 5.5 接手，取不低于当前档位的一档"
+    },
+    {
+      "id": "math-extra",
+      "forRules": [
+        "math"
+      ],
+      "options": [
+        {
+          "model": "codex/gpt-6-sol",
+          "efforts": null
+        }
+      ],
+      "auto": true,
+      "note": "路由表没有给出强度"
+    },
+    {
+      "id": "long-autonomous",
+      "forRules": "*",
+      "options": [
+        {
+          "model": "claude/claude-mythos-5-2",
+          "efforts": [
+            "high"
+          ]
+        }
+      ],
+      "auto": false,
+      "note": "只在用户指定时使用"
+    },
+    {
+      "id": "small-tasks",
+      "forRules": "*",
+      "options": [
+        {
+          "model": "claude/claude-haiku-5-5",
+          "efforts": null
+        },
+        {
+          "model": "codex/gpt-6-luna",
+          "efforts": null
+        }
+      ],
+      "auto": false,
+      "note": "路由表不指定缺少任务证据的默认强度；只在用户指定时使用"
+    }
+  ],
+  "ratingPriority": {
+    "note": "这些设置在用户自己任务上的结果还没有比较过：code-change 交给 Opus 5.5 的任务，以及 Opus 5.5、Mythos 5.2 判为需要深入推理、起步限在 high 的任务。每天的评分邀请先从这些任务中选",
+    "cells": [
+      {
+        "rule": "code-change",
+        "when": "base-model"
+      },
+      {
+        "rule": "code-change",
+        "when": "deep"
+      },
+      {
+        "rule": "design-advice",
+        "when": "deep"
+      },
+      {
+        "rule": "visual-build",
+        "when": "deep"
+      },
+      {
+        "rule": "science-compute",
+        "when": "deep"
+      },
+      {
+        "rule": "lean",
+        "when": "deep"
+      }
+    ]
+  }
+}

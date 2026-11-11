@@ -1,0 +1,166 @@
+[
+  {
+    "id": "97f9330c",
+    "cwd": "/home/ubuntu/sipeng",
+    "kind": "background",
+    "startedAt": 1792518386915,
+    "sessionId": "97f9330c-c20f-4ed3-8f2b-0ba47b3478b2",
+    "name": "Haichao GPU集群DeepSeek模型替换",
+    "state": "done"
+  },
+  {
+    "id": "1beb1250",
+    "cwd": "/home/ubuntu/sipeng/claude-mods",
+    "kind": "background",
+    "startedAt": 1792745760048,
+    "sessionId": "1beb1250-907f-44b4-91f4-f074457c300a",
+    "name": "Explore 子代理统计导出函数",
+    "state": "done"
+  },
+  {
+    "pid": 2128176,
+    "id": "455258f7",
+    "cwd": "/home/ubuntu/sipeng/claude-mods",
+    "kind": "background",
+    "startedAt": 1792749551894,
+    "sessionId": "455258f7-73cb-4580-a3fb-e7a7cece7995",
+    "name": "子代理列出 mods 文件夹",
+    "status": "idle",
+    "state": "working"
+  },
+  {
+    "pid": 2720108,
+    "cwd": "/home/ubuntu",
+    "kind": "interactive",
+    "startedAt": 1793776369916,
+    "sessionId": "ea51be77-1737-4bd6-b055-119673529472",
+    "name": "telegram",
+    "status": "busy"
+  },
+  {
+    "pid": 4161577,
+    "cwd": "/home/ubuntu/sipeng/idea-explore",
+    "kind": "interactive",
+    "startedAt": 1794192016455,
+    "sessionId": "9a785f87-61f8-455c-af23-2ba52301feb8",
+    "name": "snark-schedule",
+    "status": "idle"
+  },
+  {
+    "pid": 127116,
+    "cwd": "/home/ubuntu/sipeng/claude-mods",
+    "kind": "interactive",
+    "startedAt": 1794197891823,
+    "sessionId": "1b505947-eab6-43ae-96a3-9829663a4ecb",
+    "name": "claude-mods-97",
+    "status": "busy"
+  },
+  {
+    "id": "b6721b8e",
+    "cwd": "/tmp/magpie-probe-env-2ulG/work",
+    "kind": "background",
+    "startedAt": 1794212834709,
+    "sessionId": "b6721b8e-00cb-4406-a867-bcf77416382e",
+    "name": "bgok single word response",
+    "state": "done"
+  },
+  {
+    "id": "e0bcc445",
+    "cwd": "/tmp/magpie-probe-env-2ulG/work",
+    "kind": "background",
+    "startedAt": 1794212881403,
+    "sessionId": "e0bcc445-b59e-4f9d-9453-3f1dafe35ede",
+    "name": "resumed response mismatch",
+    "state": "done"
+  },
+  {
+    "id": "f01ed83d",
+    "cwd": "/tmp/magpie-probe-env-2ulG/work",
+    "kind": "background",
+    "startedAt": 1794212911281,
+    "sessionId": "f01ed83d-e9de-4fe5-b217-e7d6865b0930",
+    "name": "Reply with the single word SAMEID.",
+    "state": "done"
+  },
+  {
+    "id": "2e96e13c",
+    "cwd": "/tmp/magpie-probe-env-2ulG/work",
+    "kind": "background",
+    "startedAt": 1794213095541,
+    "sessionId": "2e96e13c-1e07-4738-a350-13426c66fbc4",
+    "name": "Reply with the single word EXTRA.",
+    "state": "failed"
+  },
+  {
+    "id": "106eb700",
+    "cwd": "/tmp/magpie-probe-env-2ulG/work",
+    "kind": "background",
+    "startedAt": 1794213134602,
+    "sessionId": "106eb700-82ed-4f5b-a71b-ea7dfaeb8c5c",
+    "name": "merged single-word reply",
+    "state": "done"
+  },
+  {
+    "id": "9c0bfc0e",
+    "cwd": "/tmp/magpie-probe-recheck-jAoV/work",
+    "kind": "background",
+    "startedAt": 1794213879823,
+    "sessionId": "9c0bfc0e-0b69-4110-8ef7-f1c6ae54e901",
+    "name": "bgok exact response",
+    "state": "done"
+  },
+  {
+    "id": "2d248fb8",
+    "cwd": "/tmp/magpie-probe-recheck-jAoV/work",
+    "kind": "background",
+    "startedAt": 1794213946830,
+    "sessionId": "2d248fb8-203d-4d0b-9539-99d20ddc82a5",
+    "name": "mergedok exact response",
+    "state": "failed"
+  },
+  {
+    "id": "0fdb636b",
+    "cwd": "/tmp/magpie-probe-recheck-jAoV/work",
+    "kind": "background",
+    "startedAt": 1794213974267,
+    "sessionId": "0fdb636b-1f8d-4186-bd2f-0536baef86c1",
+    "name": "Reply with the single word SAMEID.",
+    "state": "failed"
+  },
+  {
+    "id": "1f7c226f",
+    "cwd": "/tmp/magpie-probe-recheck-jAoV/work",
+    "kind": "background",
+    "startedAt": 1794213975784,
+    "sessionId": "1f7c226f-7a50-4fdb-b3b5-d6b3c9bfa2f4",
+    "name": "copyid response mismatch",
+    "state": "done"
+  },
+  {
+    "id": "d9405878",
+    "cwd": "/tmp/magpie-probe-recheck-jAoV/work",
+    "kind": "background",
+    "startedAt": 1794214145284,
+    "sessionId": "d9405878-78fd-407f-bae9-bfedd0b1a261",
+    "name": "magpieresume response mismatch",
+    "state": "done"
+  },
+  {
+    "pid": 665800,
+    "cwd": "/home/ubuntu/sipeng/gd-bench",
+    "kind": "interactive",
+    "startedAt": 1794217026698,
+    "sessionId": "9fc490c9-66a8-4b6c-bfbc-b4c263657404",
+    "name": "gd-bench-85",
+    "status": "idle"
+  },
+  {
+    "pid": 667101,
+    "cwd": "/home/ubuntu/sipeng/mhot-vm",
+    "kind": "interactive",
+    "startedAt": 1794217071012,
+    "sessionId": "767bfd54-7ee6-46ac-aaac-9c44cb4589ea",
+    "name": "mhot-vm-0d",
+    "status": "busy"
+  }
+]

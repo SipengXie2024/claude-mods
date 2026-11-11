@@ -1,0 +1,94 @@
+{
+  "name": "magpie-tasks",
+  "version": "0.1.0",
+  "description": "Long-running task windows for claude-magpie sessions: an architect per long task, subagent model and effort routing by rules judged through Jev, a task registry and log, worktrees with integration, acceptance and diagnosis of daily tasks, Telegram delivery, startup recovery, rating invitations and calibration reminders. Active only in sessions that talk to the Magpie gateway.",
+  "author": {
+    "name": "sipeng"
+  },
+  "userConfig": {
+    "gatewayUrl": {
+      "type": "string",
+      "title": "Magpie 网关地址",
+      "description": "ANTHROPIC_BASE_URL 等于这个地址的交互式会话才由插件管理；后台会话的原生工作副本设置也按 flag 层中的这个地址判断。",
+      "default": "http://127.0.0.1:3425"
+    },
+    "stateDir": {
+      "type": "string",
+      "title": "任务记录目录",
+      "description": "任务记录、任务日志、认领记录、Telegram 索引和锁所在的目录，所有会话共用；~ 表示主目录。",
+      "default": "~/.config/magpie-tasks"
+    },
+    "worktreeDir": {
+      "type": "string",
+      "title": "工作副本目录",
+      "description": "插件为任务建立的 Git 工作副本所在的目录；~ 表示主目录。",
+      "default": "~/.local/share/magpie-tasks/worktrees"
+    },
+    "jevUrl": {
+      "type": "string",
+      "title": "Jev 接口地址",
+      "description": "OpenAI Decisions 接口的地址，用于路由规则、深入推理和反馈的判断。",
+      "default": "https://api.openai.com/v1/decisions"
+    },
+    "jevModel": {
+      "type": "string",
+      "title": "Jev 模型",
+      "description": "Decisions 请求使用的模型。",
+      "default": "gpt-6-luna"
+    },
+    "jevKeyFile": {
+      "type": "string",
+      "title": "Jev 密钥文件",
+      "description": "存放 OpenAI 密钥的文件路径；插件只读取这个文件，不保存密钥本身；~ 表示主目录。",
+      "default": "~/.config/jev-opus/openai-jev.key"
+    },
+    "jevDeadlineMs": {
+      "type": "number",
+      "title": "Jev 时限（毫秒）",
+      "description": "一次 Jev 判断等待的最长时间，超过后由评估模型代为判断。",
+      "default": 10000
+    },
+    "evaluatorModel": {
+      "type": "string",
+      "title": "评估模型",
+      "description": "Jev 不可用时代为判断的固定模型。",
+      "default": "claude/claude-opus-5-5"
+    },
+    "launcher": {
+      "type": "string",
+      "title": "启动命令",
+      "description": "启动架构师后台会话所用的命令。",
+      "default": "claude-magpie"
+    },
+    "claudeBin": {
+      "type": "string",
+      "title": "claude 命令",
+      "description": "恢复后台会话与读取 claude agents 列表所用的命令。",
+      "default": "claude"
+    },
+    "telegramStateDir": {
+      "type": "string",
+      "title": "Telegram 通道目录",
+      "description": "Telegram 通道的状态目录，插件从其中的 .env 读取机器人令牌、从 access.json 读取默认聊天；~ 表示主目录。",
+      "default": "~/.claude/channels/telegram-live"
+    },
+    "telegramChatId": {
+      "type": "string",
+      "title": "Telegram 聊天 ID",
+      "description": "从窗口开始的长期任务发送通知的聊天；留空时使用 access.json 中 allowFrom 的唯一一项。",
+      "default": ""
+    },
+    "timezone": {
+      "type": "string",
+      "title": "时区",
+      "description": "评分邀请按这个时区的当地时间发送。",
+      "default": "Asia/Shanghai"
+    },
+    "ratingHour": {
+      "type": "number",
+      "title": "评分邀请时刻",
+      "description": "每天发送评分邀请的当地小时（0–23）。",
+      "default": 21
+    }
+  }
+}

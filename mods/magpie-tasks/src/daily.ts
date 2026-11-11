@@ -1,0 +1,835 @@
+// Daily tasks and the relay (plan sections 9.8, 9.11): starting and waking subagents from
+// prompt.submit, the executor's report, the one acceptance check, diagnosis and model changes,
+// integration, the open_worktree tool, and the person's answers to a daily task's decisions.
+// Daily tasks run in the Router session; their subagents are the Router's.
+import type { PromptSubmitInput, TurnCompleteInput } from 'claude-code'
+import { acceptanceBrief, diagnosisBrief, handoffBrief, parseDiagnosis, parseRouteConfirm, parseStatus, parseVerdict, withRouting, assessmentBrief } from './brief'
+import { briefForJev, subagentDialogue, type ApiMessage } from './dialogue'
+import { baseRefName, createWorktree, diffToFile, git, initRepo, repoRoot, scratchPath } from './git'
+import { integrate } from './integrate'
+import { newId } from './io'
+import { choose, judgeBlocker, judgeDeep } from './judge'
+import { agentLabel, canonical, displayName, isAvailable, requestId, roleName } from './model'
+import { raise, ruleById, startEffort, substituteAllowed } from './rules'
+import { judgeCtx, markerFor, markRecorded, registerStarted } from './spawn'
+import type { Ctx, PromptResult } from './state'
+import { clip, send } from './telegram'
+import type { AgentRecord, AgentRole, Blocker, Decision, Effort, EffortChange, RaiseReason, RelayRequest, SelectionKind, TaskRecord } from './types'
+
+
+
+// ---- telling the person ----------------------------------------------------------------------
+
+// Sends `text` about a task to the person: a Telegram message for a task with a chat (recorded in
+// the Telegram index under `kind`), else a notice row in this session's transcript, which the
+// person sees in the pane and the model never reads (terminal tasks of the Router).
+export async function tell(ctx: Ctx, task: Pick<TaskRecord, 'id' | 'title' | 'telegram'>, text: string, o: { kind: 'magpie' | 'decision' | 'long'; notify: boolean; replyTo?: number; decisionId?: string }): Promise<{ chatId: string; messageId: number } | null> {
+  if (task.telegram !== null && task.telegram.chatId !== 'tui') {
+    const chatId = task.telegram.chatId
+    const replyTo = o.replyTo ?? task.telegram.rootMessageId
+    const messageId = await send(ctx.io, ctx.opts, chatId, clip(text), replyTo, o.notify)
+    await ctx.reg.updateIndex(x => {
+      x.messages[`${chatId}:${messageId}`] = { taskId: task.id, kind: o.kind, ...(o.decisionId !== undefined ? { decisionId: o.decisionId } : {}) }
+    })
+    await ctx.reg.log(task.id, { type: 'telegram', chatId, messageId, kind: o.kind, ...(o.decisionId !== undefined ? { decisionId: o.decisionId } : {}) })
+    return { chatId, messageId }
+  }
+  // Plan section 9.11: a terminal task's notes and reports are lines in the Router's pane. A system
+  // row appended with $.session.append is not drawn there (E8, 2026-11-09).
+  ctx.host.ui.log(`magpie-tasks ·「${task.title}」（${task.id}）：${text}`)
+  return null
+}
+
+// A decision the person answers: recorded on the task, then asked (index `decision` for a daily task,
+// `long` with the decision ID for a long one, plan section 7.5).
+export async function askDecision(ctx: Ctx, task: TaskRecord, d: { kind: Decision['kind']; question: string; options: string[]; data: Record<string, string> }, state: TaskRecord['state']): Promise<Decision> {
+  const decision: Decision = { id: newId('q', await ctx.io.now()), kind: d.kind, createdAt: await ctx.io.now(), question: d.question, options: d.options, data: d.data }
+  await ctx.reg.update(task.id, t => {
+    t.decisions[decision.id] = decision
+    t.state = state
+  }, { type: 'decision', decisionId: decision.id, kind: d.kind, state })
+  const text = `${d.question}\n${d.options.map(o => `· ${o}`).join('\n')}`
+  const sent = await tell(ctx, task, text, { kind: task.kind === 'long' ? 'long' : 'decision', notify: true, decisionId: decision.id })
+  if (sent !== null) {
+    await ctx.reg.update(task.id, t => { t.decisions[decision.id]!.telegram = sent }, { type: 'decision-sent', decisionId: decision.id, messageId: sent.messageId })
+    decision.telegram = sent
+  }
+  return decision
+}
+
+// ---- the relay -------------------------------------------------------------------------------
+
+// Plan section 9.8: the only way the plugin starts or wakes a subagent. The request is recorded in
+// the task (pendingRelays, removed once carried out) and carried out at once from the hook that asks
+// for it: U3's control and U10 (2026-11-09) showed that the plugin's own turn.start, turn.step,
+// tool.call and turn.complete hooks see a subagent it started from turn.complete and one it woke from
+// prompt.submit, turn.complete or tool.call, and `$.prompt.submit` is refused inside prompt.submit.
+// The agent.spawn hook sets the model from the brief's marker (spawn.ts): the Agent tool's input
+// takes only the aliases opus, sonnet, haiku and fable. Returns the line shown in the transcript.
+export async function relay(ctx: Ctx, req: RelayRequest): Promise<string> {
+  ctx.st.relay.set(req.id, req)
+  await ctx.reg.update(req.taskId, t => { t.pendingRelays[req.id] = req }, {
+    type: 'relay', stage: 'queued', id: req.id, kind: req.kind,
+    ...(req.kind === 'wake' ? { agentId: req.agentId, raises: req.raises } : { role: req.role, model: req.agent.model, effort: req.agent.effort }),
+  })
+  const done = await carryOut(ctx, req.id, req)
+  ctx.host.ui.log(done)
+  return done
+}
+
+async function carryOut(ctx: Ctx, id: string, req: RelayRequest): Promise<string> {
+  const { st, reg } = ctx
+
+  if (req.kind === 'spawn') {
+    const { model: _model, ...args } = req.args
+    const r = await ctx.host.agent.spawn(args)
+    if (r.deny !== undefined) throw new Error(`${roleName(req.role)}子代理没有启动：${r.deny}`)
+    if (r.agentId === undefined) throw new Error(`relay ${id}: agent.spawn settled without an agentId`)
+    const agentId = r.agentId
+    registerStarted(st, agentId, markerFor(req.taskId, req.agent))
+    const record: AgentRecord = { ...req.agent, agentId, startedAt: await ctx.io.now() }
+    const current = await reg.get(req.taskId)
+    if (current === undefined) throw new Error(`relay ${id}: task ${req.taskId} is missing`)
+    // A daily task's new executor or assessment takes the task over from the agent that owned it.
+    const takesOver = current.kind === 'daily' && current.owner.kind === 'agent' && (req.role === 'executor' || req.role === 'assessment')
+    const saved = await reg.update(req.taskId, t => {
+      t.agents[agentId] = record
+      delete t.pendingRelays[id]
+      if (takesOver && t.owner.kind === 'agent') {
+        const previous = t.agents[t.owner.agentId]
+        if (previous !== undefined && previous.agentId !== agentId) {
+          previous.replacedBy = agentId
+          if (previous.state === 'running') previous.state = 'idle'
+        }
+        t.owner.agentId = agentId
+      }
+    }, { type: 'spawn', agentId, role: record.role, ruleId: record.ruleId, model: record.model, effort: record.effort, selection: record.selection.kind, relay: id })
+    st.relay.delete(id)
+    markRecorded(agentId)
+    if (takesOver && saved.owner.kind === 'agent') {
+      const worker = saved.owner.workerName
+      await reg.updateIndex(x => {
+        x.workers[worker] = { taskId: saved.id, ownerAgentId: agentId, long: false }
+        x.agents[agentId] = worker
+      })
+    }
+    return `magpie-tasks: 已启动${roleName(req.role)}子代理（${displayName(record.model, ctx.rules)}/${record.effort}）`
+  }
+
+  const task = await reg.get(req.taskId)
+  if (task === undefined) throw new Error(`relay ${id}: task ${req.taskId} is missing`)
+  const agent = task.agents[req.agentId]
+  if (agent === undefined) throw new Error(`relay ${id}: agent ${req.agentId} is not on task ${req.taskId}`)
+  await reg.update(task.id, t => {
+    const a = t.agents[req.agentId]!
+    for (const r of req.raises) a.pendingRaises.push(r)
+    a.state = 'running'
+  }, { type: 'relay', stage: 'raises', id, agentId: req.agentId, raises: req.raises })
+  const raises = st.pendingRaises.get(req.agentId) ?? []
+  st.pendingRaises.set(req.agentId, [...raises, ...req.raises])
+  const sent = await ctx.host.session.send({ to: { agentId: req.agentId }, text: req.message })
+  if (!sent.isDelivered) throw new Error(`${agentLabel(agent, ctx.rules)} 没有收到消息：${sent.reason}`)
+  await reg.update(task.id, t => { delete t.pendingRelays[id] }, { type: 'relay', stage: 'delivered', id, agentId: req.agentId })
+  st.relay.delete(id)
+  const what = req.raises.includes('acceptance-failed') ? '验收意见' : req.raises.includes('diagnosis-redelegate') ? '诊断结论' : '消息'
+  return `magpie-tasks: 已把${what}交给${agentLabel(agent, ctx.rules)}`
+}
+
+export async function wake(ctx: Ctx, task: Pick<TaskRecord, 'id'>, agentId: string, message: string, raises: RaiseReason[]): Promise<void> {
+  const now = await ctx.io.now()
+  await relay(ctx, { id: newId('r', now), taskId: task.id, createdAt: now, kind: 'wake', agentId, message, raises })
+}
+
+function nextName(task: TaskRecord, base: string, tag: string): string {
+  const prefix = `${base}-${tag}`
+  const n = Object.values(task.agents).filter(a => a.name !== undefined && a.name.startsWith(prefix)).length
+  return `${prefix}${n + 1}`
+}
+
+function workerOf(task: TaskRecord): string {
+  if (task.owner.kind === 'agent') return task.owner.workerName
+  return task.telegram?.workerName ?? task.id
+}
+
+// A spawn request for an agent the plugin starts in a daily task: the routed brief, the request the
+// engine gets, and the record that joins the task once it has started.
+export async function spawnAgent(ctx: Ctx, task: TaskRecord, a: {
+  role: AgentRole
+  ruleId: string | null
+  model: string
+  efforts: Omit<EffortChange, 'at'>[]
+  selection: AgentRecord['selection']
+  brief: string
+  name: string
+  description: string
+  worktree: string | null
+  reviewOf?: string[]
+}): Promise<void> {
+  const now = await ctx.io.now()
+  const model = canonical(a.model, ctx.catalog)
+  const effort = a.efforts[a.efforts.length - 1]!.to
+  const agent: Omit<AgentRecord, 'agentId' | 'startedAt'> = {
+    name: a.name,
+    description: a.description,
+    role: a.role,
+    sessionId: ctx.st.sessionId,
+    ruleId: a.ruleId,
+    rulesVersion: ctx.rules.version,
+    selection: a.selection,
+    judgment: null,
+    model,
+    effort,
+    efforts: a.efforts.map(c => ({ ...c, at: now })),
+    ...(a.reviewOf !== undefined ? { reviewOf: a.reviewOf } : {}),
+    contextSource: 'brief',
+    cwd: a.worktree ?? ctx.st.cwd,
+    worktree: a.worktree,
+    state: 'running',
+    pendingRaises: [],
+    filesTouched: [],
+    reports: [],
+  }
+  const prompt = withRouting(a.brief, markerFor(task.id, agent), { cwd: a.worktree, daily: task.kind === 'daily' })
+  await relay(ctx, {
+    id: newId('r', now), taskId: task.id, createdAt: now, kind: 'spawn', role: a.role,
+    args: { prompt, description: `${a.description} · ${displayName(model, ctx.rules)}/${effort}`, name: a.name, model: requestId(model, ctx.catalog), cwd: a.worktree ?? ctx.st.cwd },
+    agent,
+  })
+}
+
+// The `review` rule's agent (acceptance or diagnosis): Opus 5.5 at the rule's effort, one level up
+// when Jev judges the brief to need deep reasoning.
+async function reviewEfforts(ctx: Ctx, brief: string): Promise<Omit<EffortChange, 'at'>[]> {
+  const rule = ruleById(ctx.rules, 'review')
+  const d = await judgeDeep(judgeCtx(ctx), [{ role: 'user', content: briefForJev(brief) }])
+  const start = rule.effort!
+  const out: Omit<EffortChange, 'at'>[] = [{ from: null, to: start, reason: 'rule' }]
+  const deep = startEffort(rule, d.deep)
+  if (deep !== start) out.push({ from: start, to: deep, reason: 'deep', note: `${d.provider} p ${d.p === null ? 'n/a' : d.p.toFixed(2)}` })
+  return out
+}
+
+// ---- changes in the task worktree -------------------------------------------------------------
+
+export interface Change { patchPath: string; diffStat: string; files: string[] }
+
+// The task worktree's change since its base, its patch written to <stateDir>/tasks/<id>.patch; null
+// when the task has no worktree or the worktree holds no change.
+export async function changeOf(ctx: Ctx, task: TaskRecord): Promise<Change | null> {
+  if (task.worktree === null) return null
+  const wt = task.worktree.path
+  const patchPath = `${ctx.opts.stateDir}/tasks/${task.id}.patch`
+  const { tree, files } = await diffToFile(ctx.io, wt, task.worktree.baseRef, await scratchPath(ctx.io, wt, 'index'), patchPath)
+  if (files.length === 0) return null
+  const base = (await git(ctx.io, ['-C', wt, 'rev-parse', '--verify', `${task.worktree.baseRef}^{commit}`])).trim()
+  const diffStat = await git(ctx.io, ['-C', wt, 'diff-tree', '-r', '--no-renames', '--stat', base, tree])
+  return { patchPath, diffStat, files }
+}
+
+// ---- the end of a daily agent's turn ---------------------------------------------------------
+
+// Executors asked once for their missing status line; a second answer without one counts as needing
+// the person (plan section 9.11, "每个回合最多一次").
+const statusAsked = new Set<string>()
+
+export async function onDailyComplete(ctx: Ctx, e: TurnCompleteInput): Promise<void> {
+  const id = e.agentId
+  if (id === undefined) return
+  const taskId = ctx.st.agents.get(id)
+  if (taskId === undefined) return
+  const task = await ctx.reg.get(taskId)
+  if (task === undefined) throw new Error(`task ${taskId} of agent ${id} is missing`)
+  if (task.kind !== 'daily') return
+  const agent = task.agents[id]
+  if (agent === undefined) throw new Error(`agent ${id} is not on task ${taskId}`)
+  // An API error is onAgentError's (plan section 9.16); it asks for no status line.
+  if (e.reason === 'error') return
+  if (e.reason !== 'answer') {
+    await ctx.reg.update(task.id, t => { t.agents[id]!.state = 'idle' }, { type: 'turn-end', agentId: id, reason: e.reason })
+    return
+  }
+  const isOwner = task.owner.kind === 'agent' && task.owner.agentId === id
+  switch (agent.role) {
+    case 'executor':
+      if (isOwner) return executorDone(ctx, task, agent, e.answer)
+      break
+    case 'assessment':
+      if (isOwner) return assessmentDone(ctx, task, agent, e.answer)
+      break
+    case 'acceptance':
+      return acceptanceDone(ctx, task, agent, e.answer)
+    case 'diagnosis':
+      return diagnosisDone(ctx, task, agent, e.answer)
+    default:
+      break
+  }
+  await ctx.reg.update(task.id, t => { t.agents[id]!.state = 'idle' }, { type: 'turn-end', agentId: id, reason: e.reason })
+}
+
+async function executorDone(ctx: Ctx, task: TaskRecord, agent: AgentRecord, answer: string): Promise<void> {
+  const now = await ctx.io.now()
+  const id = agent.agentId
+  let status = parseStatus(answer)
+  if (status === null) {
+    const change = await changeOf(ctx, task)
+    if (change !== null && !statusAsked.has(id)) {
+      statusAsked.add(id)
+      await ctx.reg.update(task.id, t => {
+        const a = t.agents[id]!
+        a.state = 'idle'
+        a.reports.push({ at: now, status: 'missing', text: answer, verification: [] })
+      }, { type: 'status-missing', agentId: id })
+      await wake(ctx, task, id, 'Your last answer ended without the report lines. Add them now, in a short answer: the `验证：` block with each verification command you ran and its result, then the last line `状态：已完成`, `状态：需要用户决定` or `状态：受阻：<one sentence>`.', [])
+      return
+    }
+    status = { status: 'needs-user', verification: [] }
+  }
+  statusAsked.delete(id)
+  const report = { at: now, status: status.status, text: answer, verification: status.verification }
+
+  if (status.status === 'needs-user') {
+    await ctx.reg.update(task.id, t => {
+      t.agents[id]!.reports.push(report)
+      t.agents[id]!.state = 'idle'
+      t.state = 'waiting-user'
+    }, { type: 'report', agentId: id, status: status.status })
+    return
+  }
+
+  if (status.status === 'blocked') {
+    await ctx.reg.update(task.id, t => {
+      t.agents[id]!.reports.push(report)
+      t.agents[id]!.state = 'idle'
+    }, { type: 'report', agentId: id, status: status.status, blocker: status.blocker })
+    return blocked(ctx, (await ctx.reg.get(task.id))!, id, status.blocker!)
+  }
+
+  // Done. A fix after a failed acceptance is not checked again: it goes to the person.
+  const last = task.deliverables[task.deliverables.length - 1]
+  if (last !== undefined && last.acceptance !== undefined && !last.acceptance.pass && last.integration === undefined) {
+    await ctx.reg.update(task.id, t => {
+      t.agents[id]!.reports.push(report)
+      t.agents[id]!.state = 'idle'
+      const d = t.deliverables[t.deliverables.length - 1]!
+      d.summary = answer
+      d.verification = status!.verification
+    }, { type: 'report', agentId: id, status: 'done', fix: true })
+    const fresh = (await ctx.reg.get(task.id))!
+    const change = await changeOf(ctx, fresh)
+    const tail = change !== null
+      ? `改动了 ${change.files.length} 个文件（${change.files.slice(0, 8).join('、')}${change.files.length > 8 ? ' 等' : ''}）。回复是否把改动整合到 ${fresh.project?.root ?? '项目'}。`
+      : '这个任务没有改动文件。回复是否接受这个结果。'
+    await askDecision(ctx, fresh, {
+      kind: 'fix-confirm',
+      question: `「${fresh.title}」验收没有通过，执行者已经修复。\n验收意见：${last.acceptance.notes}\n修复结果：${answer}\n${tail}`,
+      options: change !== null ? ['整合', '不整合'] : ['接受', '不接受'],
+      data: { agentId: id, change: change !== null ? 'yes' : 'no' },
+    }, 'waiting-user')
+    return
+  }
+
+  await ctx.reg.update(task.id, t => {
+    t.agents[id]!.reports.push(report)
+    t.agents[id]!.state = 'idle'
+    t.deliverables.push({ at: now, summary: answer, verification: status!.verification })
+  }, { type: 'report', agentId: id, status: 'done' })
+  const fresh = (await ctx.reg.get(task.id))!
+  await startAcceptance(ctx, fresh, fresh.agents[id]!)
+}
+
+async function startAcceptance(ctx: Ctx, task: TaskRecord, executor: AgentRecord): Promise<void> {
+  const change = await changeOf(ctx, task)
+  const brief = acceptanceBrief(task, executor, change === null ? null : { patchPath: change.patchPath, diffStat: change.diffStat })
+  const rule = ruleById(ctx.rules, 'review')
+  await spawnAgent(ctx, task, {
+    role: 'acceptance',
+    ruleId: rule.id,
+    model: rule.model!,
+    efforts: await reviewEfforts(ctx, brief),
+    selection: { kind: 'rule', reason: `acceptance of ${executor.agentId}'s result (rule review)` },
+    brief,
+    name: nextName(task, workerOf(task), 'acc'),
+    description: `验收：${task.title}`,
+    worktree: change === null ? null : task.worktree!.path,
+  })
+}
+
+function firstSentence(text: string): string {
+  const line = text.split('\n').map(s => s.trim()).find(s => s !== '') ?? ''
+  return Array.from(line).slice(0, 120).join('')
+}
+
+async function acceptanceDone(ctx: Ctx, task: TaskRecord, agent: AgentRecord, answer: string): Promise<void> {
+  const verdict = parseVerdict(answer)
+  if (verdict === null) throw new Error(`acceptance agent ${agent.name ?? agent.agentId} ended without a 验收结论 line`)
+  const executorId = task.owner.kind === 'agent' ? task.owner.agentId : null
+  if (executorId === null) throw new Error(`daily task ${task.id} has no executor`)
+  const now = await ctx.io.now()
+  await ctx.reg.update(task.id, t => {
+    const a = t.agents[agent.agentId]!
+    a.state = 'done'
+    a.reports.push({ at: now, status: 'done', text: answer, verification: [] })
+    const d = t.deliverables[t.deliverables.length - 1]
+    if (d === undefined) throw new Error(`task ${t.id}: an acceptance finished with no deliverable on record`)
+    d.acceptance = { agentId: agent.agentId, pass: verdict.pass, notes: verdict.notes }
+  }, { type: 'acceptance', agentId: agent.agentId, pass: verdict.pass })
+
+  if (!verdict.pass) {
+    await ctx.reg.update(task.id, t => { t.state = 'running' }, { type: 'state', state: 'running', reason: 'acceptance failed' })
+    await wake(ctx, task, executorId, `The acceptance review (agent ${agent.name ?? agent.agentId}) did not pass your result:\n\n${verdict.notes}\n\nFix these problems, verify again, and end with the same report lines (验证： and 状态：).`, ['acceptance-failed'])
+    return
+  }
+  const executor = task.agents[executorId]!
+  const verification = executor.reports[executor.reports.length - 1]?.verification ?? []
+  await integrateDaily(ctx, (await ctx.reg.get(task.id))!, { conclusion: firstSentence(verdict.notes) || '通过', verification: verification.length > 0 ? verification.join('；') : '执行者没有报告验证命令' })
+}
+
+// Integrates an accepted daily result into the project and reports it; a task without a worktree
+// is done with the acceptance alone (plan section 9.11).
+async function integrateDaily(ctx: Ctx, task: TaskRecord, a: { conclusion: string; verification: string }): Promise<void> {
+  const summary = `验收：${a.conclusion}；验证：${a.verification}`
+  const now = await ctx.io.now()
+  const finish = async (text: string, notify: boolean) => {
+    await ctx.reg.update(task.id, t => {
+      t.state = 'done'
+      t.completedAt = now
+    }, { type: 'state', state: 'done' })
+    await tell(ctx, task, text, { kind: 'magpie', notify })
+  }
+  if (task.worktree === null || task.project === null) {
+    await finish(`验收通过：${a.conclusion}；验证：${a.verification}`, false)
+    return
+  }
+  const result = await integrate(ctx.io, ctx.reg, { taskId: task.id, repo: task.project.root, source: task.worktree.path, target: task.project.root, baseRef: task.worktree.baseRef })
+  if (result.status === 'applied') {
+    await finish(`已整合到 ${task.project.root}：${result.files.join('、')}；${summary}`, false)
+  } else if (result.status === 'empty') {
+    await finish(`验收通过，没有需要整合的改动；${summary}`, false)
+  } else {
+    await askDecision(ctx, task, {
+      kind: 'integration-conflict',
+      question: `「${task.title}」的改动不能直接整合到 ${task.project.root}：与项目当前的文件冲突。\n涉及文件：${result.files.join('、')}\n${firstSentence(result.detail)}\n工作副本保留在 ${task.worktree.path}。处理好冲突后回复“整合”重试，或回复“不整合”。`,
+      options: ['整合', '不整合'],
+      data: { files: result.files.join('\n'), detail: result.detail },
+    }, 'waiting-user')
+  }
+}
+
+// ---- blockers, diagnosis, model change -------------------------------------------------------
+
+// Plan section 9.11 step 1: which recorded blocker a report describes; null for a new one. Needs at
+// least one recorded blocker (a task's first report is b1 without a judgment).
+export async function matchBlocker(ctx: Ctx, task: TaskRecord, report: string): Promise<{ blockerId: string | null; provider: 'jev' | 'substitute'; confidence: number }> {
+  return judgeBlocker(judgeCtx(ctx), Object.values(task.blockers), report)
+}
+
+function newBlockerId(task: TaskRecord): string {
+  let n = 1
+  while (`b${n}` in task.blockers) n++
+  return `b${n}`
+}
+
+async function blocked(ctx: Ctx, task: TaskRecord, executorId: string, description: string): Promise<void> {
+  const now = await ctx.io.now()
+  let blockerId: string | null = null
+  let match: Blocker['history'][number]['match']
+  if (Object.keys(task.blockers).length > 0) {
+    const m = await matchBlocker(ctx, task, description)
+    blockerId = m.blockerId
+    match = { provider: m.provider, confidence: m.confidence }
+  }
+  const id = blockerId ?? newBlockerId(task)
+  const existing = task.blockers[id]
+  if (existing !== undefined && existing.diagnoses >= 1) {
+    await ctx.reg.update(task.id, t => {
+      t.blockers[id]!.history.push({ at: now, step: 'diagnosis', agentId: executorId, note: `reported again, no second diagnosis: ${description}`, ...(match ? { match } : {}) })
+    }, { type: 'blocker', blockerId: id, again: true })
+    return noProgress(ctx, (await ctx.reg.get(task.id))!, id, `同一个阻碍已经诊断过一次，仍然没有解决：${description}`)
+  }
+  await ctx.reg.update(task.id, t => {
+    const b = t.blockers[id] ?? (t.blockers[id] = { id, description, diagnoses: 0, modelChanges: 0, history: [] })
+    b.diagnoses += 1
+    b.history.push({ at: now, step: 'diagnosis', agentId: executorId, note: `blocked report: ${description}`, ...(match ? { match } : {}) })
+  }, { type: 'blocker', blockerId: id, new: existing === undefined, ...(match ? { match } : {}) })
+  const fresh = (await ctx.reg.get(task.id))!
+  const change = await changeOf(ctx, fresh)
+  const brief = diagnosisBrief(fresh, fresh.agents[executorId]!, fresh.blockers[id]!, change?.diffStat ?? null)
+  const rule = ruleById(ctx.rules, 'review')
+  await spawnAgent(ctx, fresh, {
+    role: 'diagnosis',
+    ruleId: rule.id,
+    model: rule.model!,
+    efforts: await reviewEfforts(ctx, brief),
+    selection: { kind: 'rule', reason: `diagnosis of blocker ${id} reported by ${executorId} (rule review)` },
+    brief,
+    name: nextName(fresh, workerOf(fresh), 'diag'),
+    description: `诊断：${fresh.title}`,
+    worktree: fresh.worktree?.path ?? null,
+  })
+}
+
+async function noProgress(ctx: Ctx, task: TaskRecord, blockerId: string, why: string): Promise<void> {
+  const b = task.blockers[blockerId]!
+  const evidence = b.history.map(h => `· ${h.step}（${h.agentId}）：${h.note}`).join('\n')
+  await askDecision(ctx, task, {
+    kind: 'no-progress',
+    question: `「${task.title}」没有进展，已暂停。${why}\n阻碍 ${b.id}：${b.description}\n${evidence}\n回复这条消息告诉执行者怎样继续。`,
+    options: ['回复处理意见'],
+    data: { blockerId },
+  }, 'paused')
+}
+
+// The blocker a diagnosis agent was started for: the latest diagnosis entry (one diagnosis runs at a
+// time in a daily task; its executor waits for it).
+function blockerOfDiagnosis(task: TaskRecord): Blocker {
+  let best: { b: Blocker; at: number } | null = null
+  for (const b of Object.values(task.blockers)) {
+    for (const h of b.history) if (h.step === 'diagnosis' && (best === null || h.at >= best.at)) best = { b, at: h.at }
+  }
+  if (best === null) throw new Error(`task ${task.id}: a diagnosis finished with no blocker on record`)
+  return best.b
+}
+
+async function diagnosisDone(ctx: Ctx, task: TaskRecord, agent: AgentRecord, answer: string): Promise<void> {
+  const suggestion = parseDiagnosis(answer)
+  if (suggestion === null) throw new Error(`diagnosis agent ${agent.name ?? agent.agentId} ended without a 诊断建议 line`)
+  if (task.owner.kind !== 'agent') throw new Error(`daily task ${task.id} has no executor`)
+  const executor = task.agents[task.owner.agentId]!
+  const blocker = blockerOfDiagnosis(task)
+  const now = await ctx.io.now()
+  const line = suggestion.action === 'replace' ? `更换模型 ${suggestion.model} / ${suggestion.effort}` : suggestion.action === 'continue' ? '继续原代理' : '交给用户'
+  await ctx.reg.update(task.id, t => {
+    const a = t.agents[agent.agentId]!
+    a.state = 'done'
+    a.reports.push({ at: now, status: 'done', text: answer, verification: [] })
+    // The diagnosis entry blocked() wrote now names the diagnosing agent and its suggestion, as the
+    // blocker question shows it to Jev ("diagnosis by agent <id>: <note>").
+    const entry = [...t.blockers[blocker.id]!.history].reverse().find(h => h.step === 'diagnosis')!
+    entry.note = `${entry.note} → 诊断建议：${line}`
+    entry.agentId = agent.agentId
+  }, { type: 'diagnosis', agentId: agent.agentId, blockerId: blocker.id, action: suggestion.action, ...(suggestion.action === 'replace' ? { model: suggestion.model, effort: suggestion.effort } : {}) })
+
+  if (suggestion.action === 'continue') {
+    await ctx.reg.update(task.id, t => { t.state = 'running' }, { type: 'state', state: 'running', reason: 'diagnosis: continue' })
+    await wake(ctx, task, executor.agentId, `An independent diagnosis (agent ${agent.name ?? agent.agentId}) looked at blocker ${blocker.id} (${blocker.description}):\n\n${answer}\n\nContinue the task with this in mind and end with the report lines.`, ['diagnosis-redelegate'])
+    return
+  }
+  if (suggestion.action === 'user') {
+    await ctx.reg.update(task.id, t => { t.state = 'waiting-user' }, { type: 'state', state: 'waiting-user', reason: 'diagnosis: hand to the person' })
+    await tell(ctx, task, `「${task.title}」受阻（${blocker.id}：${blocker.description}），诊断建议由你决定：\n${answer}\n回复这条消息，执行者会收到你的意见。`, { kind: 'magpie', notify: true })
+    return
+  }
+
+  const same = (x: string, y: string) => canonical(x, ctx.catalog) === canonical(y, ctx.catalog)
+  if (blocker.modelChanges >= 1) {
+    return noProgress(ctx, task, blocker.id, `诊断建议更换为 ${displayName(suggestion.model, ctx.rules)}/${suggestion.effort}，但这个阻碍已经更换过一次模型。`)
+  }
+  const sub = executor.ruleId === null ? null : substituteAllowed(ctx.rules, executor.ruleId, suggestion.model, suggestion.effort, same)
+  if (sub === null || !isAvailable(suggestion.model, ctx.catalog)) {
+    const effort = raise(suggestion.effort)
+    await askDecision(ctx, task, {
+      kind: 'model-change-confirm',
+      question: `「${task.title}」受阻（${blocker.id}：${blocker.description}）。诊断建议改用 ${displayName(suggestion.model, ctx.rules)}/${suggestion.effort}，这不在规则 ${executor.ruleId ?? 'none'} 的自动替代候选中，需要你确认。\n${answer}`,
+      options: [`改用 ${displayName(suggestion.model, ctx.rules)}`, '等待', '回复其他模型名'],
+      data: { agentId: executor.agentId, model: canonical(suggestion.model, ctx.catalog), effort, blockerId: blocker.id, diagnosis: agent.agentId },
+    }, 'waiting-user')
+    return
+  }
+  const effort = raise(suggestion.effort)
+  await ctx.reg.update(task.id, t => {
+    const b = t.blockers[blocker.id]!
+    b.modelChanges += 1
+    b.history.push({ at: now, step: 'model-change', agentId: agent.agentId, note: `${executor.model}/${executor.effort} → ${canonical(suggestion.model, ctx.catalog)}/${effort} (substitute ${sub.id})` })
+    t.state = 'running'
+  }, { type: 'blocker', blockerId: blocker.id, modelChange: suggestion.model, effort })
+  const fresh = (await ctx.reg.get(task.id))!
+  const reasonText = `诊断 ${agent.agentId} 建议：更换模型 ${suggestion.model} / ${suggestion.effort}${sub.id === 'repo-alt' ? '（repo-alt 的档位由诊断建议代替架构师的选择）' : ''}`
+  await handOver(ctx, fresh, fresh.agents[executor.agentId]!, {
+    model: suggestion.model,
+    efforts: [{ from: null, to: suggestion.effort, reason: 'explicit', note: 'diagnosis suggestion' }, { from: suggestion.effort, to: effort, reason: 'diagnosis-redelegate' }],
+    selection: { kind: 'diagnosis', reason: reasonText },
+    reasonLine: `[model-reason evidence: ${reasonText}]`,
+    why: `an independent diagnosis suggested another model for blocker ${blocker.id} (${blocker.description})`,
+  })
+  await tell(ctx, fresh, `「${fresh.title}」改由 ${displayName(suggestion.model, ctx.rules)}/${effort} 接手：${reasonText}`, { kind: 'magpie', notify: false })
+}
+
+// Starts the agent that takes over from `previous` with the same role (plan sections 9.11, 9.16):
+// an executor gets the handoff brief, the other plugin agents their own brief rebuilt from the record.
+export async function handOver(ctx: Ctx, task: TaskRecord, previous: AgentRecord, a: { model: string; efforts: Omit<EffortChange, 'at'>[]; selection: AgentRecord['selection']; reasonLine: string; why: string }): Promise<void> {
+  const worker = workerOf(task)
+  const common = { model: a.model, efforts: a.efforts, selection: a.selection, worktree: task.worktree?.path ?? null }
+  if (previous.role === 'executor') {
+    await spawnAgent(ctx, task, { ...common, role: 'executor', ruleId: previous.ruleId, brief: `${a.reasonLine}\n${handoffBrief(task, { reason: a.why, previous })}`, name: nextName(task, worker, 'x'), description: task.title })
+  } else if (previous.role === 'assessment') {
+    await spawnAgent(ctx, task, { ...common, role: 'assessment', ruleId: previous.ruleId, brief: `${a.reasonLine}\n${assessmentBrief(task, ctx.rules, task.requestedModel)}`, name: nextName(task, worker, 'x'), description: task.title, worktree: null })
+  } else if (previous.role === 'acceptance') {
+    if (task.owner.kind !== 'agent') throw new Error(`daily task ${task.id} has no executor`)
+    const change = await changeOf(ctx, task)
+    const brief = acceptanceBrief(task, task.agents[task.owner.agentId]!, change === null ? null : { patchPath: change.patchPath, diffStat: change.diffStat })
+    await spawnAgent(ctx, task, { ...common, role: 'acceptance', ruleId: previous.ruleId, brief: `${a.reasonLine}\n${brief}`, name: nextName(task, worker, 'acc'), description: `验收：${task.title}`, worktree: change === null ? null : task.worktree!.path })
+  } else if (previous.role === 'diagnosis') {
+    if (task.owner.kind !== 'agent') throw new Error(`daily task ${task.id} has no executor`)
+    const change = await changeOf(ctx, task)
+    const brief = diagnosisBrief(task, task.agents[task.owner.agentId]!, blockerOfDiagnosis(task), change?.diffStat ?? null)
+    await spawnAgent(ctx, task, { ...common, role: 'diagnosis', ruleId: previous.ruleId, brief: `${a.reasonLine}\n${brief}`, name: nextName(task, worker, 'diag'), description: `诊断：${task.title}` })
+  } else {
+    throw new Error(`no takeover for a ${previous.role} agent: its parent agent decides`)
+  }
+}
+
+// ---- the routing assessment ------------------------------------------------------------------
+
+async function assessmentDone(ctx: Ctx, task: TaskRecord, agent: AgentRecord, answer: string): Promise<void> {
+  const confirm = parseRouteConfirm(answer)
+  const now = await ctx.io.now()
+  await ctx.reg.update(task.id, t => {
+    const a = t.agents[agent.agentId]!
+    a.state = 'idle'
+    a.reports.push({ at: now, status: confirm === null ? 'needs-user' : 'done', text: answer, verification: [] })
+  }, { type: 'report', agentId: agent.agentId, role: 'assessment', confirm: confirm === null ? null : confirm === 'cancel' ? 'cancel' : `${confirm.model}/${confirm.effort}` })
+
+  const open = Object.values(task.decisions).find(d => d.kind === 'route-confirm' && d.resolvedAt === undefined)
+  if (confirm === null) {
+    // The recommendation went to the person through tg-router; their reply resumes this agent.
+    if (open === undefined) {
+      const decision: Decision = { id: newId('q', now), kind: 'route-confirm', createdAt: now, question: answer, options: ['确认推荐', '指定其他模型', '取消'], data: { agentId: agent.agentId } }
+      await ctx.reg.update(task.id, t => {
+        t.decisions[decision.id] = decision
+        t.state = 'waiting-user'
+      }, { type: 'decision', decisionId: decision.id, kind: 'route-confirm', state: 'waiting-user' })
+    }
+    return
+  }
+  const words = await lastUserWords(ctx, agent.agentId)
+  if (confirm === 'cancel') {
+    await ctx.reg.update(task.id, t => {
+      if (open !== undefined) Object.assign(t.decisions[open.id]!, { resolvedAt: now, answer: words })
+      t.state = 'abandoned'
+      t.agents[agent.agentId]!.state = 'done'
+    }, { type: 'state', state: 'abandoned', reason: 'the person declined the routing assessment' })
+    return
+  }
+  await ctx.reg.update(task.id, t => {
+    if (open !== undefined) Object.assign(t.decisions[open.id]!, { resolvedAt: now, answer: words })
+    t.state = 'running'
+    t.agents[agent.agentId]!.state = 'done'
+  }, { type: 'route-confirmed', agentId: agent.agentId, model: confirm.model, effort: confirm.effort, words })
+  const reason = `用户确认了评估推荐：${words}`
+  const fresh = (await ctx.reg.get(task.id))!
+  await spawnAgent(ctx, fresh, {
+    role: 'executor',
+    ruleId: null,
+    model: confirm.model,
+    efforts: [{ from: null, to: confirm.effort, reason: 'explicit', note: 'confirmed by the person after the routing assessment' }],
+    selection: { kind: 'assessment-confirmed', reason, userConfirmation: words },
+    brief: `[model-reason user: ${reason.replace(/\]/g, '）').replace(/\n+/g, ' ')}]\n${handoffBrief(fresh, { reason: 'the person confirmed the model the routing assessment recommended', previous: fresh.agents[agent.agentId]! })}`,
+    name: nextName(fresh, workerOf(fresh), 'x'),
+    description: fresh.title,
+    worktree: fresh.worktree?.path ?? null,
+  })
+}
+
+// The person's latest words in an agent's conversation: the message that resumed it.
+async function lastUserWords(ctx: Ctx, agentId: string): Promise<string> {
+  const api = await ctx.host.session.messages({ agentId, as: 'api' })
+  if (!Array.isArray(api)) throw new Error(`messages of agent ${agentId}: ${api.deny}`)
+  const dialogue = subagentDialogue(api as ApiMessage[])
+  for (let i = dialogue.length - 1; i > 0; i--) if (dialogue[i]!.role === 'user') return dialogue[i]!.content
+  throw new Error(`agent ${agentId}: no message from the person after its brief`)
+}
+
+// ---- open_worktree ---------------------------------------------------------------------------
+
+export async function onOpenWorktree(ctx: Ctx, agentId: string, args: { project?: unknown; init_git?: unknown }): Promise<string> {
+  const taskId = ctx.st.agents.get(agentId)
+  if (taskId === undefined) throw new Error('open_worktree is for subagents magpie-tasks routed; this agent is not one of them')
+  const task = await ctx.reg.get(taskId)
+  if (task === undefined) throw new Error(`task ${taskId} is missing`)
+  if (typeof args.project !== 'string' || !args.project.startsWith('/')) throw new Error('project must be the absolute path of the project directory')
+  if (args.init_git !== undefined && typeof args.init_git !== 'boolean') throw new Error('init_git must be true or false')
+  const project = args.project.replace(/\/+$/, '') || '/'
+  if (!(await ctx.io.exists(project))) throw new Error(`${project} does not exist`)
+  let root = await repoRoot(ctx.io, project)
+  let gitInitByPlugin = false
+  if (root === null) {
+    if (args.init_git !== true) {
+      return `${project} is not a Git repository. Creating one needs the person's consent: explain that the plugin would run git init there and commit a baseline snapshot of every file, ask them, and end the turn with 状态：需要用户决定. When they agree, call open_worktree again with init_git: true.`
+    }
+    // The person's consent: the message that resumed the agent after it asked (plan section 9.11).
+    const consent = await lastUserWords(ctx, agentId)
+    await initRepo(ctx.io, project)
+    gitInitByPlugin = true
+    root = await repoRoot(ctx.io, project)
+    if (root === null) throw new Error(`git init in ${project} left no repository`)
+    await ctx.reg.log(task.id, { type: 'git-init', project, root, agentId, consent })
+  }
+  const sub = (root === project ? '' : project.slice(root.length + 1))
+  const wt = task.worktree
+  if (wt !== null) {
+    if (task.project !== null && task.project.root !== root) {
+      throw new Error(`this task already works on ${task.project.root} (worktree ${wt.path}); one task changes one project`)
+    }
+    await ctx.reg.update(task.id, t => { t.agents[agentId]!.worktree = wt.path; t.agents[agentId]!.cwd = wt.path }, { type: 'worktree', agentId, path: wt.path, existing: true })
+    return worktreeText(wt.path, sub)
+  }
+  const path = `${ctx.opts.worktreeDir}/${task.id}`
+  const made = await createWorktree(ctx.io, root, path, baseRefName(task.id), root)
+  await ctx.reg.update(task.id, t => {
+    t.project = { root, gitInitByPlugin }
+    t.worktree = { path, baseRef: made.baseRef, baseCommit: made.baseCommit }
+    t.agents[agentId]!.worktree = path
+    t.agents[agentId]!.cwd = path
+  }, { type: 'worktree', agentId, path, root, baseCommit: made.baseCommit })
+  return worktreeText(path, sub)
+}
+
+function worktreeText(path: string, sub: string): string {
+  const where = sub === '' ? path : `${path}/${sub}`
+  return [
+    `Task worktree: ${path}${sub === '' ? '' : ` (the project directory you named is ${where})`}.`,
+    'It holds a snapshot of the project, including uncommitted and untracked files; files Git ignores (node_modules, build output) are not there, so install dependencies in it when the work needs them.',
+    `Change files only in this worktree; \`cd ${where}\` before Bash commands. Do not commit or push: after acceptance the plugin applies the change to the project.`,
+  ].join('\n')
+}
+
+// ---- the person's answers to a daily task's decisions ----------------------------------------
+
+const APPROVE = {
+  instructions: 'How does the person answer the proposal in the previous message: approve it, reject it, or neither?',
+  choices: [
+    { value: 'approve', description: 'Approves or agrees to the proposal' },
+    { value: 'reject', description: 'Rejects or declines the proposal' },
+    { value: 'unclear', description: 'Neither, or cannot be read as a yes or no' },
+  ],
+}
+const REPLACE = {
+  instructions: 'How does the person answer the question about which model should take the task over?',
+  choices: [
+    { value: 'suggested', description: 'Accepts the model the question proposes' },
+    { value: 'other', description: 'Names a different model to use' },
+    { value: 'wait', description: 'Wants to wait before changing anything' },
+    { value: 'continue', description: 'Wants the original agent to continue on its own model now' },
+    { value: 'unclear', description: 'None of these, or cannot be read as a choice' },
+  ],
+}
+
+// A model the person named: a model ID or a routing-table name in the text, the longest match first.
+export function namedModel(text: string, names: { id: string; name: string }[]): string | null {
+  const lower = text.toLowerCase()
+  let best: { id: string; len: number } | null = null
+  for (const { id, name } of names) {
+    for (const key of [id, name]) {
+      if (key !== '' && lower.includes(key.toLowerCase()) && (best === null || key.length > best.len)) best = { id, len: key.length }
+    }
+  }
+  return best?.id ?? null
+}
+
+async function resolve(ctx: Ctx, task: TaskRecord, decision: Decision, answer: string, state?: TaskRecord['state']): Promise<void> {
+  const now = await ctx.io.now()
+  await ctx.reg.update(task.id, t => {
+    Object.assign(t.decisions[decision.id]!, { resolvedAt: now, answer })
+    if (state !== undefined) t.state = state
+  }, { type: 'decision', decisionId: decision.id, kind: decision.kind, answer, ...(state !== undefined ? { state } : {}) })
+}
+
+export async function applyDailyDecision(ctx: Ctx, task: TaskRecord, decision: Decision, text: string): Promise<string> {
+  if (task.kind !== 'daily') throw new Error(`applyDailyDecision: task ${task.id} is a long task; its decisions run in the architect session`)
+  if (decision.resolvedAt !== undefined) return `这个问题已经处理过（${decision.answer ?? ''}）。`
+  const input = [{ role: 'assistant' as const, content: decision.question }, { role: 'user' as const, content: text }]
+  const jc = judgeCtx(ctx)
+  const owner = task.owner.kind === 'agent' ? task.owner.agentId : null
+
+  switch (decision.kind) {
+    case 'integration-conflict':
+    case 'fix-confirm': {
+      const c = await choose(jc, APPROVE.instructions, APPROVE.choices, input)
+      if (c.choice === 'unclear') return '没有判断出你的意思，请直接回复“整合”或“不整合”（没有改动的任务回复“接受”或“不接受”）。'
+      if (c.choice === 'reject') {
+        await resolve(ctx, task, decision, `reject: ${text}`)
+        await ctx.reg.update(task.id, t => { t.state = 'paused'; t.pausedByUser = true }, { type: 'state', state: 'paused', reason: `${decision.kind} rejected` })
+        return task.worktree !== null ? `好的，不整合；改动保留在工作副本 ${task.worktree.path}。` : '好的，不接受这个结果；任务已暂停。'
+      }
+      await resolve(ctx, task, decision, `approve: ${text}`)
+      if (decision.kind === 'fix-confirm' && decision.data['change'] !== 'yes') {
+        const now = await ctx.io.now()
+        await ctx.reg.update(task.id, t => { t.state = 'done'; t.completedAt = now }, { type: 'state', state: 'done', reason: 'the person accepted the fixed result' })
+        return '好的，已接受修复后的结果，任务完成。'
+      }
+      const fixed = task.agents[decision.data['agentId'] ?? '']
+      const verification = fixed?.reports[fixed.reports.length - 1]?.verification ?? []
+      await integrateDaily(ctx, (await ctx.reg.get(task.id))!, { conclusion: `用户确认整合：${text}`, verification: verification.length > 0 ? verification.join('；') : '没有报告验证命令' })
+      return '好的，正在整合，结果会单独报告。'
+    }
+    case 'route-confirm': {
+      const agentId = decision.data['agentId']
+      if (agentId === undefined) throw new Error(`decision ${decision.id} names no assessment agent`)
+      await wake(ctx, task, agentId, text, [])
+      return '已转给评估子代理。'
+    }
+    case 'no-progress': {
+      if (owner === null) throw new Error(`daily task ${task.id} has no executor`)
+      await resolve(ctx, task, decision, text, 'running')
+      await ctx.reg.update(task.id, t => { t.pausedByUser = false }, { type: 'state', state: 'running', reason: 'the person answered the no-progress report' })
+      await wake(ctx, task, owner, `The person answered about the blocked task:\n${text}`, [])
+      return '已把你的意见交给执行者，任务继续。'
+    }
+    case 'model-change-confirm':
+    case 'model-unavailable': {
+      const c = await choose(jc, REPLACE.instructions, REPLACE.choices, input)
+      const agentId = decision.data['agentId']
+      if (agentId === undefined) throw new Error(`decision ${decision.id} names no agent`)
+      const previous = task.agents[agentId]
+      if (previous === undefined) throw new Error(`decision ${decision.id}: agent ${agentId} is not on task ${task.id}`)
+      if (c.choice === 'unclear') return '没有判断出你的意思，请回复要改用的模型名（例如 Sol 6.1），或回复“等待”“继续”。'
+      if (c.choice === 'wait') {
+        const now = await ctx.io.now()
+        await ctx.reg.update(task.id, t => { t.decisions[decision.id]!.answer = `wait: ${text}`; t.state = 'waiting-user' }, { type: 'decision', decisionId: decision.id, answer: 'wait', at: now })
+        return '好的，先等待；之后回复“继续”或模型名即可。'
+      }
+      if (c.choice === 'continue') {
+        await resolve(ctx, task, decision, `continue: ${text}`, 'running')
+        await wake(ctx, task, agentId, `The person asks you to continue:\n${text}`, [])
+        return '好的，原来的子代理继续。'
+      }
+      let model: string | null
+      if (c.choice === 'suggested') {
+        model = decision.data['model'] ?? null
+        if (model === null) return '这个问题没有建议的模型，请回复要改用的模型名。'
+      } else {
+        const names = [
+          ...Object.entries(ctx.rules.models).map(([id, m]) => ({ id, name: m.name })),
+          ...ctx.catalog.picker.map(p => ({ id: canonical(p, ctx.catalog), name: '' })),
+        ]
+        model = namedModel(text, names)
+        if (model === null) return '没有识别出模型名，请直接回复模型名，例如 Sol 6.1 或 codex/gpt-6.1-sol。'
+      }
+      const effort = (decision.data['effort'] ?? previous.effort) as Effort
+      await resolve(ctx, task, decision, `${model}: ${text}`, 'running')
+      const blockerId = decision.kind === 'model-change-confirm' ? decision.data['blockerId'] : undefined
+      if (blockerId !== undefined) {
+        const now = await ctx.io.now()
+        const to = model
+        await ctx.reg.update(task.id, t => {
+          const b = t.blockers[blockerId]
+          if (b === undefined) throw new Error(`decision ${decision.id}: blocker ${blockerId} is not on task ${task.id}`)
+          b.modelChanges += 1
+          b.history.push({ at: now, step: 'model-change', agentId: decision.data['diagnosis'] ?? agentId, note: `${previous.model}/${previous.effort} → ${canonical(to, ctx.catalog)}/${effort} (confirmed by the person)` })
+        }, { type: 'blocker', blockerId, modelChange: to, effort, confirmedBy: 'person' })
+      }
+      const words = text.replace(/\]/g, '）').replace(/\n+/g, ' ')
+      await handOver(ctx, (await ctx.reg.get(task.id))!, previous, {
+        model,
+        efforts: [{ from: null, to: effort, reason: 'explicit', note: `the person chose ${model}` }],
+        selection: { kind: 'user' as SelectionKind, reason: text, userConfirmation: text },
+        reasonLine: `[model-reason user: ${words}]`,
+        why: decision.kind === 'model-unavailable' ? `the model ${previous.model} was unavailable and the person chose ${model}` : `the person chose ${model} after an independent diagnosis`,
+      })
+      return `好的，改由 ${displayName(model, ctx.rules)}/${effort} 接手。`
+    }
+    case 'file-conflict':
+    case 'interrupted':
+      throw new Error(`a daily task has no ${decision.kind} decision`)
+  }
+}

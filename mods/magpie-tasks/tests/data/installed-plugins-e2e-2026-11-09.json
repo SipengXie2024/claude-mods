@@ -1,0 +1,45 @@
+{
+  "version": 2,
+  "plugins": {
+    "subagent-opus@sipeng-mods": [
+      {
+        "scope": "user",
+        "installPath": "/tmp/mt-e2e-wSO5/cfg/plugins/cache/sipeng-mods/subagent-opus/0.1.0",
+        "version": "0.1.0",
+        "installedAt": "2026-11-09T13:57:27.125Z",
+        "lastUpdated": "2026-11-09T13:57:27.125Z",
+        "gitCommitSha": "ce22a71d1bb7c1ed66e1ecff9e6f4681da53aeaa"
+      }
+    ],
+    "jev@sipeng-mods": [
+      {
+        "scope": "user",
+        "installPath": "/tmp/mt-e2e-wSO5/cfg/plugins/cache/sipeng-mods/jev/0.2.0",
+        "version": "0.2.0",
+        "installedAt": "2026-11-09T13:57:27.546Z",
+        "lastUpdated": "2026-11-09T13:57:27.546Z",
+        "gitCommitSha": "ce22a71d1bb7c1ed66e1ecff9e6f4681da53aeaa"
+      }
+    ],
+    "context-memory@sipeng-mods": [
+      {
+        "scope": "user",
+        "installPath": "/tmp/mt-e2e-wSO5/cfg/plugins/cache/sipeng-mods/context-memory/0.4.0",
+        "version": "0.4.0",
+        "installedAt": "2026-11-09T13:57:27.947Z",
+        "lastUpdated": "2026-11-09T13:57:27.947Z",
+        "gitCommitSha": "ce22a71d1bb7c1ed66e1ecff9e6f4681da53aeaa"
+      }
+    ],
+    "magpie-tasks@sipeng-mods": [
+      {
+        "scope": "user",
+        "installPath": "/tmp/mt-e2e-wSO5/cfg/plugins/cache/sipeng-mods/magpie-tasks/0.1.0",
+        "version": "0.1.0",
+        "installedAt": "2026-11-09T13:57:29.328Z",
+        "lastUpdated": "2026-11-09T13:57:29.328Z",
+        "gitCommitSha": "ce22a71d1bb7c1ed66e1ecff9e6f4681da53aeaa"
+      }
+    ]
+  }
+}

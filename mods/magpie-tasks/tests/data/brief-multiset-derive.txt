@@ -1,0 +1,7 @@
+Execute this task.
+
+- Working context: you are in /home/ubuntu/sipeng/blockchain-catchup, a Chinese research knowledge base (entry file AGENTS.md). Paper full texts are under _classics/txt-flow/ and _research/paper-downloads/txt-flow/; meta/papers.tsv maps papers to their full text.
+- Task (the user's message, verbatim): 我们需要一个多重集合的摘要：插入、删除都只能花常数时间，两个节点各自算的摘要要能直接合并，而且要抗量子。帮我想想这种摘要必须长什么样，安全性要靠什么，现成的有没有。
+- Save the full answer you would give the user (in Chinese) to /tmp/formalize-and-substitute-workspace/iteration-1/eval-multiset-pq-digest/without_skill/outputs/report.md. Scratch files go only under /tmp/fas-run-multiset-base/.
+- Constraints: everything else is read-only. Do not create, edit or delete files outside those two locations; no git writes; do not spawn agents; do not use the Skill tool, and do not read anything under /home/ubuntu/.agents/skills or /home/ubuntu/.claude/skills. Do not invent papers, venues or numbers.
+- When done, reply with one line: the report path.

@@ -1,0 +1,5 @@
+Deliverable: greet.py in the task worktree prints "hey".
+Work only in /home/ubuntu/.local/share/magpie-tasks/worktrees/l-20261109-5vf47x (cd there first).
+1. Edit greet.py so it is exactly: print("hey")
+2. Run: python3 greet.py
+Acceptance: step 2 prints hey. Report the final file content and exact output of step 2. If a write is refused or you are paused, report that exactly and stop. No git write commands, no further delegation.

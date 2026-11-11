@@ -1,0 +1,7 @@
+{
+  "name": "magpie-tasks-io-tests",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "^1.3.0"
+  }
+}

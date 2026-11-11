@@ -53,6 +53,11 @@
       "name": "context-memory",
       "source": "./mods/context-memory",
       "description": "Model-kept task notes carried verbatim across context compaction, a local archive of the conversation, and scoped history search and read tools."
+    },
+    {
+      "name": "magpie-tasks",
+      "source": "./mods/magpie-tasks",
+      "description": "Long-task windows for claude-magpie: an architect session per long task, subagent model and effort routing by rules judged through Jev, task records, worktrees with integration, acceptance and diagnosis of Telegram daily tasks, startup recovery. Install after jev and subagent-opus."
     }
   ]
 }

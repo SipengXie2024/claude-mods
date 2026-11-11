@@ -1,0 +1,3 @@
+<channel source="tg-channel" chat_id="7051661301" message_id="1170" user="Victor_Xie" user_id="7051661301" ts="2026-11-07T08:04:25.000Z" image_path="/home/ubuntu/.claude/channels/telegram-live/inbox/1794038667762-AQADMxdrG0MEeFd-.jpg">
+(photo)
+</channel>
