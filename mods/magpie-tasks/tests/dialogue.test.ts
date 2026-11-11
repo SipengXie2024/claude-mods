@@ -1,10 +1,11 @@
-// Subagent views as Jev reads them (plan section 12.1, dialogue row). Input: real
-// `$.session.messages({ as: 'api' })` dumps of the 2026-11-09 interface probe, copied to tests/data.
+// Subagent views and delegation inputs as Jev reads them (plan section 12.1, dialogue row). Input:
+// real `$.session.messages({ as: 'api' })` dumps of the 2026-11-09 interface probe and real briefs,
+// copied to tests/data.
 import { expect, test } from 'claude-code/testing'
-import { briefForJev, subagentDialogue } from '../src/dialogue'
+import { FILE_HEAD, briefForJev, briefPaths, delegationMessages, spawningDialogue, subagentDialogue } from '../src/dialogue'
 import type { JevMessage } from '../src/jev'
 import { dump006, dump032, dump034, dump044, dump047, dump048, type Dump } from './data/api-dumps'
-import { briefHey, briefProviderFeasibility } from './data/briefs'
+import { briefHey, briefMultisetDesign, briefProviderFeasibility } from './data/briefs'
 
 const ALL: Record<string, Dump> = { dump006, dump032, dump034, dump044, dump047, dump048 }
 const users = (d: JevMessage[]) => d.filter(m => m.role === 'user').map(m => m.content)
@@ -99,4 +100,36 @@ test('a tg-router worker brief reaches Jev as the person\'s own words, without t
   expect(briefForJev(routed)).toBe(words)
   // An architect's own brief has no such line and keeps its text.
   expect(briefForJev(briefHey)).toBe(briefHey)
+})
+
+test('briefPaths: the absolute paths a brief names, in order, without the punctuation after them', () => {
+  expect(briefPaths(briefMultisetDesign)).toEqual([
+    '/home/ubuntu/.agents/skills/formalize-and-substitute/SKILL.md',
+    '/home/ubuntu/sipeng/blockchain-catchup',
+    '/tmp/formalize-and-substitute-workspace/iteration-1/eval-multiset-pq-digest/with_skill/outputs/report.md',
+    '/tmp/fas-run-multiset-with/',
+  ])
+  // Relative paths (`_classics/txt-flow/`, `meta/papers.tsv`) name none.
+  expect(briefPaths(briefMultisetDesign).some(p => p.includes('txt-flow') || p.includes('papers.tsv'))).toBe(false)
+  expect(briefPaths(briefHey)).toEqual(['/home/ubuntu/.local/share/magpie-tasks/worktrees/l-20261109-5vf47x'])
+})
+
+test('a delegation reaches Jev as the spawning conversation, the named files, then the brief', () => {
+  const dialogue = spawningDialogue(dump034.api, false)
+  const files = [{ path: '/home/ubuntu/.agents/skills/formalize-and-substitute/SKILL.md', text: briefHey }]
+  const input = delegationMessages(dialogue, files, briefMultisetDesign)
+  expect(input.slice(0, dialogue.length)).toEqual(dialogue)
+  expect(input[dialogue.length]).toEqual({ role: 'user', content: `${FILE_HEAD} ${files[0]!.path}\n${briefHey}` })
+  expect(input.at(-1)).toEqual({ role: 'user', content: briefForJev(briefMultisetDesign) })
+  expect(input).toHaveLength(dialogue.length + 2)
+  // A brief without a conversation (the eval sheet, the io tests) is the brief message alone.
+  expect(delegationMessages([], [], briefProviderFeasibility)).toEqual([{ role: 'user', content: briefForJev(briefProviderFeasibility) }])
+})
+
+test('the spawning conversation of a delegating subagent is its own view, its brief through briefForJev', () => {
+  expect(spawningDialogue(dump006.api, true)).toEqual(subagentDialogue(dump006.api))
+  expect(spawningDialogue(dump048.api, true)).toEqual(subagentDialogue(dump048.api))
+  // The main loop's view keeps the person's first message as typed.
+  expect(spawningDialogue(dump034.api, false)[0]!.role).toBe('user')
+  expect(users(spawningDialogue(dump034.api, false))).toEqual(users(subagentDialogue(dump034.api)))
 })

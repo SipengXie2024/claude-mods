@@ -6,6 +6,7 @@
 // judged is the brief that runs, and each delegation is judged once.
 import type { AgentSpawnInput } from 'claude-code'
 import { relay } from './daily'
+import { delegationInput } from './delegation'
 import { briefForJev } from './dialogue'
 import { newId } from './io'
 import { judgeRecommendation, judgeSpawn, recommendationQuestion } from './judge'
@@ -58,13 +59,13 @@ export async function modelRoute(ctx: Ctx, task: TaskRecord, args: Record<string
     provider: { plugin: 'magpie-tasks', tier: 'user' }, parentModel: task.owner.kind === 'session' ? task.owner.model : '', background: true, fork: false,
   } as AgentSpawnInput)
   const decide = (prompt: string, judgment: Awaited<ReturnType<typeof judgeSpawn>>): SpawnDecision => decideSpawn({
-    e: spawnInput(prompt), origin: ROUTE_ORIGIN, task, judgment, rules, catalog,
+    e: spawnInput(prompt), origin: ROUTE_ORIGIN, task, judgment, rules, catalog, rand: Math.random,
     lookupAgentModel: id => task.agents[id]?.model,
     session: { id: ctx.st.sessionId, cwd: ctx.st.cwd },
   })
 
   const jc = judgeCtx(ctx)
-  const judgment = await judgeSpawn(jc, [{ role: 'user', content: briefForJev(req.prompt) }])
+  const judgment = await judgeSpawn(jc, await delegationInput(ctx, req.prompt))
   const table = decide(req.prompt, judgment)
   if (table.action === 'pass') throw new Error('model_route: the routing decision passed the brief through')
 

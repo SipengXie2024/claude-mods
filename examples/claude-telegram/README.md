@@ -33,7 +33,7 @@ a known thread go straight to their worker).
    Router never sees it. A finished worker resumes from its transcript.
    A message that replies to nothing is a new request for the Router.
 3. **Each worker run ends with its answer** posted under the message that
-   started the run (at most 100 words; the result first). A question the worker
+   started the run (at most 100 词, Chinese words; the result first). A question the worker
    needs you to decide is that answer.
 4. **A follow-up that is not about the request** is handed back by the worker:
    a line `HANDBACK <message_id>: <reason>` in its answer, which the mod
@@ -47,14 +47,18 @@ Tasks are kept in the mod's store and dropped 14 days after their last message.
 
 ## Models, checks and integration (magpie-tasks)
 
-The Router's main loop runs on Opus 5.5 with JEV setting its effort per message.
+The Router's main loop runs on Opus 5.5 at low effort. DeepSeek's article found
+that the Router layer's work (routing and talking: long input, short output) is
+simpler than it looks; the launcher passes `--effort low` and sets
+`JEV_MAIN_EFFORT=low`, so JEV keeps every Router request at low without asking
+Jev or raising it after a fault. A `/effort` typed in the pane still wins.
 A worker's model is not fixed: magpie-tasks asks Jev which routing rule the
 request fits and starts the worker on that rule's model and effort, and tells
 you in one silent reply, e.g. `模型：Opus 5.5 · xhigh · 规则 code-change（Jev 置信度 0.82；需要深入推理）`.
 When you ask for a model yourself ("用 Sol 6.1 做"), the Router passes it to
 `dispatch` with your words as the reason, and that model is used as given. A
-request that fits no rule first gets an assessment worker that recommends a
-model; your reply confirms it, and an executor starts on the confirmed model.
+request that no rule fits with enough confidence runs on the daily default,
+Opus 5.5 at medium (rule `daily-default`), without asking you first.
 
 A worker that changes a project first asks magpie-tasks for a worktree
 (`open_worktree`) and works only there. It ends each answer with a status line.

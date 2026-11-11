@@ -6,7 +6,7 @@ claude-magpie 会话的长期任务与子代理路由插件。设计依据见仓
 
 - **长期任务。** 每个交互式 `claude-magpie` 新窗口的第一条消息登记为一个长期任务：Jev 推荐架构师模型（Opus 5.5、Astra 或 Sol 6.1），用户在确认对话中选定后，插件为项目建立 Git 工作副本（不是仓库时先建立仓库并提交一份基线快照），以 `claude-magpie --bg` 启动架构师后台会话，前台窗口随即结束，`claude attach <id>` 可以重新打开。用 `claude-magpie --resume` 恢复一个没有登记的已有会话时，插件询问一次是否接管为长期任务。
 - **架构师的限制。** 架构师留在项目主目录，只能写 `.planning/findings.md`、`CONTEXT.md`、`.planning/plan-*.md` 与 `.planning/*.html`，Bash 只能运行只读命令和 html-plan 的打包、发布命令；实施交给子代理，它们在任务工作副本中修改。架构师有 `task_status`、`report_outcome`、`integrate`、`notify_user`、`resolve_conflict` 五个工具；`integrate` 把工作副本的改动应用到项目主目录的工作区，不做提交。
-- **子代理路由。** 架构师与 Telegram Router 启动的每个子代理按 `rules/routing-rules.json` 的 19 条规则选择模型：Jev 判断适用的规则和是否需要深入推理，插件设置模型与每一步的思考强度（续接、验收不通过、诊断后重新委派时提高）。指定模型的委派必须写 `[model-reason user: …]` 或 `[model-reason evidence: …]`。子代理说明的第一行是任务标记 `[magpie-tasks task=…]`，JEV 据此跳过这些子代理。
+- **子代理路由。** 架构师与 Telegram Router 启动的每个子代理按 `rules/routing-rules.json` 的 19 条规则选择模型：Jev 判断适用的规则和是否需要深入推理（它读到发起委派的那段对话、委派说明里提到的文件和委派说明本身），插件设置模型与每一步的思考强度（续接、验收不通过、诊断后重新委派时提高）；Jev 在两条用不同模型的规则之间拿不准时，从 Mythos 5.2、Opus 5.5、Astra 中随机选一个，评分用来比较它们。指定模型的委派必须写 `[model-reason user: …]` 或 `[model-reason evidence: …]`。子代理说明的第一行是任务标记 `[magpie-tasks task=…]`，JEV 据此跳过这些子代理。
 - **日常任务。** Router 派发的 Telegram 或终端任务登记为日常任务：执行者完成后由验收子代理检查，通过后整合到项目；受阻时做一次独立诊断，必要时更换一次模型；没有匹配规则时先由评估子代理推荐模型并等用户确认。
 - **其他。** 同一工作副本中两个子代理修改同一文件时暂停后来的一方并询问；路由过的子代理因模型不可用结束时按规则安排替代或询问用户；会话启动时恢复被中断的架构师；Router 每天邀请一次评分，每两周检查一次规则是否需要校准。
 

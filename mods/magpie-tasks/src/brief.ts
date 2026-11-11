@@ -101,6 +101,8 @@ const STATUS_RULES = [
   '  状态：已完成',
   '  状态：需要用户决定',
   '  状态：受阻：<one sentence naming the obstacle>',
+  '  状态：进行中：<the background agent or command this answer waits for>',
+  '- Use `状态：进行中` only while an agent or command you started in the background is still running and the answer depends on its result: its completion notice resumes you, and you finish the task then. Waiting for your own background work is not 受阻.',
 ]
 
 // What the plugin appends to a brief it routes, by the agent's role. `cwd` is the worktree the agent
@@ -349,16 +351,17 @@ const STATUS_LINE = new RegExp(`^\\s*[*_\`]*状态\\s*${COLON}\\s*(.+?)[*_\`]*\\
 const VERIFY_LINE = new RegExp(`^\\s*[*_\`]*验证\\s*${COLON}[*_\`]*\\s*(.*?)\\s*$`)
 
 // The executor's status line, and the verification lines of the `验证：` block before it.
-export function parseStatus(answer: string): { status: 'done' | 'needs-user' | 'blocked'; blocker?: string; verification: string[] } | null {
+export function parseStatus(answer: string): { status: 'done' | 'needs-user' | 'blocked' | 'working'; blocker?: string; verification: string[] } | null {
   const lines = answer.split(/\r?\n/)
   for (let i = lines.length - 1; i >= 0; i--) {
     const m = STATUS_LINE.exec(lines[i]!)
     if (!m) continue
     const value = m[1]!.trim()
-    let status: 'done' | 'needs-user' | 'blocked'
+    let status: 'done' | 'needs-user' | 'blocked' | 'working'
     let blocker: string | undefined
     if (value === '已完成') status = 'done'
     else if (value === '需要用户决定') status = 'needs-user'
+    else if (new RegExp(`^进行中\\s*${COLON}\\s*\\S`).test(value)) status = 'working'
     else {
       const b = new RegExp(`^受阻\\s*${COLON}\\s*(.+)$`).exec(value)
       if (!b || b[1]!.trim() === '') continue

@@ -3,11 +3,12 @@
 // at turn.step.
 import type { AgentSpawnInput, AgentSpawnResult, Next, TurnStartInput, TurnStepInput } from 'claude-code'
 import { parseEffortLine, parseMarker, parseModelLine, parseModelReason, parseRequestHeader, parseReviewOf, requestText, withRouting, assessmentBrief, type MarkerInfo } from './brief'
-import { briefForJev, subagentDialogue, type ApiMessage } from './dialogue'
+import { subagentDialogue, type ApiMessage } from './dialogue'
 import { newId } from './io'
+import { delegationInput } from './delegation'
 import { decideRule, judgeDeep, judgeSpawn, type JudgeCtx } from './judge'
 import { canonical, clampEffort, displayName, isAvailable, requestId, sameModel, type ModelCatalog } from './model'
-import { isHardWork, raise, raiseOnRule, reviewSecondTarget, ruleById, ruleModel, startEffort, type Rule, type Rules } from './rules'
+import { borderPair, isHardWork, raise, raiseOnRule, reviewSecondTarget, ruleById, ruleModel, startEffort, type Rule, type Rules } from './rules'
 import type { Ctx } from './state'
 import { EFFORTS, type AgentRecord, type AgentRole, type Effort, type EffortChange, type JevJudgment, type RaiseReason, type SelectionKind, type SessionState, type TaskRecord } from './types'
 import { tell } from './daily'
@@ -77,9 +78,10 @@ function jevText(j: JevJudgment): string {
   return `${by}: rule ${j.ruleChoice}, confidence ${j.confidence.toFixed(2)}, deep ${j.deep ? 'yes' : 'no'}${j.deepP === null ? '' : ` (p ${j.deepP.toFixed(2)})`}`
 }
 
-function dailyNotice(kind: SelectionKind, a: { name: string; effort: Effort; ruleId: string | null; reason: string; judgment: JevJudgment; hard: boolean; reviewOf?: string[] }, rules: Rules): string {
+function dailyNotice(kind: SelectionKind, a: { name: string; effort: Effort; ruleId: string | null; reason: string; judgment: JevJudgment; hard: boolean; reviewOf?: string[]; border?: NonNullable<ReturnType<typeof borderPair>> }, rules: Rules): string {
   const j = a.judgment
   const sub = j.provider === 'substitute' ? '；由评估模型代为判断' : ''
+  if (kind === 'ambiguous' && a.border !== undefined) return `模型：${a.name} · ${a.effort} · 规则拿不准（Jev 在 ${a.border.first.ruleId} ${a.border.first.p.toFixed(2)} 与 ${a.border.second.ruleId} ${a.border.second.p.toFixed(2)} 之间，两条规则用的模型不同），从 ${rules.ambiguous.candidates.map(c => displayName(c.model, rules)).join('、')} 中随机选取`
   if (kind === 'user') return `模型：${a.name} · ${a.effort} · 用户指定：${a.reason}`
   if (kind === 'adjusted') return `模型：${a.name} · ${a.effort} · 依据证据调整：${a.reason}`
   if (kind === 'review-second') return `模型：${a.name} · ${a.effort} · 规则 review-second（复核 ${(a.reviewOf ?? []).map(m => displayName(m, rules)).join('、')}）${sub}`
@@ -89,7 +91,8 @@ function dailyNotice(kind: SelectionKind, a: { name: string; effort: Effort; rul
 }
 
 // Plan section 9.6 steps 4–10 for one spawn whose brief has been judged.
-export function decideSpawn(a: { e: AgentSpawnInput; origin: string; task: RoutedTask | null; judgment: JevJudgment | null; rules: Rules; catalog: ModelCatalog; lookupAgentModel: (agentId: string) => string | undefined; session: { id: string; cwd: string } }): SpawnDecision {
+// `rand` (uniform in [0, 1)) draws the model for work on a rule border (Rules.ambiguous).
+export function decideSpawn(a: { e: AgentSpawnInput; origin: string; task: RoutedTask | null; judgment: JevJudgment | null; rules: Rules; catalog: ModelCatalog; lookupAgentModel: (agentId: string) => string | undefined; session: { id: string; cwd: string }; rand: () => number }): SpawnDecision {
   const pre = spawnPrecheck(a)
   if (pre !== null) return pre
   const { e, rules, catalog } = a
@@ -102,6 +105,7 @@ export function decideSpawn(a: { e: AgentSpawnInput; origin: string; task: Route
   const same = (x: string, y: string) => sameModel(x, y, catalog)
   const available = (id: string) => isAvailable(id, catalog)
   const decided = decideRule(judgment, rules)
+  const border = 'none' in decided ? borderPair(judgment, rules) : null
   const deep = judgment.deep
   const hard = isHardWork(judgment.deepP, rules)
   // Whether the rule's hardModel took the work (set in the rule branch).
@@ -209,6 +213,15 @@ export function decideSpawn(a: { e: AgentSpawnInput; origin: string; task: Route
     efforts = ruleChanges(rule, deep)
     hardUsed = rule.hardModel !== null && ruleChosen === rule.hardModel
     selection = { kind: 'rule', reason: `rule ${rule.id}: ${rule.condition}${hardUsed ? `; Jev's deep probability ${judgment.deepP!.toFixed(2)} reaches ${rules.thresholds.hardYes}, the largest work of this rule` : ''}` }
+  } else if (border !== null) {
+    const pool = rules.ambiguous.candidates.filter(c => available(c.model))
+    if (pool.length === 0) return refuse(`Jev hangs between rules ${border.first.ruleId} and ${border.second.ruleId}, and none of the models the routing rules draw from for such work (${rules.ambiguous.candidates.map(c => c.model).join(', ')}) is in Magpie's model list.`)
+    const pick = pool[Math.min(pool.length - 1, Math.floor(a.rand() * pool.length))]!
+    model = pick.model
+    ruleId = null
+    efforts = [{ from: null, to: pick.effort, reason: 'rule' }]
+    const left = rules.ambiguous.candidates.filter(c => !pool.includes(c)).map(c => c.model)
+    selection = { kind: 'ambiguous', reason: `Jev hangs between rule ${border.first.ruleId} (${border.first.p.toFixed(2)}) and rule ${border.second.ruleId} (${border.second.p.toFixed(2)}), whose models differ; ${pick.model} at ${pick.effort} drawn at random from ${pool.map(c => c.model).join(', ')}${left.length > 0 ? ` (not in Magpie's model list: ${left.join(', ')})` : ''}` }
   } else if (role === 'executor') {
     // A daily request no rule fits runs on the general default model, without an assessment or a
     // confirmation (the person's decision, 2026-11-10).
@@ -249,7 +262,7 @@ export function decideSpawn(a: { e: AgentSpawnInput; origin: string; task: Route
   }
   const name = displayName(model, rules)
   const notice = daily
-    ? dailyNotice(selection.kind, { name, effort, ruleId, reason: selection.reason, judgment, hard: hardUsed, ...(reviewOf ? { reviewOf } : {}) }, rules)
+    ? dailyNotice(selection.kind, { name, effort, ruleId, reason: selection.reason, judgment, hard: hardUsed, ...(reviewOf ? { reviewOf } : {}), ...(selection.kind === 'ambiguous' && border !== null ? { border } : {}) }, rules)
     : `magpie-tasks routed the subagent "${e.description}" (${role}) to ${name} (${model}) at effort ${effort}; rule ${ruleId ?? 'none'} (${rules.version}); selection ${selection.kind}: ${selection.reason}. ${jevText(judgment)}.`
   return {
     action: 'route',
@@ -324,13 +337,13 @@ export async function onAgentSpawn(ctx: Ctx, e: AgentSpawnInput, next: Next<'age
 
   let judgment: JevJudgment
   try {
-    judgment = await judgeSpawn(judgeCtx(ctx), [{ role: 'user', content: briefForJev(e.prompt) }])
+    judgment = await judgeSpawn(judgeCtx(ctx), await delegationInput(ctx, e.prompt, e.parentAgentId))
   } catch (error) {
     return { deny: `magpie-tasks could not judge the routing rule: ${(error as Error).message.split('\n')[0]}` }
   }
   const routed = task!
   const d = decideSpawn({
-    e, origin, task: routed, judgment, rules: ctx.rules, catalog: ctx.catalog,
+    e, origin, task: routed, judgment, rules: ctx.rules, catalog: ctx.catalog, rand: Math.random,
     lookupAgentModel: id => routed.agents[id]?.model,
     session: { id: st.sessionId, cwd: st.cwd },
   })

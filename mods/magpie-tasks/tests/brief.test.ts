@@ -64,7 +64,7 @@ const info: MarkerInfo = { taskId: 'd-20261109-k3x9q2', role: 'executor', ruleId
 
 test('the marker round-trips, matches the JEV skip pattern, and briefForJev strips it', () => {
   const m = marker(info)
-  expect(m).toBe('[magpie-tasks task=d-20261109-k3x9q2 role=executor rule=code-change rules=routing-rules.v5 model=claude/claude-opus-5-5 effort=xhigh]')
+  expect(m).toBe('[magpie-tasks task=d-20261109-k3x9q2 role=executor rule=code-change rules=routing-rules.v6 model=claude/claude-opus-5-5 effort=xhigh]')
   expect(parseMarker(m)).toEqual(info)
   expect(parseMarker(marker({ ...info, ruleId: null }))!.ruleId).toBe(null)
   // JEV's MAGPIE_TASKS_MARKER (plan section 10.2)
@@ -89,7 +89,7 @@ test('withRouting replaces a marker already at the start and keeps the brief who
   const long = withRouting(brief, info, { cwd: '/w/l-1', daily: false })
   expect(long.includes('mcp__magpie-tasks__open_worktree')).toBe(false)
   expect(long.includes('`/w/l-1`')).toBe(true)
-  for (const routed of [once, long]) for (const line of ['状态：已完成', '状态：需要用户决定', '验证：']) expect(routed.includes(line)).toBe(true)
+  for (const routed of [once, long]) for (const line of ['状态：已完成', '状态：需要用户决定', '状态：进行中：', '验证：']) expect(routed.includes(line)).toBe(true)
   const assess = withRouting(brief, { ...info, role: 'assessment' }, { cwd: null, daily: true })
   expect(assess.includes('状态：已完成')).toBe(false)
 })
@@ -137,6 +137,10 @@ test('status lines: done with its verification block, blocked with its reason', 
   expect(parseStatus(text('executorDone').replace('状态：已完成', '状态：需要用户决定'))).toEqual({ ...done, status: 'needs-user' })
   expect(parseStatus(text('acceptancePass'))).toBe(null)
   expect(parseStatus(text('executorDone').replace('状态：已完成', '状态：受阻：'))).toBe(null)
+  // An executor waiting for its own background agent: no acceptance, no diagnosis.
+  expect(parseStatus('深化改写正在后台进行，返回后再审查。\n\n状态：进行中：等待深化改写子代理返回结果')).toEqual({ status: 'working', verification: [] })
+  expect(parseStatus('状态: 进行中: 等待后台测试')!.status).toBe('working')
+  expect(parseStatus(text('executorDone').replace('状态：已完成', '状态：进行中：'))).toBe(null)
 })
 
 test('acceptance verdict, routing confirmation and diagnosis suggestion', () => {

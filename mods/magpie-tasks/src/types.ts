@@ -9,7 +9,7 @@ export type TaskState = 'starting' | 'running' | 'paused' | 'waiting-user' | 'er
 // 'error': a plugin flow for this task stopped on an error that was reported (section 8); the next message
 // the person sends to the task (window or Telegram) sets it back to 'running'; recovery never resumes it.
 export type AgentRole = 'executor' | 'implementer' | 'assessment' | 'acceptance' | 'diagnosis' | 'helper'
-export type SelectionKind = 'rule' | 'user' | 'adjusted' | 'assessment-confirmed' | 'diagnosis' | 'review-second' | 'unavailable-substitute'
+export type SelectionKind = 'rule' | 'ambiguous' | 'user' | 'adjusted' | 'assessment-confirmed' | 'diagnosis' | 'review-second' | 'unavailable-substitute'
 export type RaiseReason = 'deep' | 'resume-deep' | 'acceptance-failed' | 'diagnosis-redelegate'
 
 export interface Options {
@@ -40,12 +40,12 @@ export interface JevJudgment {
   latencyMs: number
   inputTokens: number
   cachedTokens?: number
-  questionSet: string                   // 'rules-q.v3'
+  questionSet: string                   // 'rules-q.v5'
 }
 
 export interface EffortChange { at: number; from: Effort | null; to: Effort; reason: 'rule' | 'explicit' | RaiseReason; note?: string }
 
-export interface AgentReport { at: number; status: 'done' | 'needs-user' | 'blocked' | 'missing'; text: string; verification: string[] }
+export interface AgentReport { at: number; status: 'done' | 'needs-user' | 'blocked' | 'working' | 'missing'; text: string; verification: string[] }
 
 export interface AgentRecord {
   agentId: string

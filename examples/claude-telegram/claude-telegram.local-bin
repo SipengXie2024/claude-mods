@@ -17,13 +17,18 @@
 #   config's env; tg-router reads the same folder as TG_ROUTER_STATE_DIR.
 # - MAGPIE_TASKS_ROLE=router makes magpie-tasks treat this session as the
 #   Router rather than a long-task window.
-# - The Router runs on Opus 5.5 (Magpie's default model is Astra).
+# - The Router runs on Opus 5.5 (Magpie's default model is Astra) at low effort:
+#   it only routes and talks, long input and short output, as DeepSeek's
+#   Super-agent article found for its Router layer. JEV_MAIN_EFFORT makes JEV
+#   keep the main loop at that level (no Jev ask, no raise); a /effort typed in
+#   the pane still wins. Workers get their own model and effort from magpie-tasks.
 cd "$HOME" || exit 1
 CLAUDE_MODS="${CLAUDE_MODS:-$HOME/sipeng/claude-mods}"
 CHANNEL_DIR="$CLAUDE_MODS/examples/claude-telegram/tg-channel"
 LIVE="$HOME/.claude/channels/telegram-live"
 export MAGPIE_TASKS_ROLE=router
 export TG_ROUTER_STATE_DIR="$LIVE"
+export JEV_MAIN_EFFORT=low
 
 # The channel is tg-channel, a copy of the official telegram plugin's server
 # that also reports which message a message replies to. It is not on the
@@ -32,7 +37,7 @@ export TG_ROUTER_STATE_DIR="$LIVE"
 mcp_config=$(jq -nc --arg dir "$CHANNEL_DIR" --arg live "$LIVE" \
   '{mcpServers: {"tg-channel": {command: "bun", args: ["run", "--cwd", $dir, "--shell=bun", "--silent", "start"], env: {TELEGRAM_STATE_DIR: $live}}}}')
 
-exec claude-magpie --model 'claude/claude-opus-5-5[1m]' --dangerously-skip-permissions \
+exec claude-magpie --model 'claude/claude-opus-5-5[1m]' --effort low --dangerously-skip-permissions \
   --mcp-config "$mcp_config" \
   --dangerously-load-development-channels server:tg-channel \
   --plugin-dir "$CLAUDE_MODS/mods/tg-router" \

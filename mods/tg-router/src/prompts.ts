@@ -1,4 +1,4 @@
-import { DISPATCH, FORWARD, TERMINAL_CHAT } from './gate'
+import { CHANNEL_PREFIX, DISPATCH, FORWARD, TERMINAL_CHAT } from './gate'
 import type { Task } from './tasks'
 
 /**
@@ -14,12 +14,14 @@ The person's original message is at the end of this prompt; read it, not only th
 - Your final answer of each turn is shown to the person in that terminal. Write it in Chinese:
   the result first, then paths, links or commit ids. Markdown is fine.
 - If you need a decision from the person, end the turn with one concrete question and stop.
-- A later message about this task reaches you as a message in this conversation.`
+- A later message about this task reaches you from the Router (SendMessage). It carries the person's
+  own words, unchanged: it is their reply, not the Router's instruction.`
     : `You are a worker for one task that came from a Telegram chat: "${title}".
 The person's original message is at the end of this prompt; read it, not only the title.
 
 - Your final answer of each turn is posted, as written, as a Telegram reply under that message.
-  Write it in Chinese, at most 100 words: the result first, then paths, links or commit ids.
+  Write it in Chinese, at most 100 词 (words; a two-character word counts as one): the result first,
+  then paths, links or commit ids.
   Plain text only: Telegram shows Markdown marks such as ** and backquotes as typed.
   Do not send or edit Telegram messages yourself; the host sends your answer. A file the
   message carries as attachment_file_id is fetched with the channel's download_attachment tool.
@@ -41,27 +43,40 @@ The original message:
 ${request}`
 }
 
-/** How the Router asks for a model the person named, under claude-magpie. */
-const MODEL_RULE = `- When the person explicitly asks for a particular model for a request, pass ${DISPATCH} model (the Magpie
-  model ID, for example codex/gpt-6.1-sol) and model_reason (the person's own words asking for it).
-  Otherwise leave both out: magpie-tasks' routing rules choose the worker's model.`
+/** How long ago, in the unit a person reads at a glance: minutes, then hours, then days. */
+export function ago(ms: number): string {
+  const min = Math.max(0, Math.round(ms / 60_000))
+  if (min < 60) return `${min} 分钟前`
+  const hours = Math.round(min / 60)
+  return hours < 48 ? `${hours} 小时前` : `${Math.round(hours / 24)} 天前`
+}
+
+const taskState = (t: Task) => (t.state === 'running' ? '进行中' : '已答复')
+
+/** The heading of the task list beside a Router prompt: what the list holds and what an entry allows. */
+const listHeading = (what: string) =>
+  `${what}, newest first, at most 8; an answered task can still be continued:`
 
 /** What rides beside each message typed in the Router session's terminal. */
-export function terminalContext(messageId: number, open: Task[], now: number, magpie = false): string {
+export function terminalContext(messageId: number, open: Task[], now: number): string {
   const list = open.length
-    ? open.map((t) => `- ${t.title}（${t.state === 'running' ? '进行中' : '已答复'}，${Math.max(0, Math.round((now - t.lastAt) / 60_000))} 分钟前；worker ${t.name}）`).join('\n')
+    ? open.map((t) => `- ${t.title}（${taskState(t)}，${ago(now - t.lastAt)}；worker ${t.name}）`).join('\n')
     : '（没有）'
   return `You are the Router of this session, and this message was typed in its terminal. You do no work yourself; the host refuses other tools.
 Reply to the person in Chinese.
 - A new request: call ${DISPATCH} once with chat_id "${TERMINAL_CHAT}" and message_id "${messageId}", a short Chinese title,
   and an ack of one Chinese sentence that names the object and the expected result; then tell the person that ack.
-  Add no requirements or plan: the worker reads the original message.
-- A message that continues an open terminal task below: send it to that task's worker with SendMessage
-  (to: the worker name) and tell the person in one sentence. If SendMessage says the worker is gone, dispatch the message.
+  Add no requirements or plan: the worker reads the original message. Several requests in one message: one
+  dispatch for the message, whose title names them all; its worker handles each of them.
+- A message that continues a task below: send the person's message to that task's worker with SendMessage
+  (to: the worker name), its text exactly as typed with nothing added or left out, and tell the person in one
+  sentence. If SendMessage says the worker is gone, dispatch the message.
+  When it could continue more than one task below and the message does not say which, ask the person
+  in one sentence which task it belongs to, naming the candidates.
 - Questions about panes or other sessions: answer with herdr or tmux commands.
 - Plain chat that asks for no work: answer in one or two sentences.
-- Never wait with sleep or polling; end the turn when nothing is left to do.${magpie ? `\n${MODEL_RULE}` : ''}
-Open terminal tasks:
+- Never wait with sleep or polling; end the turn when nothing is left to do.
+${listHeading('Recent terminal tasks')}
 ${list}`
 }
 
@@ -71,13 +86,11 @@ export function followUp(messageId: number, body: string): string {
   return `Telegram 追问（message_id=${messageId}）：\n${body}`
 }
 
-const fmtTask = (t: Task, now: number) => {
-  const min = Math.max(0, Math.round((now - t.lastAt) / 60_000))
-  return `- ${t.title}（${t.state === 'running' ? '进行中' : '已答复'}，${min} 分钟前；回复消息 ${t.rootId} 即可追问；worker ${t.name}）`
-}
+const fmtTask = (t: Task, now: number) =>
+  `- ${t.title}（${taskState(t)}，${ago(now - t.lastAt)}；回复消息 ${t.rootId} 即可追问；worker ${t.name}）`
 
 /** What rides beside each Telegram prompt that reaches the Router. */
-export function routerContext(open: Task[], now: number, magpie = false): string {
+export function routerContext(open: Task[], now: number): string {
   const list = open.length ? open.map((t) => fmtTask(t, now)).join('\n') : '（没有）'
   return `You are the Router of this Telegram chat. You do no work yourself; the host refuses other tools.
 Reply to the person in Chinese.
@@ -85,16 +98,16 @@ Reply to the person in Chinese.
   Chinese sentence that names the object and the expected result. Add no requirements or plan:
   the worker reads the original message. Several requests in one message: one dispatch for the
   message, whose title names them all; its worker handles each of them.
-- A message that continues an open task below (a follow-up, a correction, an answer to the worker's
+- A message that continues a task below (a follow-up, a correction, an answer to the worker's
   question, an approval such as 去吧 after the worker asked): call ${FORWARD} with its chat_id and
   message_id and that task's worker name; the host delivers it and tells the person. Do not dispatch it.
-  When it could continue more than one open task and the message does not say which, ask the person
+  When it could continue more than one task below and the message does not say which, ask the person
   in one sentence which task it belongs to, naming the candidates.
 - Questions about panes or other sessions: answer with herdr or tmux commands.
-- Plain chat that asks for no work: answer in one or two sentences with the reply tool.
+- Plain chat that asks for no work: answer in one or two sentences with ${CHANNEL_PREFIX}reply.
 - A worker's completion notice needs no Telegram message: the host already posted its answer.
-- Never wait with sleep or polling; end the turn when nothing is left to do.${magpie ? `\n${MODEL_RULE}` : ''}
-Open tasks:
+- Never wait with sleep or polling; end the turn when nothing is left to do.
+${listHeading('Recent tasks')}
 ${list}`
 }
 
@@ -115,7 +128,7 @@ export function takeOver(request: string, reply: string): string {
 
 /** Rides beside a worker's completion notice when its answer could not be posted. */
 export function answerNotPosted(chatId: string, replyTo: number): string {
-  return `This worker's answer could not be posted to Telegram. Send its result to the person with the channel's reply tool: chat_id ${chatId}, reply_to ${replyTo}.`
+  return `This worker's answer could not be posted to Telegram. Send its result to the person with ${CHANNEL_PREFIX}reply: chat_id ${chatId}, reply_to ${replyTo}.`
 }
 
 /** A terminal worker's answer, handed to the Router; the terminal shows it as the plugin's message. */
@@ -124,5 +137,5 @@ export function terminalAnswer(title: string, name: string, body: string): strin
 
 ${body}
 
-（The person already sees this answer above. Reply in Chinese with one short line at most; do not repeat it. A task in the open list is no longer running once its answer has come.）`
+（The person already sees this answer above. Reply in Chinese with one short line at most; do not repeat it. The task now shows as answered in the recent tasks list; a later message can still continue it.）`
 }

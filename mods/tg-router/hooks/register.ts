@@ -220,7 +220,7 @@ async function dispatch($: EngineInterface, a: DispatchArgs): Promise<string> {
   if (model && !magpieMode) throw new Error('dispatch 的 model 只在 claude-magpie 下可用；不给 model，worker 用默认模型')
   const key = reqKey(String(a.chat_id), messageId)
   const req = requests.get(key)
-  if (!req) throw new Error(`没有等待派活的 Telegram 消息 ${key}（只能派发本次会话收到、还没派过的消息）`)
+  if (!req) throw new Error(`没有等待派发的消息 ${key}（只能派发本次会话收到、还没派过的消息；终端里输入的消息 chat_id 是 "${TERMINAL_CHAT}"）`)
   const name = req.chatId === TERMINAL_CHAT ? `tui-${messageId}` : `tg-${req.chatId}-${messageId}`
   const now = await $.clock.now()
   // the task exists before the worker starts, so even a first run that ends at once finds it
@@ -340,13 +340,13 @@ async function ensureTools($: EngineInterface): Promise<void> {
       inputSchema: {
         type: 'object',
         properties: {
-          chat_id: { type: 'string', description: 'chat_id of the Telegram message that holds the request' },
-          message_id: { type: 'string', description: 'message_id of the Telegram message that holds the request' },
+          chat_id: { type: 'string', description: `chat_id of the message that holds the request: the Telegram chat, or "${TERMINAL_CHAT}" for a message typed in this terminal` },
+          message_id: { type: 'string', description: 'message_id of the message that holds the request, as its context gives it' },
           title: { type: 'string', description: 'a short Chinese title, a few words' },
           ack: { type: 'string', description: 'one Chinese sentence for the person: the object and the expected result' },
           // a chosen model exists only under claude-magpie (magpie-tasks routes it)
           ...((await magpieActive($)) ? {
-            model: { type: 'string', description: 'only when the person explicitly asks for a model: its model ID; give model_reason with it' },
+            model: { type: 'string', description: 'only when the person explicitly asks for a model: its Magpie model ID, from the list in the context; give model_reason with it' },
             model_reason: { type: 'string', description: 'with model: the person\'s own words asking for that model' },
           } : {}),
         },
@@ -364,7 +364,7 @@ async function ensureTools($: EngineInterface): Promise<void> {
         properties: {
           chat_id: { type: 'string', description: 'chat_id of the Telegram message' },
           message_id: { type: 'string', description: 'message_id of the Telegram message' },
-          worker: { type: 'string', description: 'the worker name of the open task, as the open-task list shows it' },
+          worker: { type: 'string', description: 'the worker name of the task, as the recent tasks list shows it' },
         },
         required: ['chat_id', 'message_id', 'worker'],
       },
@@ -385,7 +385,7 @@ async function handOn($: EngineInterface, e: PromptSubmitInput, next: Next<'prom
   armed = { ...req, at: now }
   const context = [
     ...(e.context ?? []),
-    routerContext(await tasks.openTasks(kv($), req.chatId), now, true),
+    routerContext(await tasks.openTasks(kv($), req.chatId), now),
     ...(worker ? [workerHintLine(worker)] : []),
   ]
   const r = await next({ ...e, context })
@@ -429,7 +429,7 @@ export const register: Register = (on) => {
       requests.set(reqKey(TERMINAL_CHAT, messageId), { chatId: TERMINAL_CHAT, messageId, text: e.text })
       const open = await tasks.openTasks(kv($), TERMINAL_CHAT)
       const magpieMode = await magpieActive($)
-      return next({ ...e, context: [...(e.context ?? []), terminalContext(messageId, open, now, magpieMode), ...(magpieMode ? [terminalHintLine(messageId)] : [])] })
+      return next({ ...e, context: [...(e.context ?? []), terminalContext(messageId, open, now), ...(magpieMode ? [terminalHintLine(messageId)] : [])] })
     }
     // a follow-up a worker handed back, resubmitted by handBack below
     const handed = o?.kind === 'plugin' && o.name === PLUGIN
@@ -456,15 +456,15 @@ export const register: Register = (on) => {
     }
     if (owner) {
       if (await deliver($, owner, req, now)) return { drop: `tg-router: 已转给 worker（${owner.title}）` }
-      await tg.send(io($), tag.chatId, `这件事（${owner.title}）原来的 worker 已经不在了，可能是会话重启过。已转给前台重新派活。`, tag.messageId, true)
+      await tg.send(io($), tag.chatId, `这件事（${owner.title}）原来的 worker 已经不在了，可能是会话重启过。已交给 Router 重新派发。`, tag.messageId, true)
       armed = { ...requests.get(reqKey(tag.chatId, tag.messageId))!, at: now }
-      return next({ ...e, context: [...(e.context ?? []), routerContext(await tasks.openTasks(kv($), tag.chatId), now, await magpieActive($)), lostWorker(owner.title)] })
+      return next({ ...e, context: [...(e.context ?? []), routerContext(await tasks.openTasks(kv($), tag.chatId), now), lostWorker(owner.title)] })
     }
 
     // handBack already holds the follow-up's own text for dispatch
     if (!handed) requests.set(reqKey(tag.chatId, tag.messageId), req)
     armed = { ...req, at: now }
-    return next({ ...e, context: [...(e.context ?? []), routerContext(await tasks.openTasks(kv($), tag.chatId), now, await magpieActive($))] })
+    return next({ ...e, context: [...(e.context ?? []), routerContext(await tasks.openTasks(kv($), tag.chatId), now)] })
   })
 
   on('turn.start', async ($, e, next) => {

@@ -1,6 +1,6 @@
 {
-  "version": "routing-rules.v5",
-  "date": "2026-11-10",
+  "version": "routing-rules.v6",
+  "date": "2026-11-11",
   "source": ".planning/model-routing-table.md",
   "thresholds": {
     "ruleConfidence": 0.5,
@@ -131,7 +131,7 @@
     {
       "id": "review",
       "section": "2.2",
-      "condition": "检查已有工作有没有缺陷、核实结果是否属实，或查明失败原因",
+      "condition": "检查已有的工作或成果（代码、文档、提示词、配置、别人的结论）有没有缺陷、核实结果是否属实，或查明失败原因",
       "role": "审查或诊断子代理",
       "model": "claude/claude-opus-5-5",
       "effort": "medium",
@@ -565,8 +565,26 @@
       "note": "路由表不指定缺少任务证据的默认强度；只在用户指定时使用"
     }
   ],
+  "ambiguous": {
+    "condition": "Jev 首选规则的置信度低于 ruleConfidence，且概率最高的两项都是规则、两条规则给出的模型不同：这项工作落在两条规则的边界上",
+    "candidates": [
+      {
+        "model": "claude/claude-mythos-5-2",
+        "effort": "high"
+      },
+      {
+        "model": "claude/claude-opus-5-5",
+        "effort": "xhigh"
+      },
+      {
+        "model": "codex/gpt-6-astra",
+        "effort": "max"
+      }
+    ],
+    "evidence": "用户决定（2026-11-11）：边界工作交给综合智能指数最高的三个模型，均匀随机选一个，以便比较哪个模型更适合这类工作。AA Intelligence Index v5.0.1：Mythos 5.2 high 62（max 65）、Opus 5.5 xhigh 57（max 59）、Astra max 57，其后 Sol 6.1 与 Sonnet 5.5 均为 55、Argon high 50；每个模型取达到所列分数的最低一档。2026-10-12–11-11 的 343 次委派（翻译项目与拒答除外）中有 13 次符合条件"
+  },
   "ratingPriority": {
-    "note": "这些设置在用户自己任务上的结果还没有比较过：code-change 交给 Opus 5.5 的任务，以及 Opus 5.5、Mythos 5.2 判为需要深入推理、起步限在 high 的任务。每天的评分邀请先从这些任务中选",
+    "note": "这些设置在用户自己任务上的结果还没有比较过：code-change 交给 Opus 5.5 的任务，以及 Opus 5.5、Mythos 5.2 判为需要深入推理、起步限在 high 的任务；另外，规则拿不准、按 ambiguous 随机分配的任务也在其中。每天的评分邀请先从这些任务中选",
     "cells": [
       {
         "rule": "code-change",

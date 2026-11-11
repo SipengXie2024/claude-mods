@@ -55,11 +55,13 @@ export function pickRatingTask(tasks: TaskRecord[], day: string, rand: () => num
 }
 
 // Whether a worker of the task ran on a setting of the current rules whose results on the person's
-// own tasks are not measured yet (rules.ratingPriority): the rule's base model, or work judged deep.
+// own tasks are not measured yet (rules.ratingPriority): the rule's base model, work judged deep, or a
+// model drawn for work on a rule border (rules.ambiguous), whose scores compare the drawn models.
 export function ratingFirst(t: TaskRecord, rules: Rules): boolean {
-  return Object.values(t.agents).some(a => a.ruleId !== null && isWorker(a) && a.rulesVersion === rules.version
-    && rules.ratingPriority.cells.some(c => c.rule === a.ruleId
-      && (c.when === 'deep' ? a.judgment?.deep === true : a.model === ruleById(rules, c.rule).model)))
+  return Object.values(t.agents).some(a => a.rulesVersion === rules.version && (
+    (a.selection.kind === 'ambiguous' && (a.role === 'executor' || a.role === 'implementer'))
+    || (a.ruleId !== null && isWorker(a) && rules.ratingPriority.cells.some(c => c.rule === a.ruleId
+      && (c.when === 'deep' ? a.judgment?.deep === true : a.model === ruleById(rules, c.rule).model)))))
 }
 
 // ---- scores ------------------------------------------------------------------------------------
@@ -237,6 +239,48 @@ function bandText(band: Band, t: { deepYes: number; hardYes: number }): string {
   return band === 'below' ? `深入推理概率低于 ${t.deepYes}` : band === 'deep' ? `深入推理概率 ${t.deepYes}–${t.hardYes}` : `深入推理概率 ${t.hardYes} 以上`
 }
 
+// ---- work on rule borders ----------------------------------------------------------------------
+
+// Section 6 of the table: the agents whose model was drawn for work on a rule border, per model the
+// current rules draw from, over every task on record (the comparison builds up across checks): the
+// tasks, the last score of each scored task, the tasks whose agent was raised after a failed
+// acceptance or a diagnosis, and those whose agent was replaced by another model after a blocker.
+export interface BorderStat { model: string; effort: Effort; taskIds: string[]; scores: number[]; raised: string[]; changed: string[] }
+
+export function borderStats(tasks: TaskRecord[], rules: Rules): BorderStat[] {
+  const stats: BorderStat[] = rules.ambiguous.candidates.map(c => ({ model: c.model, effort: c.effort, taskIds: [], scores: [], raised: [], changed: [] }))
+  const add = (list: string[], id: string) => { if (!list.includes(id)) list.push(id) }
+  for (const t of tasks) {
+    for (const a of Object.values(t.agents)) {
+      if (a.selection.kind !== 'ambiguous') continue
+      const s = stats.find(x => x.model === a.model)
+      if (s === undefined) continue
+      if (!s.taskIds.includes(t.id)) {
+        s.taskIds.push(t.id)
+        const last = t.ratings.at(-1)
+        if (last !== undefined) s.scores.push(last.score)
+      }
+      const failed = (r: string) => r === 'acceptance-failed' || r === 'diagnosis-redelegate'
+      if (a.efforts.some(e => failed(e.reason)) || a.pendingRaises.some(failed)) add(s.raised, t.id)
+      const next = a.replacedBy !== undefined ? t.agents[a.replacedBy] : undefined
+      const replaced = next !== undefined && a.failure?.kind !== 'model-unavailable' && next.selection.kind !== 'unavailable-substitute'
+      const reported = Object.values(t.blockers).some(b => b.history.some(h => h.step === 'model-change' && h.agentId === a.agentId))
+      if (replaced || reported) add(s.changed, t.id)
+    }
+  }
+  return stats
+}
+
+// The comparison is worth a reminder once every drawn model has MIN_EVIDENCE scored tasks; the key
+// changes with every new score, so each later check with new scores reminds again.
+export function borderReady(stats: BorderStat[]): boolean {
+  return stats.length > 0 && stats.every(s => s.scores.length >= MIN_EVIDENCE)
+}
+
+export function borderKey(stats: BorderStat[]): string {
+  return `border:${stats.map(s => `${s.model}=${s.scores.length}`).join(',')}`
+}
+
 // The person's own words that judge how a model suits a kind of work, from the last 14 days.
 export function modelOpinions(tasks: TaskRecord[], now: number): { taskId: string; title: string; at: number; text: string }[] {
   const out: { taskId: string; title: string; at: number; text: string }[] = []
@@ -265,7 +309,7 @@ export function opinionKey(o: { taskId: string; at: number }): string {
 
 // The reminder the person reads on Telegram: findings per rule, cells whose start looks too low, the
 // person's words about models, then every cell of the window with its counts.
-export function reminderText(findings: { ruleId: string; kind: FindingKind; taskIds: string[] }[], opinions: { taskId: string; title: string; text: string }[], tasks: TaskRecord[], rules: Rules, bands: { findings: BandStat[]; stats: BandStat[] }): string {
+export function reminderText(findings: { ruleId: string; kind: FindingKind; taskIds: string[] }[], opinions: { taskId: string; title: string; text: string }[], tasks: TaskRecord[], rules: Rules, bands: { findings: BandStat[]; stats: BandStat[] }, border: BorderStat[]): string {
   const title = (id: string) => `「${tasks.find(t => t.id === id)?.title ?? id}」（${id}）`
   const cell = (c: BandStat) => `${bandText(c.band, rules.thresholds)}、${displayName(c.model, rules)}、起步 ${c.start}`
   const lines = [`路由校准提醒（最近 14 天，规则版本 ${rules.version}）：`]
@@ -284,6 +328,13 @@ export function reminderText(findings: { ruleId: string; kind: FindingKind; task
       : '  建议：考虑把这一段的起步提高一档，由你确认。')
   }
   for (const o of opinions) lines.push(`· 你对模型的看法（${title(o.taskId)}）：“${o.text.trim()}”`)
+  if (border.some(s => s.taskIds.length > 0)) {
+    lines.push(`规则拿不准、随机分配的任务（累计${borderReady(border) ? `；每个模型都已有至少 ${MIN_EVIDENCE} 个评过分的任务，可以比较` : ''}）：`)
+    for (const s of border) {
+      const mean = s.scores.length === 0 ? '' : `，平均 ${(s.scores.reduce((x, y) => x + y, 0) / s.scores.length).toFixed(1)}`
+      lines.push(`· ${displayName(s.model, rules)} · ${s.effort}：${s.taskIds.length} 个任务，评分 ${s.scores.length} 个${mean}，提高强度 ${s.raised.length}，换模型 ${s.changed.length}`)
+    }
+  }
   lines.push('需要调整时告诉我，我们一起过一遍证据再改规则。')
   // Last, so a reminder over Telegram's length limit loses cells of this list, not findings.
   if (bands.stats.length > 0) {
@@ -371,12 +422,14 @@ async function checkCalibration(ctx: Ctx): Promise<void> {
   const opinions = modelOpinions(tasks, now).filter(o => !previous.reminded.includes(opinionKey(o)))
   const stats = bandStats(tasks, now, ctx.rules)
   const lowStarts = bandFindings(stats).filter(c => !previous.reminded.includes(bandKey(c)))
-  if (findings.length === 0 && opinions.length === 0 && lowStarts.length === 0) {
+  const border = borderStats(tasks, ctx.rules)
+  const borderNew = borderReady(border) && !previous.reminded.includes(borderKey(border))
+  if (findings.length === 0 && opinions.length === 0 && lowStarts.length === 0 && !borderNew) {
     await io.log(`calibration check at ${now}: no evidence for a reminder`)
     return
   }
   try {
-    await send(io, opts, await defaultChat(io, opts), reminderText(findings, opinions, tasks, ctx.rules, { findings: lowStarts, stats }), undefined, true)
+    await send(io, opts, await defaultChat(io, opts), reminderText(findings, opinions, tasks, ctx.rules, { findings: lowStarts, stats }, border), undefined, true)
   } catch (err) {
     // The check runs again on the next tick.
     await reg.lock('schedule', async () => {
@@ -387,9 +440,9 @@ async function checkCalibration(ctx: Ctx): Promise<void> {
   }
   await reg.lock('schedule', async () => {
     const state = await reg.readState('calibration', empty)
-    await reg.writeState('calibration', { ...state, reminded: [...state.reminded, ...findings.map(findingKey), ...opinions.map(opinionKey), ...lowStarts.map(bandKey)] })
+    await reg.writeState('calibration', { ...state, reminded: [...state.reminded, ...findings.map(findingKey), ...opinions.map(opinionKey), ...lowStarts.map(bandKey), ...(borderNew ? [borderKey(border)] : [])] })
   })
-  await io.log(`calibration reminder sent: ${findings.length} findings, ${lowStarts.length} low starts, ${opinions.length} model opinions`)
+  await io.log(`calibration reminder sent: ${findings.length} findings, ${lowStarts.length} low starts, ${opinions.length} model opinions${borderNew ? ', border comparison' : ''}`)
 }
 
 // One run of the Router's timer: the day's rating invitation, then the two-weekly calibration check.

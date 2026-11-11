@@ -17,6 +17,7 @@ import type { Ctx, PromptResult } from './state'
 import { clip, defaultChat, parseChannelTag, send } from './telegram'
 import type { RouterToolName } from './tools'
 import type { Decision, JevJudgment, TaskRecord, TelegramIndex } from './types'
+import type { Rules } from './rules'
 
 type LongAnswer = 'separate' | 'wait' | 'approve' | 'reject' | 'unclear'
 type Tg = { chatId: string; messageId: number }
@@ -152,15 +153,16 @@ function minutesAgo(at: number, now: number): number {
 }
 
 // The context beside each channel or terminal message the Router reads (English, as the model reads it).
-export function routerContext(longTasks: TaskRecord[], now: number): string {
+export function routerContext(longTasks: TaskRecord[], now: number, rules: Rules): string {
+  const ids = Object.entries(rules.models).map(([id, m]) => `${id} (${m.name})`).join(', ')
   const list = longTasks.length === 0
     ? '(none)'
     : longTasks.map(t => `- ${t.id} "${t.title}": architect ${t.architect?.model ?? (t.owner.kind === 'session' ? t.owner.model : 'unknown')}, ${t.state}, last activity ${minutesAgo(t.updatedAt, now)} min ago`).join('\n')
   return `[magpie-tasks] Long tasks, each led by an architect in its own background session (you never work on them yourself):
 ${list}
 - A message that continues one of these long tasks (it names the task or plainly carries on its discussion) and does not reply to one of its messages: call mcp__magpie-tasks__forward_long with its chat_id, its message_id and the task ID. The host delivers it to the architect and tells the person; do not dispatch it. A message typed in this terminal uses chat_id "tui". When it is unclear which long task the message belongs to, ask the person in one sentence.
-- When a daily task's worker hands back work that needs sustained design discussion over many turns, call mcp__magpie-tasks__recommend_architect with the worker name, tell the person the recommended architect model with its reason and evidence limits, and once the person confirms a model, call mcp__magpie-tasks__promote_task with the worker name, the confirmed model and the person's words of confirmation.
-- When the person explicitly asks for a particular model for a request, call mcp__tg-router__dispatch with model (the Magpie model ID, for example codex/gpt-6.1-sol or claude/claude-sonnet-5-5) and model_reason (the person's own words asking for it). Otherwise leave both out: the routing rules choose the model.`
+- When a daily task's worker reports that its work needs sustained design discussion over many turns, or the person asks to keep designing a daily task with an architect, call mcp__magpie-tasks__recommend_architect with the worker name, tell the person the recommended architect model with its reason and evidence limits, and once the person confirms a model, call mcp__magpie-tasks__promote_task with the worker name, the confirmed model and the person's words of confirmation.
+- When the person explicitly asks for a particular model for a request, call mcp__tg-router__dispatch with model set to that model's Magpie ID and model_reason set to the person's own words asking for it. The Magpie IDs: ${ids}. Otherwise leave both out: the routing rules choose the model.`
 }
 
 // The hand-over an architect starts from when a daily task becomes a long one (section 9.12 step 3).
@@ -316,7 +318,7 @@ async function longAnswer(ctx: Ctx, decision: Decision, text: string): Promise<L
 
 async function withContext(ctx: Ctx, e: PromptSubmitInput, next: Next<'prompt.submit'>): Promise<PromptResult> {
   const longTasks = await ctx.reg.list(t => t.kind === 'long' && OPEN.includes(t.state))
-  return next({ ...e, context: [...(e.context ?? []), routerContext(longTasks, await ctx.io.now())] })
+  return next({ ...e, context: [...(e.context ?? []), routerContext(longTasks, await ctx.io.now(), ctx.rules)] })
 }
 
 // ---- the Router's prompts --------------------------------------------------------------------

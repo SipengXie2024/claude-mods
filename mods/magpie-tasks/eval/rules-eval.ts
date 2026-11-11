@@ -19,7 +19,7 @@
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
-import { briefForJev } from '../src/dialogue'
+import { briefForJev, delegationMessages } from '../src/dialogue'
 import { ask, type JevConfig } from '../src/jev'
 import { decideRule, spawnJudgment, spawnQuestions } from '../src/judge'
 import { loadRules, type Rules } from '../src/rules'
@@ -177,8 +177,10 @@ async function sheet(args: Map<string, string>, dir: string, rules: Rules): Prom
   let failed = 0
   for (const b of briefs) {
     if (have.has(b.id)) continue
-    // briefForJev again: briefs.jsonl may predate the current cut (tg-router worker briefs → the person's words).
-    const r = await ask(io, cfg, [{ role: 'user', content: briefForJev(b.brief) }], questions)
+    // The brief alone, in the format of a delegation (delegationMessages applies briefForJev again:
+    // briefs.jsonl may predate the current cut). Live routing also gives Jev the spawning conversation
+    // and the files the brief names; briefs.jsonl holds neither.
+    const r = await ask(io, cfg, delegationMessages([], [], b.brief), questions)
     const jev: SheetRow['jev'] = r.ok
       ? { ok: true, judgment: spawnJudgment(r.answers, { latencyMs: r.latencyMs, inputTokens: r.inputTokens, ...(r.cachedTokens !== undefined ? { cachedTokens: r.cachedTokens } : {}) }, rules) }
       : { ok: false, error: r.error }

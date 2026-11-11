@@ -55,7 +55,7 @@ function tableModelIds(): Record<string, string> {
 test('the file holds the 19 rules, each once', () => {
   expect(rules.rules.map(r => r.id).sort()).toEqual([...RULE_IDS].sort())
   expect(rules.rules).toHaveLength(19)
-  expect(rules.version).toBe('routing-rules.v5')
+  expect(rules.version).toBe('routing-rules.v6')
 })
 
 test('condition, acceptance and evidence are the routing table columns word for word, in the same section', () => {
@@ -123,6 +123,12 @@ test('parseRules refuses a missing, duplicated or unknown rule, a bad effort and
   expect(variant(j => { cells(j)[0]!['rule'] = 'architect' })).toThrow('ratingPriority.cells[0].rule')
   expect(variant(j => { cells(j)[0]!['when'] = 'always' })).toThrow('ratingPriority.cells[0].when')
   expect(variant(j => { cells(j)[0]!['rule'] = 'review' })).toThrow('rule review has one model only')
+  const drawn = (j: Record<string, unknown>) => (j['ambiguous'] as { candidates: Record<string, unknown>[] }).candidates
+  expect(variant(j => { drawn(j)[0]!['model'] = 'claude/claude-mythos-5-2[1m]' })).toThrow('ambiguous.candidates[0].model')
+  expect(variant(j => { drawn(j)[1]!['effort'] = 'ultra' })).toThrow('ambiguous.candidates[1].effort')
+  expect(variant(j => { drawn(j).splice(1) })).toThrow('needs at least two models to draw from')
+  expect(variant(j => { drawn(j)[2]!['model'] = drawn(j)[0]!['model'] })).toThrow('ambiguous.candidates: duplicate model')
+  expect(variant(j => { delete j['ambiguous'] })).toThrow('ambiguous')
   expect(() => parseRules('not an object', { deepYes: 0.85 })).toThrow('routing rules: file')
 })
 
@@ -134,7 +140,7 @@ test('jevChoices: the 15 Jev-option rules in file order, then none', () => {
   expect(choices.map(c => c.value)).not.toContain('architect')
   expect(choices.map(c => c.value)).not.toContain('route-assessment')
   expect(choices[0]).toEqual({ value: 'code-change', description: ruleById(rules, 'code-change').condition })
-  expect(choices.at(-1)).toEqual({ value: 'none', description: '没有一条规则符合：任务条件与上面每一条都不一致，或说明缺少判断所需的目标' })
+  expect(choices.at(-1)).toEqual({ value: 'none', description: '没有一条规则符合：任务条件与上面每一条都不一致' })
 })
 
 test('ruleById throws for an unknown rule', () => {

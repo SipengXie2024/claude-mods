@@ -8,6 +8,10 @@ import { architectText, channelText, decisionDelivery, demoteAfterFailedLaunch, 
 import { parseChannelTag } from '../src/telegram'
 import type { TaskRecord, TelegramIndex } from '../src/types'
 import { channelImage1043, channelPlain953, channelReply1108, channelReply1110 } from './data/channel-blocks'
+import { routingRules } from './data/jev-rules'
+import { parseRules } from '../src/rules'
+
+const RULES = parseRules(routingRules, { deepYes: 0.85 })
 
 const CHAT = '7051661301'
 const NOW = Date.parse('2026-11-09T12:00:00Z')
@@ -105,14 +109,15 @@ function long(id: string, over: Partial<TaskRecord> = {}): TaskRecord {
   }
 }
 
-test('the Router context lists open long tasks and the three rules', () => {
-  const ctx = routerContext([long('l-20261109-a1b2c3')], NOW)
+test('the Router context lists open long tasks, the three rules, and the model rule with every Magpie ID', () => {
+  const ctx = routerContext([long('l-20261109-a1b2c3')], NOW, RULES)
   expect(ctx).toContain('- l-20261109-a1b2c3 "整理 greet": architect codex/gpt-6.1-sol, running, last activity 25 min ago')
   expect(ctx).toContain('mcp__magpie-tasks__forward_long')
   expect(ctx).toContain('mcp__magpie-tasks__recommend_architect')
   expect(ctx).toContain('mcp__magpie-tasks__promote_task')
-  expect(ctx).toContain('model_reason')
-  expect(routerContext([], NOW)).toContain('(none)')
+  expect(ctx).toContain('with model set to that model\'s Magpie ID and model_reason set to the person\'s own words')
+  for (const [id, m] of Object.entries(RULES.models)) expect(ctx).toContain(`${id} (${m.name})`)
+  expect(routerContext([], NOW, RULES)).toContain('(none)')
 })
 
 test('a promoted task\'s brief carries the request, follow-ups, reports, checks and open questions', () => {

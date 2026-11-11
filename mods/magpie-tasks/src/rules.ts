@@ -15,7 +15,11 @@ export interface Substitute { id: string; forRules: string[] | '*'; options: { m
 // rule's work on its base model, or its work Jev judged deep. The daily rating invitation picks
 // tasks with such settings first.
 export interface RatingCell { rule: string; when: 'base-model' | 'deep' }
-export interface Rules { version: string; thresholds: { ruleConfidence: number; deepYes: number; hardYes: number; architectConfidence: number }; models: Record<string, { name: string }>; rules: Rule[]; architect: { default: string; candidates: ArchitectCandidate[] }; reviewSecond: { effort: Effort; whenOriginalIncludes: Record<string, string>; otherwise: string; order: string[] }; substitutes: Substitute[]; ratingPriority: { note: string; cells: RatingCell[] } }
+// Work on the border of two rules (section 4 of the table): Jev's first rule is below ruleConfidence
+// and its two most likely options are rules whose models differ. The model is drawn uniformly from
+// `candidates`, each at its own effort, so the person's ratings can compare them on such work.
+export interface Ambiguous { condition: string; candidates: { model: string; effort: Effort }[]; evidence: string }
+export interface Rules { version: string; thresholds: { ruleConfidence: number; deepYes: number; hardYes: number; architectConfidence: number }; models: Record<string, { name: string }>; rules: Rule[]; architect: { default: string; candidates: ArchitectCandidate[] }; reviewSecond: { effort: Effort; whenOriginalIncludes: Record<string, string>; otherwise: string; order: string[] }; substitutes: Substitute[]; ambiguous: Ambiguous; ratingPriority: { note: string; cells: RatingCell[] } }
 
 // The 19 rules of model-routing-table.md section 2; the file must hold each exactly once.
 export const RULE_IDS: readonly string[] = [
@@ -29,7 +33,7 @@ const NO_MODEL = new Set(['review-second'])
 const NO_EFFORT = new Set(['architect'])
 const JEV_OPTIONS = 15
 
-export const NONE_CHOICE = { value: 'none', description: '没有一条规则符合：任务条件与上面每一条都不一致，或说明缺少判断所需的目标' }
+export const NONE_CHOICE = { value: 'none', description: '没有一条规则符合：任务条件与上面每一条都不一致' }
 
 const USES = ['subagent', 'plugin', 'main'] as const
 
@@ -180,6 +184,15 @@ export function parseRules(json: unknown, jev: { deepYes: number }): Rules {
   const subIds = substitutes.map(s => s.id)
   if (new Set(subIds).size !== subIds.length) fail('substitutes', 'duplicate id')
 
+  const am = obj(root['ambiguous'], 'ambiguous')
+  const drawn = arr(am['candidates'], 'ambiguous.candidates').map((raw, i) => {
+    const c = obj(raw, `ambiguous.candidates[${i}]`)
+    return { model: model(c['model'], `ambiguous.candidates[${i}].model`), effort: effort(c['effort'], `ambiguous.candidates[${i}].effort`) }
+  })
+  if (drawn.length < 2) fail('ambiguous.candidates', 'needs at least two models to draw from')
+  if (new Set(drawn.map(c => c.model)).size !== drawn.length) fail('ambiguous.candidates', 'duplicate model')
+  const ambiguous: Ambiguous = { condition: str(am['condition'], 'ambiguous.condition'), candidates: drawn, evidence: str(am['evidence'], 'ambiguous.evidence') }
+
   const rp = obj(root['ratingPriority'], 'ratingPriority')
   const cells: RatingCell[] = arr(rp['cells'], 'ratingPriority.cells').map((raw, i) => {
     const c = obj(raw, `ratingPriority.cells[${i}]`)
@@ -193,7 +206,7 @@ export function parseRules(json: unknown, jev: { deepYes: number }): Rules {
   })
   const ratingPriority = { note: str(rp['note'], 'ratingPriority.note'), cells }
 
-  return { version, thresholds, models, rules, architect, reviewSecond, substitutes, ratingPriority }
+  return { version, thresholds, models, rules, architect, reviewSecond, substitutes, ambiguous, ratingPriority }
 }
 
 export async function loadRules(io: Io, pluginRoot: string): Promise<Rules> {
@@ -228,6 +241,20 @@ export function raise(e: Effort, steps = 1): Effort {
 // judgment has no probability, so its work stays on the rule's base model.
 export function isHardWork(deepP: number | null, rules: Rules): boolean {
   return deepP !== null && deepP >= rules.thresholds.hardYes
+}
+
+// The two rules a judgment hangs between when its work is on their border (Rules.ambiguous): Jev's
+// first choice below ruleConfidence, and its two most likely options both rules whose models for this
+// brief differ. Null otherwise, and for a substitute judgment, which has no second option.
+export function borderPair(j: { ruleChoice: string; confidence: number; probabilities: Record<string, number>; deep: boolean; deepP: number | null; provider: string }, rules: Rules): { first: { ruleId: string; p: number }; second: { ruleId: string; p: number } } | null {
+  if (j.provider !== 'jev' || j.confidence >= rules.thresholds.ruleConfidence) return null
+  const ranked = Object.entries(j.probabilities).sort((a, b) => b[1] - a[1])
+  if (ranked.length < 2) return null
+  const [[a, pa], [b, pb]] = ranked as [[string, number], [string, number]]
+  if (a === 'none' || b === 'none') return null
+  const flags = { deep: j.deep, hard: isHardWork(j.deepP, rules) }
+  if (ruleModel(ruleById(rules, a), flags) === ruleModel(ruleById(rules, b), flags)) return null
+  return { first: { ruleId: a, p: pa }, second: { ruleId: b, p: pb } }
 }
 
 // The rule's model for a brief: hardModel for the largest work, deepModel for a brief judged deep,

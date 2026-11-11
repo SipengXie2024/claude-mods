@@ -11,7 +11,7 @@ import { expect, test } from 'bun:test'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { briefForJev } from '../src/dialogue'
+import { delegationMessages } from '../src/dialogue'
 import { buildRequest, type JevConfig, type JevMessage, type JevQuestion } from '../src/jev'
 import { blockerQuestion, decideRule, judgeBlocker, judgeSpawn, spawnQuestions, type JudgeCtx } from '../src/judge'
 import { loadRules } from '../src/rules'
@@ -72,9 +72,9 @@ test('the routing table example and one brief per rule: Jev answers with every j
   const rows: string[] = []
   let agree = 0
   for (const [expected, brief] of cases) {
-    const j = await judgeSpawn(ctx, [{ role: 'user', content: briefForJev(brief) }])
+    const j = await judgeSpawn(ctx, delegationMessages([], [], brief))
     expect(j.provider).toBe('jev')
-    expect(j.questionSet).toBe('rules-q.v3')
+    expect(j.questionSet).toBe('rules-q.v5')
     expect([...rules.rules.filter(r => r.jevOption).map(r => r.id), 'none']).toContain(j.ruleChoice)
     expect(j.confidence).toBeGreaterThanOrEqual(0)
     expect(j.confidence).toBeLessThanOrEqual(1)
@@ -89,13 +89,16 @@ test('the routing table example and one brief per rule: Jev answers with every j
   console.log(rows.join('\n'))
   console.log(`first choice equals the rule the brief was written for: ${agree} of ${Object.keys(BRIEFS).length}`)
   if (SAVE) {
-    const input = (brief: string): JevMessage[] => [{ role: 'user', content: briefForJev(brief) }]
+    const input = (brief: string): JevMessage[] => delegationMessages([], [], brief)
     await saveRaw('jev-spawn-scheduler.json', input(EXAMPLE), spawnQuestions(rules))
     await saveRaw('jev-spawn-line-count.json', input(LINE_COUNT), spawnQuestions(rules))
     // A request no rule fits (a Telegram question about the person's own discussions), for the none cases.
     await saveRaw('jev-spawn-no-rule.json', input(readFileSync(join(PLUGIN_ROOT, 'tests/data/brief-deeper-question.txt'), 'utf8')), spawnQuestions(rules))
     // A brief Jev is less sure about, for the below-threshold case of tests/judge.test.ts.
     await saveRaw('jev-spawn-batch-judge.json', input(BRIEFS['batch-judge']!), spawnQuestions(rules))
+    // A real brief on the border of two rules whose models differ (first choice below ruleConfidence),
+    // for the ambiguous draw of tests/spawn.test.ts.
+    await saveRaw('jev-spawn-border.json', input(readFileSync(join(PLUGIN_ROOT, 'tests/data/brief-border-formalize.txt'), 'utf8')), spawnQuestions(rules))
   }
 }, 300000)
 
@@ -110,7 +113,7 @@ const CORRECTED: [string, string, string][] = [
 
 test('the briefs the person corrected get the rule they named', async () => {
   for (const [name, file, expected] of CORRECTED) {
-    const j = await judgeSpawn(ctx, [{ role: 'user', content: briefForJev(readFileSync(join(PLUGIN_ROOT, file), 'utf8')) }])
+    const j = await judgeSpawn(ctx, delegationMessages([], [], readFileSync(join(PLUGIN_ROOT, file), 'utf8')))
     console.log(`${name}: ${j.ruleChoice} ${j.confidence.toFixed(2)} (expected ${expected})`)
     expect([name, j.ruleChoice]).toEqual([name, expected])
     expect(j.confidence).toBeGreaterThanOrEqual(rules.thresholds.ruleConfidence)

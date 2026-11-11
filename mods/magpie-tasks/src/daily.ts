@@ -279,13 +279,22 @@ async function executorDone(ctx: Ctx, task: TaskRecord, agent: AgentRecord, answ
         a.state = 'idle'
         a.reports.push({ at: now, status: 'missing', text: answer, verification: [] })
       }, { type: 'status-missing', agentId: id })
-      await wake(ctx, task, id, 'Your last answer ended without the report lines. Add them now, in a short answer: the `验证：` block with each verification command you ran and its result, then the last line `状态：已完成`, `状态：需要用户决定` or `状态：受阻：<one sentence>`.', [])
+      await wake(ctx, task, id, 'Your last answer ended without the report lines. Add them now, in a short answer: the `验证：` block with each verification command you ran and its result, then the last line `状态：已完成`, `状态：需要用户决定`, `状态：受阻：<one sentence>` or `状态：进行中：<what it waits for>`.', [])
       return
     }
     status = { status: 'needs-user', verification: [] }
   }
   statusAsked.delete(id)
   const report = { at: now, status: status.status, text: answer, verification: status.verification }
+
+  // The executor waits for its own background agent or command; that one's completion notice resumes it.
+  if (status.status === 'working') {
+    await ctx.reg.update(task.id, t => {
+      t.agents[id]!.reports.push(report)
+      t.agents[id]!.state = 'idle'
+    }, { type: 'report', agentId: id, status: status.status })
+    return
+  }
 
   if (status.status === 'needs-user') {
     await ctx.reg.update(task.id, t => {

@@ -26,7 +26,10 @@ import type { EffortDecision, TaskProfile } from '../src/types'
  * again after the model changed code and still fails when the turn ends starts
  * the next prompt that continues the work, or the subagent's next run, one
  * level up. The level never moves within a turn. A /effort the person runs
- * pins the session's own level until `[effort auto]`. Any failure leaves the
+ * pins the session's own level until `[effort auto]`. A session started with
+ * JEV_MAIN_EFFORT in its environment (the claude-telegram Router) runs its
+ * main loop at that level: Jev is not asked and the ladder does not raise it;
+ * a /effort the person runs still wins. Any failure leaves the
  * request as the engine made it. The band above the prompt names the model
  * of the loop whose transcript is in view (the main conversation, or the
  * subagent opened from the tasks list) and that loop's effort trail; for a
@@ -37,6 +40,8 @@ import type { EffortDecision, TaskProfile } from '../src/types'
 type $ = EngineInterface
 
 const MAIN = 'main'
+/** The environment variable that fixes the main loop's level for the whole session. */
+export const MAIN_EFFORT_ENV = 'JEV_MAIN_EFFORT'
 const EDIT_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit'])
 /** Prompt origins that are a person's own message: follow-up, acknowledgement, carry-over and exploration apply to these. */
 const HUMAN_ORIGINS = new Set(['composer', 'bridge', 'sdk', 'channel'])
@@ -145,7 +150,7 @@ const band = new Map<string, BandStatus>()
 const held = new Map<string, Held>()
 /** Per subagent id, whether its brief opens with the magpie-tasks marker: that plugin sets its effort and draws its band line. */
 const magpieOwned = new Map<string, boolean>()
-let setup: Promise<{ cfg: ModConfig; client: JevClient | null; keyError: string | null; dir: string }> | null = null
+let setup: Promise<{ cfg: ModConfig; client: JevClient | null; keyError: string | null; dir: string; mainEffort: Effort | null }> | null = null
 let keyWarned = false
 let authWarned = false
 /** Texts of the notes other plugins appended to this session's conversations (`session.append`, door `note`). */
@@ -187,9 +192,17 @@ function load($: $) {
       } catch { /* reported below */ }
       if (!apiKey) keyError = KEY_FILE_UNREADABLE
     } else if (cfg.staleKey) keyError = STALE_KEY
-    return { cfg, client: apiKey ? new JevClient({ apiKey, ...cfg.jev }) : null, keyError, dir }
+    return { cfg, client: apiKey ? new JevClient({ apiKey, ...cfg.jev }) : null, keyError, dir, mainEffort: fixedEffort(await $.env.get('JEV_MAIN_EFFORT')) }
   })()
   return setup
+}
+
+/** JEV_MAIN_EFFORT as a level; unset or empty is none, anything else that is no level is a setup error. */
+export function fixedEffort(raw: string | undefined): Effort | null {
+  const v = raw?.trim() ?? ''
+  if (v === '') return null
+  if (!isEffort(v)) throw new Error(`${MAIN_EFFORT_ENV}=${v} is not an effort level (low, medium, high, xhigh, max)`)
+  return v
 }
 
 function io($: $): JevIo {
@@ -382,6 +395,7 @@ function bandLine(s: BandStatus): string {
     if (s.phase) parts.push(s.phase.replaceAll('_', ' '))
     if (s.source === 'heuristic') parts.push('local routing')
     if (s.source === 'pinned') parts.push('/effort')
+    if (s.source === 'fixed') parts.push(MAIN_EFFORT_ENV)
   }
   if (s.done) parts.push('done')
   return parts.join(' · ')
@@ -414,7 +428,7 @@ function moveTo(d: EffortDecision, effort: Effort, reason: string): void {
  * and exploration on top of its task level.
  */
 async function routePrompt($: $, raw: string, origin: string): Promise<{ advisor: boolean } | null> {
-  const { cfg, client, keyError, dir } = await load($)
+  const { cfg, client, keyError, dir, mainEffort } = await load($)
   const human = HUMAN_ORIGINS.has(origin)
   const text = origin === 'channel' ? unwrapChannel(raw) : raw
   // The tag goes with this prompt, whichever model runs it: a subagent may run on a routed one.
@@ -432,9 +446,9 @@ async function routePrompt($: $, raw: string, origin: string): Promise<{ advisor
 
   const continued = loop.ladder
   startPrompt(loop, text, cfg)
-  if (pinned) {
+  if (pinned || mainEffort) {
     loop.next = { kind: 'prompt', task: null }
-    await writeRecord($, session, freshRecord(prev, loop.effort ?? prev?.last ?? cfg.bounds.min, await $.clock.now(), null))
+    await writeRecord($, session, freshRecord(prev, pinned ? loop.effort ?? prev?.last ?? cfg.bounds.min : mainEffort!, await $.clock.now(), null))
     return null
   }
 
@@ -622,7 +636,7 @@ async function startOfTurn($: $, loop: Loop, key: string, cfg: ModConfig, client
 
 async function decideStep($: $, e: { index: number; model: string; effort?: unknown; agentId?: string; turnId: string }): Promise<Effort | undefined> {
   if (!isEffort(e.effort) || !routed(e.model)) return undefined
-  const { cfg, client, keyError, dir } = await load($)
+  const { cfg, client, keyError, dir, mainEffort } = await load($)
   const key = e.agentId ?? MAIN
   const loop = loopFor(key, cfg)
   const session = await $.session.id()
@@ -655,6 +669,12 @@ async function decideStep($: $, e: { index: number; model: string; effort?: unkn
     if (e.index === 0) loop.next = null
     if (e.index === 0 || loop.effort !== e.effort) {
       decision = { kind: e.index === 0 ? 'task' : 'step', effort: e.effort, previous: loop.effort, changed: loop.effort !== e.effort, reasons: ['/effort pin'], source: 'pinned', jevLatencyMs: 0, policyVersion: policyVersion() }
+    }
+  } else if (key === MAIN && mainEffort) {
+    // The session's fixed level: no Jev, no ladder, no exploration.
+    if (e.index === 0) loop.next = null
+    if (e.index === 0 || loop.effort !== mainEffort) {
+      decision = { kind: e.index === 0 ? 'task' : 'step', effort: mainEffort, previous: loop.effort, changed: loop.effort !== mainEffort, reasons: [MAIN_EFFORT_ENV], source: 'fixed', jevLatencyMs: 0, policyVersion: policyVersion() }
     }
   } else if (e.index === 0 || loop.effort === null) {
     decision = await startOfTurn($, loop, key, cfg, client, keyError, e.agentId)

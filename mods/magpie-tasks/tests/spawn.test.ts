@@ -9,13 +9,13 @@ import { acceptanceBrief, parseMarker, parseStatus, parseVerdict } from '../src/
 import { parseResponse } from '../src/jev'
 import { spawnJudgment } from '../src/judge'
 import { catalogFrom, isAvailable, sameModel, withRuleModels, type ModelCatalog } from '../src/model'
-import { parseRules, ruleById } from '../src/rules'
+import { borderPair, parseRules, ruleById } from '../src/rules'
 import { dailyTaskDraft, decideSpawn, ROUTE_ORIGIN, markerFor, markRecorded, nextEffort, registerStarted, spawnPrecheck, startedMarker, turnStarted, type RoutedTask, type SpawnDecision } from '../src/spawn'
 import { freshState } from '../src/state'
 import type { AgentRecord, JevJudgment } from '../src/types'
 import { unavailableAction } from '../src/unavailable'
-import { jevSpawnNoRule, jevSpawnScheduler, type SavedDecision } from './data/jev-responses'
-import { briefDeeperQuestion } from './data/briefs'
+import { jevSpawnBorder, jevSpawnNoRule, jevSpawnScheduler, type SavedDecision } from './data/jev-responses'
+import { briefBorderFormalize, briefDeeperQuestion } from './data/briefs'
 import { channelPlain953 } from './data/channel-blocks'
 import { routingRules } from './data/jev-rules'
 
@@ -149,8 +149,9 @@ const daily = (): RoutedTask => {
 const WT = '/home/ubuntu/.local/share/magpie-tasks/worktrees/l-20261109-p7m2c4'
 const long = (): RoutedTask => ({ ...daily(), id: 'l-20261109-p7m2c4', kind: 'long', telegram: { chatId: '7051661301' }, project: { root: '/home/ubuntu/proj', gitInitByPlugin: false }, worktree: { path: WT, baseRef: 'refs/magpie-tasks/l-20261109-p7m2c4/base', baseCommit: '4b825dc642cb6eb9a060e54bf8d69288fbee4904' } })
 
-function decide(e: AgentSpawnInput, task: RoutedTask | null, j: JevJudgment, agents: Record<string, string> = {}, origin = 'engine'): SpawnDecision {
-  return decideSpawn({ e, origin, task, judgment: j, rules, catalog: cat, lookupAgentModel: id => agents[id], session: { id: 'sess-1', cwd: '/home/ubuntu' } })
+// `rand` draws the model for work on a rule border; other decisions never call it.
+function decide(e: AgentSpawnInput, task: RoutedTask | null, j: JevJudgment, agents: Record<string, string> = {}, origin = 'engine', rand: () => number = () => { throw new Error('no draw expected') }): SpawnDecision {
+  return decideSpawn({ e, origin, task, judgment: j, rules, catalog: cat, lookupAgentModel: id => agents[id], session: { id: 'sess-1', cwd: '/home/ubuntu' }, rand })
 }
 
 function routed(d: SpawnDecision): Extract<SpawnDecision, { action: 'route' | 'assess' }> {
@@ -167,7 +168,7 @@ test('fork, workflow, teammate, resume, the plugin\'s own relay and spawns outsi
     spawn(SCHEDULER, { isTeammate: true }),
     spawn(SCHEDULER, { resume: { agentId: 'a1' } }),
   ]) expect(decide(e, task, j)).toEqual({ action: 'pass' })
-  expect(decideSpawn({ e: spawn(SCHEDULER), origin: 'magpie-tasks', task, judgment: j, rules, catalog: cat, lookupAgentModel: () => undefined, session: { id: 's', cwd: '/' } })).toEqual({ action: 'pass' })
+  expect(decideSpawn({ e: spawn(SCHEDULER), origin: 'magpie-tasks', task, judgment: j, rules, catalog: cat, lookupAgentModel: () => undefined, session: { id: 's', cwd: '/' }, rand: Math.random })).toEqual({ action: 'pass' })
   expect(decide(spawn(SCHEDULER), null, j)).toEqual({ action: 'pass' })
   // Decided before any judgment, so onAgentSpawn asks Jev only when routing needs it.
   expect(spawnPrecheck({ e: spawn(SCHEDULER, { fork: true }), origin: 'engine', task })).toEqual({ action: 'pass' })
@@ -298,6 +299,31 @@ test('no matching rule: the architect gets the reason, a daily request runs on t
   // A helper inside a daily task is refused like the architect: its executor decides.
   const helper = decide(spawn(NO_RULE, { parentAgentId: 'aexec' }), task, j)
   expect(helper.action).toBe('deny')
+})
+
+test('work on the border of two rules whose models differ: a model drawn from rules.ambiguous at its own effort', () => {
+  // A real brief (formalize-and-substitute, blockchain-catchup) Jev splits between math (Sol 6.1)
+  // and explain-write (Argon), its first choice below ruleConfidence.
+  const j = judged(jevSpawnBorder)
+  expect(j.confidence).toBeLessThan(rules.thresholds.ruleConfidence)
+  expect(borderPair(j, rules)).toEqual({ first: { ruleId: 'math', p: 0.41 }, second: { ruleId: 'explain-write', p: 0.16 } })
+  const draws = [0, 0.34, 0.99].map(r => routed(decide(spawn(briefBorderFormalize), long(), j, {}, 'engine', () => r)))
+  expect(draws.map(d => [d.agent.model, d.agent.effort, d.agent.ruleId, d.agent.selection.kind])).toEqual([
+    ['claude/claude-mythos-5-2', 'high', null, 'ambiguous'],
+    ['claude/claude-opus-5-5', 'xhigh', null, 'ambiguous'],
+    ['codex/gpt-6-astra', 'max', null, 'ambiguous'],
+  ])
+  expect(draws[0]!.agent.selection.reason).toContain('between rule math (0.41) and rule explain-write (0.16), whose models differ')
+  expect(draws[2]!.agent.efforts).toEqual([{ from: null, to: 'max', reason: 'rule' }])
+  expect(parseMarker(draws[2]!.rewrite.prompt)).toMatchObject({ role: 'implementer', ruleId: null, model: 'codex/gpt-6-astra', effort: 'max' })
+  // A daily task's executor is drawn the same way; the Telegram line names the two rules.
+  const d = routed(decide(spawn(briefBorderFormalize, { name: 'tg-7051661301-953' }), daily(), j, {}, 'engine', () => 0.5))
+  expect(d.agent).toMatchObject({ role: 'executor', model: 'claude/claude-opus-5-5', effort: 'xhigh', ruleId: null })
+  expect(d.notice).toBe('模型：Opus 5.5 · xhigh · 规则拿不准（Jev 在 math 0.41 与 explain-write 0.16 之间，两条规则用的模型不同），从 Mythos 5.2、Opus 5.5、Astra 中随机选取')
+  // The substitute evaluator gives one choice and no second option: no border, the usual no-rule path.
+  expect(borderPair({ ...j, provider: 'substitute' }, rules)).toBeNull()
+  // A border agent raised after a failed acceptance steps one level up, as an agent without a rule.
+  expect(nextEffort({ rule: null, current: 'high', deep: null, raises: ['acceptance-failed'] }).effort).toBe('xhigh')
 })
 
 test('a Telegram request is the channel block; the daily task title is the person\'s words', () => {

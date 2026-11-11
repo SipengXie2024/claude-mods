@@ -6,6 +6,7 @@ import { expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { delegationMessages } from '../src/dialogue'
 import { decideRule, judgeRecommendation, judgeSpawn, recommendationQuestion, type JudgeCtx } from '../src/judge'
 import { loadRules, ruleById, startEffort } from '../src/rules'
 import { PLUGIN_ROOT } from '../eval/rules-eval'
@@ -21,7 +22,7 @@ const BRIEF = readFileSync(join(PLUGIN_ROOT, 'tests/data/brief-hey-a08c611ec43c9
 const REASON = 'one-line edit of greet.py plus one fixed shell command, no design decisions'
 
 test('Jev weighs the architect\'s Haiku recommendation for a one-line edit against the table\'s choice', async () => {
-  const j = await judgeSpawn(ctx, [{ role: 'user', content: BRIEF }])
+  const j = await judgeSpawn(ctx, delegationMessages([], [], BRIEF))
   expect(j.provider).toBe('jev')
   const decided = decideRule(j, rules)
   const table = 'ruleId' in decided

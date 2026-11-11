@@ -4,12 +4,12 @@
 // window, substitute successes, and the bands of Jev's deep probability. Judgments are a real Jev
 // answer (tests/data/jev-responses.ts) with its deep probability set per case.
 import { expect, test } from 'claude-code/testing'
-import { bandFindings, bandOf, bandStats, calibrationFindings, completionMessageId, localTime, modelOpinions, parseRating, pickRatingTask, ratingDue, ratingFirst, ratingInvitation, reminderText, startEffortOf } from '../src/calibration'
+import { bandFindings, bandOf, bandStats, borderKey, borderReady, borderStats, calibrationFindings, completionMessageId, localTime, modelOpinions, parseRating, pickRatingTask, ratingDue, ratingFirst, ratingInvitation, reminderText, startEffortOf } from '../src/calibration'
 import { parseResponse } from '../src/jev'
 import { spawnJudgment } from '../src/judge'
 import { parseRules } from '../src/rules'
 import { RATING_BUTTONS } from '../src/telegram'
-import type { AgentRecord, JevJudgment, TaskRecord } from '../src/types'
+import type { AgentRecord, Effort, JevJudgment, TaskRecord } from '../src/types'
 import { jevSpawnScheduler } from './data/jev-responses'
 import { routingRules } from './data/jev-rules'
 
@@ -216,7 +216,7 @@ test('model opinions are quoted once each, within the window; the reminder names
   expect(opinions.map(o => o.text)).toEqual(['Sol 写这种证明比 Opus 靠谱'])
   const ids = ['d-20261101-aaaaaa', 'd-20261102-bbbbbb', 'd-20261103-cccccc']
   const tasks = ids.map((id, i) => reworked(id, NOW - (5 - i) * DAY))
-  const text = reminderText(calibrationFindings(tasks, NOW), opinions, [...tasks, t], rules, { findings: [], stats: [] })
+  const text = reminderText(calibrationFindings(tasks, NOW), opinions, [...tasks, t], rules, { findings: [], stats: [] }, borderStats([...tasks, t], rules))
   expect(text).toContain('规则 code-change：验收不通过后返工，3 个任务：「任务 d-20261101-aaaaaa」（d-20261101-aaaaaa）')
   expect(text).toContain('检查这条规则的模型或起始强度')
   expect(text).toContain('“Sol 写这种证明比 Opus 靠谱”')
@@ -252,7 +252,7 @@ test('three tasks of one band, model and start that needed a raise make a low st
   const low = bandFindings(stats)
   expect(low.map(c => [c.band, c.model])).toEqual([['deep', OPUS]])
   expect(bandFindings(bandStats([...deepRaised.slice(0, 2), ...others], NOW, rules))).toEqual([])
-  const text = reminderText([], [], [...deepRaised, ...others], rules, { findings: low, stats })
+  const text = reminderText([], [], [...deepRaised, ...others], rules, { findings: low, stats }, borderStats([...deepRaised, ...others], rules))
   expect(text).toContain('· 规则 code-change（深入推理概率 0.85–0.95、Opus 5.5、起步 high）：3 个任务中 3 个需要提高强度或换模型：「任务 d-20261101-aaaaaa」（d-20261101-aaaaaa）')
   expect(text).toContain('建议：考虑把交给 Mythos 5.2 的门槛 hardYes（现在 0.95）往下调，由你确认。')
   expect(text).toContain('· code-change，深入推理概率 0.95 以上、Mythos 5.2、起步 high：1 个任务，提高 0，换模型 0')
@@ -288,9 +288,47 @@ test('a worker replaced by another model after a blocker counts in its cell; the
   const tasks = [...['d-20261101-aaaaaa', 'd-20261102-bbbbbb', 'd-20261103-cccccc'].map(replaced), recommended]
   const stats = bandStats(tasks, NOW, rules)
   expect(stats.map(c => [c.band, c.model, c.start, c.taskIds.length, c.raised.length, c.changed.length])).toEqual([['deep', OPUS, 'high', 3, 0, 3]])
-  const text = reminderText([], [], tasks, rules, { findings: bandFindings(stats), stats })
+  const text = reminderText([], [], tasks, rules, { findings: bandFindings(stats), stats }, borderStats(tasks, rules))
   expect(text).toContain('3 个任务中 3 个需要提高强度或换模型')
   expect(text).toContain('hardYes（现在 0.95）往下调')
   // The cell list comes after the closing line, so clipping a long reminder drops cells, not findings.
   expect(text.indexOf('需要调整时告诉我')).toBeLessThan(text.indexOf('各段起步与提高次数'))
+})
+
+test('work on rule borders: per drawn model its tasks, last scores, raises and model changes; ready at three scored tasks each; rated first', () => {
+  const drawn = (model: string, effort: Effort, over: Partial<AgentRecord> = {}) => agent('a1', {
+    ruleId: null, rulesVersion: rules.version, model, effort, efforts: [{ at: NOW - 3 * DAY, from: null, to: effort, reason: 'rule' }],
+    selection: { kind: 'ambiguous', reason: 'Jev hangs between rule math (0.47) and rule explain-write (0.20), whose models differ' }, ...over,
+  })
+  const scored = (score: number) => [{ at: NOW - DAY, score: 2, raw: '2', invited: true }, { at: NOW - DAY / 2, score, raw: `${score}`, invited: false }].slice(score === 2 ? 1 : 0)
+  const [mythos, opus, astra] = rules.ambiguous.candidates
+  const tasks = [
+    task('d-20261101-aaaaaa', { agents: { a1: drawn(mythos!.model, mythos!.effort) }, ratings: scored(5) }),
+    task('d-20261102-bbbbbb', { agents: { a1: drawn(mythos!.model, mythos!.effort) }, ratings: scored(4) }),
+    task('d-20261103-cccccc', { agents: { a1: drawn(opus!.model, opus!.effort, { efforts: [{ at: NOW - 3 * DAY, from: null, to: 'xhigh', reason: 'rule' }, { at: NOW - 2 * DAY, from: 'xhigh', to: 'max', reason: 'acceptance-failed' }] }) }, ratings: scored(2) }),
+    task('d-20261104-dddddd', { agents: { a1: drawn(astra!.model, astra!.effort) } }),
+    task('d-20261105-eeeeee', { agents: { a1: agent('a1') }, ratings: scored(3) }),
+  ]
+  const stats = borderStats(tasks, rules)
+  expect(stats.map(s => [s.model, s.effort, s.taskIds.length, s.scores, s.raised.length, s.changed.length])).toEqual([
+    ['claude/claude-mythos-5-2', 'high', 2, [5, 4], 0, 0],
+    ['claude/claude-opus-5-5', 'xhigh', 1, [2], 1, 0],
+    ['codex/gpt-6-astra', 'max', 1, [], 0, 0],
+  ])
+  expect(borderReady(stats)).toBe(false)
+  expect(borderKey(stats)).toBe('border:claude/claude-mythos-5-2=2,claude/claude-opus-5-5=1,codex/gpt-6-astra=0')
+  const text = reminderText([], [], tasks, rules, { findings: [], stats: [] }, stats)
+  expect(text).toContain('规则拿不准、随机分配的任务（累计）：')
+  expect(text).toContain('· Mythos 5.2 · high：2 个任务，评分 2 个，平均 4.5，提高强度 0，换模型 0')
+  expect(text).toContain('· Opus 5.5 · xhigh：1 个任务，评分 1 个，平均 2.0，提高强度 1，换模型 0')
+  expect(text).toContain('· Astra · max：1 个任务，评分 0 个，提高强度 0，换模型 0')
+  // Three scored tasks per drawn model make the comparison ready.
+  const more = rules.ambiguous.candidates.flatMap((c, i) => [0, 1, 2].map(k => task(`d-2026111${i}-${'abc'[k]!.repeat(6)}`, { agents: { a1: drawn(c.model, c.effort) }, ratings: scored(4) })))
+  const ready = borderStats(more, rules)
+  expect(borderReady(ready)).toBe(true)
+  expect(reminderText([], [], more, rules, { findings: [], stats: [] }, ready)).toContain('（累计；每个模型都已有至少 3 个评过分的任务，可以比较）')
+  // The invitation picks such a task first, under the current rules only.
+  expect(ratingFirst(tasks[3]!, rules)).toBe(true)
+  expect(ratingFirst(task('d-20261106-ffffff', { agents: { a1: drawn(astra!.model, astra!.effort, { rulesVersion: 'routing-rules.v5' }) } }), rules)).toBe(false)
+  expect(ratingFirst(tasks[4]!, rules)).toBe(false)
 })

@@ -60,8 +60,8 @@ export interface EffortDecision {
   previous: Effort | null;
   changed: boolean;
   reasons: string[];
-  /** 'local' = decided without asking Jev (a continuation, a ladder step) */
-  source: 'jev' | 'heuristic' | 'pinned' | 'local';
+  /** 'local' = decided without asking Jev (a continuation, a ladder step); 'fixed' = the main loop's JEV_MAIN_EFFORT */
+  source: 'jev' | 'heuristic' | 'pinned' | 'local' | 'fixed';
   jevLatencyMs: number;
   jevError?: string;
   /** which Jev service answered (or failed) */

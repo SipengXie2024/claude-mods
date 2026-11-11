@@ -290,7 +290,7 @@ describe('dispatch', () => {
     expect(w.routed.length).toBe(1)
     const ctx = w.routed[0]!.context!.join('\n')
     expect(ctx).toContain('You are the Router')
-    expect(ctx).toContain('Open tasks:\n（没有）')
+    expect(ctx).toContain('Recent tasks, newest first, at most 8; an answered task can still be continued:\n（没有）')
   })
 
   test('dispatch starts an Opus worker with the original message and posts the ack under it', async ($, on) => {
@@ -442,7 +442,7 @@ describe('forward', () => {
     expect(again.drop).toBeTruthy()
     // the message was used: it can no longer be dispatched
     const d = await $.tool.call({ tool: DISPATCH, chat_id: '7051661301', message_id: '910', title: 't', ack: 'a' } as never)
-    expect(JSON.stringify(d)).toContain('没有等待派活')
+    expect(JSON.stringify(d)).toContain('没有等待派发')
   })
 
   test('a forward to no open task of this chat is refused and the message stays dispatchable', async ($, on) => {
@@ -470,7 +470,7 @@ describe('forward', () => {
     const w = world(on)
     await dispatched($, w)
     const r = await $.tool.call({ tool: FORWARD, chat_id: '7051661301', message_id: '878', worker: 'tg-7051661301-878', agentId: 'a-1' } as never)
-    expect(JSON.stringify(r)).toContain('只给前台用')
+    expect(JSON.stringify(r)).toContain('只给 Router 用')
   })
 })
 
@@ -651,7 +651,7 @@ describe('the Router does no work', () => {
     const edit = await $.tool.call({ tool: 'Bash', command: 'make test', agentId: 'a-9' } as never)
     expect(edit.deny).toBe(undefined)
     const d = await $.tool.call({ tool: DISPATCH, chat_id: '7051661301', message_id: '1', title: 't', ack: 'a', agentId: 'a-9' } as never)
-    expect(d.deny).toContain('只给前台用')
+    expect(d.deny).toContain('只给 Router 用')
   })
 })
 
@@ -666,7 +666,7 @@ describe('messages typed in the terminal', () => {
     const ctx = w.routed.at(-1)!.context!.join('\n')
     expect(ctx).toContain('typed in its terminal')
     expect(ctx).toContain('chat_id "tui"')
-    expect(ctx).toContain('Open terminal tasks:\n（没有）')
+    expect(ctx).toContain('Recent terminal tasks, newest first, at most 8; an answered task can still be continued:\n（没有）')
     const r = await $.tool.call({ tool: DISPATCH, chat_id: 'tui', message_id: terminalId(w), title: '改超时', ack: '收到。' } as never)
     expect(JSON.stringify(r)).toContain(`tui-${terminalId(w)}`)
     expect(w.spawns[0]!.prompt).toContain('typed in the terminal')

@@ -223,3 +223,41 @@ export function subagentDialogue(api: ApiMessage[]): JevMessage[] {
     .map((it, i) => ({ role: it.role, content: i === brief ? briefForJev(it.content) : it.content }))
     .filter(it => it.content.length > 0)
 }
+
+// ---- what Jev reads to route a delegation ------------------------------------------------------
+// The conversation the brief comes from, the files the brief names, then the brief. A brief alone
+// does not say what its work is part of (writing a paper, studying someone's design, a translation
+// project). On 567 delegations of 2026-10-12–11-11 that Jev answered both ways, a confident rule
+// (>= 0.5) rose from 90% with the brief alone to 93% with this input; of the 59 briefs that send
+// the agent to a brief file still on disk, from 45 to 58.
+
+export const FILE_HEAD = 'File named in the brief:'
+
+// The conversation a brief comes from: the main loop's view, or the delegating subagent's (its own
+// brief through briefForJev, as in subagentDialogue).
+export function spawningDialogue(api: ApiMessage[], fromSubagent: boolean): JevMessage[] {
+  return fromSubagent ? subagentDialogue(api) : jevDialogueItems(api).map(it => ({ role: it.role, content: it.content }))
+}
+
+// The absolute and home-relative paths a brief names, first appearance first. A path starts after
+// whitespace, a quote or a bracket (so `src/a.ts` and `https://…` name none) and ends at whitespace,
+// a quote, a bracket or CJK punctuation; sentence punctuation right after it is not part of it.
+const PATH = /(?<![\w./~:-])(~?\/[^\s`'"()<>[\]{}，。；：、（）！？「」]+)/g
+export function briefPaths(brief: string): string[] {
+  const out: string[] = []
+  for (const m of brief.matchAll(PATH)) {
+    const path = m[1]!.replace(/[.,;:!?]+$/, '')
+    if (path !== '/' && path !== '~/' && !out.includes(path)) out.push(path)
+  }
+  return out
+}
+
+// Jev's input for a delegation, from the spawning conversation, the named files that could be read
+// (path and text) and the brief as the delegating agent wrote it.
+export function delegationMessages(dialogue: JevMessage[], files: { path: string; text: string }[], prompt: string): JevMessage[] {
+  return [
+    ...dialogue,
+    ...files.map(f => ({ role: 'user' as const, content: `${FILE_HEAD} ${f.path}\n${f.text}` })),
+    { role: 'user', content: briefForJev(prompt) },
+  ]
+}

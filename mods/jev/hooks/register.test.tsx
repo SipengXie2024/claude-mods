@@ -1,6 +1,6 @@
 import type { On, Register } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
-import { ADVISOR_NOTE } from './register'
+import { ADVISOR_NOTE, fixedEffort } from './register'
 import { jevDialogue } from '../src/dialogue'
 import { mainBeforeChannel } from '../tests/api-messages'
 
@@ -75,6 +75,8 @@ interface Opts {
   tool?: (e: any) => any
   /** extra files, by absolute path */
   files?: Record<string, string>
+  /** extra process environment, beside HOME and JEV_OPUS_CONFIG_DIR */
+  processEnv?: Record<string, string>
 }
 
 /** Peaked answers, so the recomputed confidence clears every gate. */
@@ -102,7 +104,7 @@ const apiText = (r: { role: string; text: string }): Msg => ({ role: r.role, con
 function world(on: On, o: Opts = {}): World {
   const w: World = { files: new Map(Object.entries({ [KEY_FILE]: 'test-key\n', ...o.files })), appends: [], asks: [], steps: [], contexts: [], status: [], toasts: [], invalidates: 0, messages: [], clock: mock.clock(on, { now: 1_000 }), fail: false, mtimes: new Map(), stats: [] }
   if (o.env !== null) w.files.set(`${DIR}/.env`, o.env ?? ENV)
-  mock.env(on, { HOME: '/home/u', JEV_OPUS_CONFIG_DIR: DIR })
+  mock.env(on, { HOME: '/home/u', JEV_OPUS_CONFIG_DIR: DIR, ...o.processEnv })
   mock.store(on, o.store ?? {})
   on('fs.read', ($, e) => (w.files.has(e.path) ? { value: w.files.get(e.path)! } : { deny: `ENOENT ${e.path}` }))
   on('fs.write', ($, e) => (w.files.set(e.path, e.text), { value: undefined }))
@@ -934,6 +936,39 @@ describe('exploration', () => {
     await submit($, 'fix the crash in parser.ts')
     expect(rows(w, 'prompt').length).toBe(1)
     expect(journal(w).some((r) => r.explore)).toBe(false)
+  })
+})
+
+describe('JEV_MAIN_EFFORT', () => {
+  test('the claude-telegram Router: the main loop runs at the fixed level without Jev; a fault does not raise it; subagents are routed; /effort still wins', async ($, on) => {
+    const w = world(on, { processEnv: { JEV_MAIN_EFFORT: 'low' }, agentRows: { a1: [{ role: 'user', text: 'Investigate why the parser crashes' }] } })
+    await submit($, 'fix the crash in parser.ts')
+    await step($, 0, 'low')
+    await step($, 1, 'low')
+    expect(sent(w)).toEqual(['low', 'low'])
+    expect(w.asks.length).toBe(0)
+    expect(journal(w).at(-1)).toMatchObject({ source: 'fixed', reasons: ['JEV_MAIN_EFFORT'], effort: 'low' })
+    expect(await bandText($)).toBe('Opus 5.5 · ◆ Jev · LOW · JEV_MAIN_EFFORT')
+    await step($, 0, 'xhigh', { agentId: 'a1' })
+    expect(w.asks.length).toBe(1)
+    expect(rows(w, 'step').at(-1)).toMatchObject({ agent: 'a1', source: 'jev' })
+    await complete($)
+    await submit($, '不对，parser 还是崩溃')
+    await step($, 0, 'low', { turnId: 'turn-2' })
+    expect(sent(w).at(-1)).toBe('low')
+    expect(w.asks.length).toBe(1)
+    await complete($)
+    await submit($, 'look at the lexer as well')
+    await step($, 0, 'high', { turnId: 'turn-3' })
+    expect(sent(w).at(-1)).toBe('high')
+    expect(journal(w).at(-1)).toMatchObject({ source: 'pinned', manual: true })
+  })
+
+  test('the level must be one of the five; unset or empty is none', () => {
+    expect(fixedEffort(undefined)).toBe(null)
+    expect(fixedEffort('')).toBe(null)
+    expect(fixedEffort(' low ')).toBe('low')
+    expect(() => fixedEffort('fast')).toThrow('JEV_MAIN_EFFORT=fast is not an effort level')
   })
 })
 

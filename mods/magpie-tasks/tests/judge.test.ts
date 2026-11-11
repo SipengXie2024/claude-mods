@@ -27,7 +27,7 @@ test('a rule Jev chose at or above ruleConfidence routes; below it, the reason n
   const j = judgment(jevSpawnScheduler)
   expect(j.provider).toBe('jev')
   expect(j.ruleChoice).toBe('code-change')
-  expect(j.questionSet).toBe('rules-q.v3')
+  expect(j.questionSet).toBe('rules-q.v5')
   expect(decideRule(j, rules)).toEqual({ ruleId: 'code-change' })
   expect(decideRule(j, withThresholds({ ruleConfidence: j.confidence }))).toEqual({ ruleId: 'code-change' })
   // The batch-judge brief, where Jev is less sure: a threshold above its confidence leaves no rule.
@@ -50,9 +50,9 @@ test('a rule Jev cannot choose throws instead of routing', () => {
 
 test('deep is Jev\'s probability at or above deepYes', () => {
   const j = judgment(jevSpawnScheduler)
-  expect(j.deepP).toBe(0.08)
+  expect(j.deepP).toBe(0.29)
   expect(j.deep).toBe(false)
-  expect(judgment(jevSpawnScheduler, withThresholds({ deepYes: 0.08 })).deep).toBe(true)
+  expect(judgment(jevSpawnScheduler, withThresholds({ deepYes: 0.29 })).deep).toBe(true)
 })
 
 test('the substitute prompt is the one the saved evaluator reply answered, and the reply parses', () => {
