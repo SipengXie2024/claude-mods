@@ -1,8 +1,9 @@
 // Event wiring of magpie-tasks (plan sections 8, 9.1 and 9.15): decides the session's role at
 // session.start and hands each event to the flow module of that role. Errors are handled by kind:
 // flow hooks report and stop the flow, gate hooks refuse, effort hooks let the request go on.
-import type { EngineInterface, PluginOptions, Register, TurnCompleteInput } from 'claude-code'
+import type { EngineInterface, PluginOptions, Register, RenderElement, TurnCompleteInput } from 'claude-code'
 import { architectTool, onArchitectComplete, onArchitectPrompt, onArchitectToolCall, onSubagentComplete, onSubagentToolCall } from '../src/architect'
+import { agentBand, bandText, clearBands, isEffort, noteBandDone, noteBandStep } from '../src/band'
 import { onDailyComplete, onOpenWorktree } from '../src/daily'
 import { tick } from '../src/calibration'
 import { expandHome, hostIo } from '../src/io'
@@ -12,7 +13,7 @@ import { Registry } from '../src/registry'
 import { onRouterPrompt, onSessionSend, routerTool } from '../src/router'
 import { loadRules, type Rules } from '../src/rules'
 import { bgIsolationAnswer, detectRole, onClaimPrompt, onFirstPrompt, onTakeoverTurnEnd } from '../src/session'
-import { onAgentSpawn, onTurnStart, onTurnStep } from '../src/spawn'
+import { onAgentSpawn, onTurnStart, onTurnStep, turnRule } from '../src/spawn'
 import { ctxFor, freshState, type Ctx } from '../src/state'
 import { clip, defaultChat, send } from '../src/telegram'
 import { registerTools, toolOwner, type ArchitectToolName, type RouterToolName } from '../src/tools'
@@ -284,6 +285,11 @@ export const register: Register = (on, options) => {
     if (routes() && e.agentId !== undefined) {
       const c = ctxOf($, st, loaded)
       try { effort = await onTurnStep(c, e) } catch (err) { await reportEffortError(c, e.agentId, err, 'turn.step') }
+      // The band names the effort the request goes out with: the engine's when the hook failed.
+      if (st.agents.has(e.agentId)) {
+        const step = { model: e.model, effort: effort ?? (isEffort(e.effort) ? e.effort : undefined), ruleId: turnRule(e.agentId) ?? null, engine: effort === undefined }
+        if (noteBandStep(e.agentId, step)) $.ui.invalidate('ui.render')
+      }
     }
     return yield* next(effort === undefined ? e : { ...e, effort })
   })
@@ -361,6 +367,7 @@ export const register: Register = (on, options) => {
 
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
+    if (e.agentId !== undefined && noteBandDone(e.agentId)) $.ui.invalidate('ui.render')
     if (!managed()) return r
     const c = ctxOf($, st, loaded)
     try {
@@ -371,6 +378,24 @@ export const register: Register = (on, options) => {
     return r
   }).catch(async ($, e, next) => {
     if (loaded !== null) await reportFlowError(ctxOf($, st, loaded), eventTask(e.agentId), errorLine(next.error), 'turn.complete').catch(() => undefined)
+    return next(e)
+  })
+
+  // ---- the band above the prompt (section 9.7) ------------------------------------------------------
+
+  // A routed subagent's transcript in view: its model, the efforts its requests carried and its rule.
+  // JEV draws every other loop's band and passes this one on, since this plugin sets that effort.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const id = e.props.view.agentId
+    const band = id === undefined || e.props.hasSurvey ? undefined : agentBand(id)
+    if (band === undefined || loaded === null) return next(e)
+    const { Text } = $.ui.resolve(e)
+    // h() of an element constructor builds an element; RenderElement is the type a JSX expression has.
+    return h(Text, { color: 'warning' }, bandText(band, loaded.rules)) as RenderElement
+  })
+
+  on('session.end', ($, e, next) => {
+    clearBands()
     return next(e)
   })
 }

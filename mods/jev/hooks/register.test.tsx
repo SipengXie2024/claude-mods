@@ -1263,6 +1263,22 @@ describe('band above the prompt', () => {
     expect(await bandText($)).toBe('Fable 5.1 (1M)')
   })
 
+  test('a subagent magpie-tasks routes is passed on, on any model: while it runs, after it ends and when it is resumed', async ($, on) => {
+    const brief = '[magpie-tasks task=d-7 role=executor rule=daily-default rules=routing-rules.v5 model=claude/claude-opus-5-5 effort=medium]\nLog in to codex on the Mac.'
+    const w = world(on, { agentRows: { 'agent-m': [{ role: 'user', text: brief }], 'agent-s': [{ role: 'user', text: brief }] } })
+    await step($, 0, 'medium', { agentId: 'agent-m', model: 'claude/claude-opus-5-5' })
+    expect(await bandText($, { agentId: 'agent-m' })).toBe('engine')
+    await complete($, 'agent-m')
+    expect(await bandText($, { agentId: 'agent-m' })).toBe('engine')
+    await step($, 0, 'high', { agentId: 'agent-m', turnId: 'turn-2', model: 'claude/claude-opus-5-5' })
+    expect(await bandText($, { agentId: 'agent-m' })).toBe('engine')
+    await step($, 0, 'high', { agentId: 'agent-s', model: 'claude/claude-sonnet-5-5' })
+    expect(await bandText($, { agentId: 'agent-s' })).toBe('engine')
+    expect(sent(w)).toEqual(['medium', 'high', 'high'])
+    expect(w.invalidates).toBe(0)
+    expect(await bandText($)).toBe('Opus 5.5')
+  })
+
   test('a finished subagent keeps its line, marked done; an unknown agent gets the engine\'s', async ($, on) => {
     const w = world(on, { agentRows: BRIEF })
     await step($, 0, 'xhigh', { agentId: 'agent-7' })

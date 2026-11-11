@@ -29,7 +29,9 @@ import type { EffortDecision, TaskProfile } from '../src/types'
  * pins the session's own level until `[effort auto]`. Any failure leaves the
  * request as the engine made it. The band above the prompt names the model
  * of the loop whose transcript is in view (the main conversation, or the
- * subagent opened from the tasks list) and that loop's effort trail.
+ * subagent opened from the tasks list) and that loop's effort trail; for a
+ * subagent magpie-tasks routes it passes the band on to that plugin, which
+ * sets the subagent's effort and draws its line.
  */
 
 type $ = EngineInterface
@@ -55,6 +57,8 @@ const STORE_SESSIONS = 200
 const BAND_AGENTS = 64
 /** Subagents whose open checks are kept for their next run, at most. */
 const HELD_AGENTS = 64
+/** Subagent ids whose brief was read for the magpie-tasks marker, kept at most; a dropped one is read again at its next request. */
+const OWNER_AGENTS = 256
 /** Why Jev is off although a key was configured: the key file could not be read. */
 const KEY_FILE_UNREADABLE = 'key file unreadable'
 /** Why Jev is off: .env names JEV_API_KEY, a key of the service jev-opus used before, and no JEV_API_KEY_FILE. */
@@ -139,6 +143,8 @@ const loops = new Map<string, Loop>()
 const band = new Map<string, BandStatus>()
 /** Per subagent id, kept from the end of one run to the start of the next (SendMessage resumes the same id). */
 const held = new Map<string, Held>()
+/** Per subagent id, whether its brief opens with the magpie-tasks marker: that plugin sets its effort and draws its band line. */
+const magpieOwned = new Map<string, boolean>()
 let setup: Promise<{ cfg: ModConfig; client: JevClient | null; keyError: string | null; dir: string }> | null = null
 let keyWarned = false
 let authWarned = false
@@ -536,12 +542,23 @@ function warnAuth($: $, d: EffortDecision): void {
  * Whether a subagent's brief opens with the magpie-tasks marker. The brief is
  * the first user row of the plain view: that view keeps every row through a
  * compaction (measured on the main loop, 2026-11-09), while the api view then
- * opens with the summary.
+ * opens with the summary. A subagent's brief never changes, so each id is read
+ * until its brief is there, then not again.
  */
 async function magpieTask($: $, agentId: string): Promise<boolean> {
+  const known = magpieOwned.get(agentId)
+  if (known !== undefined) return known
   const rows = await $.session.messages({ agentId })
   if (!Array.isArray(rows)) throw new Error(`subagent conversation not readable: ${rows.deny}`)
-  return isMagpieTask(rows.find((r) => r.role === 'user' && r.text)?.text ?? '')
+  const brief = rows.find((r) => r.role === 'user' && r.text)?.text
+  if (brief === undefined) return false
+  const owned = isMagpieTask(brief)
+  magpieOwned.set(agentId, owned)
+  for (const k of magpieOwned.keys()) {
+    if (magpieOwned.size <= OWNER_AGENTS) break
+    magpieOwned.delete(k)
+  }
+  return owned
 }
 
 const continuation = (loop: Loop): EffortDecision => ({
@@ -797,9 +814,10 @@ export const register: Register = (on) => {
   }).catch(($, e, next) => next(e))
 
   on('turn.step', async function* ($, e, next) {
-    noteModel($, e.agentId ?? MAIN, e.model)
     let effort: Effort | undefined
     try {
+      // A subagent magpie-tasks routes has its band line from that plugin, whatever its model.
+      if (!e.agentId || !(await magpieTask($, e.agentId))) noteModel($, e.agentId ?? MAIN, e.model)
       effort = await decideStep($, e)
     } catch (err) {
       $.ui.log(`jev: step routing failed (${(err as Error)?.name ?? 'error'})`, { to: 'debug' })
@@ -824,7 +842,8 @@ export const register: Register = (on) => {
 
   // The band above the prompt: the model and trail of the loop whose
   // transcript is in view; the main loop's model is the session's until its
-  // first request. Nothing for a subagent before its first request, and
+  // first request. Nothing for a subagent before its first request or for one
+  // magpie-tasks routes (that plugin, inside this one, draws its line), and
   // nothing over a survey.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
@@ -878,6 +897,7 @@ export const register: Register = (on) => {
     notes.clear()
     band.clear()
     held.clear()
+    magpieOwned.clear()
     pinned = null
     mainTag = null
     return next(e)

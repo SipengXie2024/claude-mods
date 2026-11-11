@@ -442,8 +442,15 @@ export function nextEffort(a: { rule: Rule | null; current: Effort; deep: boolea
   return { effort, changes }
 }
 
-// The effort each routed agent's requests carry in this process, set at the first step of a turn.
-const turnEffort = new Map<string, { model: string; effort: Effort }>()
+// The model, effort and rule of each routed agent's requests in this process, set at the first step
+// of a turn.
+const turnEffort = new Map<string, { model: string; effort: Effort; ruleId: string | null }>()
+
+// The rule a routed agent's requests run under, for the band above the prompt; undefined before its
+// first step in this process.
+export function turnRule(agentId: string): string | null | undefined {
+  return turnEffort.get(agentId)?.ruleId
+}
 
 export async function onTurnStep(ctx: Ctx, e: TurnStepInput): Promise<Effort | undefined> {
   const id = e.agentId
@@ -457,13 +464,13 @@ export async function onTurnStep(ctx: Ctx, e: TurnStepInput): Promise<Effort | u
     // pending, so it runs at the start effort its marker carries.
     const m = unrecorded.get(id)
     if (m === undefined || ctx.st.pendingReask.has(id) || (ctx.st.pendingRaises.get(id) ?? []).length > 0) throw new Error(`routed agent ${id} has no record`)
-    turnEffort.set(id, { model: m.model, effort: m.effort })
+    turnEffort.set(id, { model: m.model, effort: m.effort, ruleId: m.ruleId })
     return clampEffort(m.model, m.effort, ctx.catalog)
   }
   unrecorded.delete(id)
   const { task, agent } = found
   if (e.index !== 0) {
-    turnEffort.set(id, { model: agent.model, effort: agent.effort })
+    turnEffort.set(id, { model: agent.model, effort: agent.effort, ruleId: agent.ruleId })
     return clampEffort(agent.model, agent.effort, ctx.catalog)
   }
 
@@ -491,7 +498,7 @@ export async function onTurnStep(ctx: Ctx, e: TurnStepInput): Promise<Effort | u
   }
   ctx.st.pendingReask.delete(id)
   ctx.st.pendingRaises.delete(id)
-  turnEffort.set(id, { model: agent.model, effort: next.effort })
+  turnEffort.set(id, { model: agent.model, effort: next.effort, ruleId: agent.ruleId })
   return clampEffort(agent.model, next.effort, ctx.catalog)
 }
 
