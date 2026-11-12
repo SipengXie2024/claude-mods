@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { isPaneCommand } from '../src/gate'
+import { isPaneCommand, routerDeny, routerSends } from '../src/gate'
 import * as tasks from '../src/tasks'
 
 function memory(): tasks.Kv {
@@ -79,5 +79,22 @@ describe('pane commands', () => {
     expect(isPaneCommand('tmux pipe-pane -t 2 "tee log"')).toBe(false)
     expect(isPaneCommand('tmux list-panes | sort -o /tmp/x')).toBe(false)
     expect(isPaneCommand('tmux list-panes | sort -k2')).toBe(true)
+  })
+})
+
+// 2026-11-12, scenario E16: an acceptance failed, magpie-tasks' $.session.send to the executor
+// reached the hook as a SendMessage of the main conversation, and the gate sent it to forward.
+describe('messages to a worker', () => {
+  test('the Router model\'s SendMessage is the gate\'s to judge; magpie-tasks\' own and a worker\'s are not', () => {
+    expect(routerSends({ tool: 'SendMessage' }, undefined)).toBe(true)
+    expect(routerSends({ tool: 'SendMessage' }, 'jev')).toBe(true)
+    expect(routerSends({ tool: 'SendMessage' }, 'magpie-tasks')).toBe(false)
+    expect(routerSends({ tool: 'SendMessage', agentId: 'a3b783a0e76ac1bbe' }, undefined)).toBe(false)
+    expect(routerSends({ tool: 'Bash' }, undefined)).toBe(false)
+  })
+
+  test('the Router and a worker may both ask magpie-tasks which agents run', () => {
+    expect(routerDeny({ tool: 'mcp__magpie-tasks__session_agents' }, '/state/inbox')).toBeNull()
+    expect(routerDeny({ tool: 'mcp__magpie-tasks__session_agents', agentId: 'a3b783a0e76ac1bbe' }, '/state/inbox')).toBeNull()
   })
 })

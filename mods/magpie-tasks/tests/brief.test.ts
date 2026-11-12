@@ -89,6 +89,9 @@ test('withRouting replaces a marker already at the start and keeps the brief who
   expect(once.includes('mcp__magpie-tasks__open_project')).toBe(true)
   expect(once.includes('If open_project gave you a worktree, never commit there')).toBe(true)
   const long = withRouting(brief, info, { cwd: '/w/l-1', daily: false, direct: null })
+  // Every agent that works on a task is told to ask for the other agents' state before speaking of it.
+  for (const routed of [once, long]) expect(routed.includes('- Before an answer says that another task, worker or check of this session is running, has finished, or would be cut off (by a restart, for one), call `mcp__magpie-tasks__session_agents`')).toBe(true)
+  expect(withRouting(brief, { ...info, role: 'acceptance' }, { cwd: '/w/l-1', daily: true, direct: null }).includes('session_agents')).toBe(false)
   expect(long.includes('mcp__magpie-tasks__open_project')).toBe(false)
   expect(long.includes('`/w/l-1`')).toBe(true)
   expect(long.includes('- Commit and push when the person asks for it, in the project main directory and never in the task worktree')).toBe(true)

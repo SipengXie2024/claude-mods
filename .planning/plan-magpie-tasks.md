@@ -91,6 +91,7 @@ mods/magpie-tasks/
 | `src/band.ts` | 路由过的子代理的强度条：模型、请求实际带的强度、规则 | `turn.step`、`turn.complete`、`ui.render`、`session.end` | F |
 | `src/route.ts` | 架构师的委派工具 `model_route`：Jev 与路由表选择模型和强度，Jev 权衡架构师的推荐，经中转启动子代理 | architect（工具调用） | F |
 | `src/daily.ts` | 中转（启动与唤醒子代理）、日常任务的评估确认、验收、诊断、阻碍判定、整合触发、日常任务决定的执行、`open_project` 工具 | `prompt.submit`（中转）、`turn.complete`、`tool.call` | F |
+| `src/agents.ts` | `session_agents` 工具：调用那一刻会话里其他每个代理是否在运行、所属的任务和上一次回答的结束状态 | `tool.call` | F |
 | `src/unavailable.ts` | 路由过的子代理因模型不可用或额度耗尽结束时的替代与报告 | `classic.StopFailure`、`turn.complete` | F |
 | `src/telegram.ts` | Bot API 发送、令牌读取、默认聊天、频道标签解析 | architect、router、daily、calibration | G |
 | `src/router.ts` | Router 角色：magpie-tasks 消息的回复处理、长期任务转交、日常转长期、架构师推荐、追问观察 | `prompt.submit`、`session.send`、`tool.call` | G |
@@ -407,9 +408,10 @@ export function onSessionSend(ctx: Ctx, e: SessionSendInput, next: Next<'session
 export type ArchitectToolName = 'task_status' | 'report_outcome' | 'integrate' | 'notify_user' | 'resolve_conflict'
 export type RouterToolName = 'forward_long' | 'recommend_architect' | 'promote_task'
 export type SubagentToolName = 'open_project'
-export const TOOL_SPECS: Record<ArchitectToolName | RouterToolName | SubagentToolName, { description: string; inputSchema: Record<string, unknown> }>   // ToolSpec.inputSchema 的类型
-export function registerTools(ctx: Ctx, role: Role): Promise<void>          // architect：架构师工具与 open_project；router：Router 工具与 open_project
-export function toolOwner(fullName: string): { name: string; kind: 'architect' | 'router' | 'subagent' } | null   // mcp__magpie-tasks__<name>
+export type SessionToolName = 'session_agents'   // 主对话与子代理都能调用
+export const TOOL_SPECS: Record<ArchitectToolName | RouterToolName | SubagentToolName | SessionToolName, { description: string; inputSchema: Record<string, unknown> }>   // ToolSpec.inputSchema 的类型
+export function registerTools(ctx: Ctx, role: Role): Promise<void>          // architect：架构师工具；router：Router 工具；两者都另有子代理工具与 session_agents
+export function toolOwner(fullName: string): { name: string; kind: 'architect' | 'router' | 'subagent' | 'session' } | null   // mcp__magpie-tasks__<name>
 
 // src/state.ts（H）
 export interface Host { session: { id; model; messages; append; send }; ui: { log; ask; toast }; model: { complete }; agent: { spawn }; prompt: { submit }; command: { run }; clock: { after }; tool: { register }; plugin: { root: string } }   // 各方法的类型取自 EngineInterface 的同名成员
@@ -1003,6 +1005,7 @@ export function integrate(io: Io, reg: Registry, a: { taskId: string; repo: stri
 **执行者的说明。** 第 9.6 节附加的任务规则中包括：
 
 - 需要修改某个项目时，先调用 `mcp__magpie-tasks__open_project { project: <绝对路径> }`，此后只在返回的目录中修改（Bash 先 `cd` 到该目录）：没有其他任务直接修改这个项目时就是项目目录本身，否则是工作副本；不修改项目的任务不需要调用。
+- 回答要说本会话里别的任务、工作者或验收正在运行、已经结束或会被打断（例如被重启打断）之前，先调用 `mcp__magpie-tasks__session_agents`，按它当时的回答写；没有调用就不写这类话。子代理启动时会话提醒里的代理名单列的是能收消息的代理，早已交了回答的也在内。
 - 回答末尾的状态行：`状态：已完成`、`状态：需要用户决定` 或 `状态：受阻：<一句话说明阻碍>`。完成时在状态行之前写 `验证：`，每行一条实际运行过的验证命令及结果。
 
 **`open_project` 工具**（执行者调用，`daily.onOpenProject`）：
@@ -1010,6 +1013,8 @@ export function integrate(io: Io, reg: Registry, a: { taskId: string; repo: stri
 1. `project` 必须是存在的绝对路径；项目根为它所在仓库的顶层目录，不是仓库时为它自己。
 2. 任务还没有工作目录时按 `placeTask` 确定（第 9.9 节），写入任务的 `project` 与 `direct` 或 `worktree`，该代理记录的 `worktree` 与 `cwd` 同步设置。任务已有工作目录时，不同项目返回错误（一个任务只改一个项目），同一项目先经 `leaveIfTaken` 判断是否转到工作副本，再返回当前目录。
 3. 返回目录与说明：直接修改时写明改动立即在项目目录中、验收在之后；工作副本时写明依赖安装、只在此目录修改，以及是哪个任务在直接修改项目。
+
+**`session_agents` 工具**（Router 或架构师的主对话以及它们的子代理调用，`agents.onSessionAgents`）：没有参数。读取 `$.agent.list()`，去掉调用者自己（主对话不在这份列表里），按调用那一刻的状态列出其余每个代理：`pending`、`running`、`waiting` 写为 `RUNNING`，`idle`、`completed`、`failed`、`killed` 写为 `not running`，运行中的排在前面，第一行写出运行中的个数与总数。插件路由过的代理另外写出角色、任务 ID 与标题，以及上一次回答距今多久；执行者和实施子代理还写出上一次回答的状态行，其中 `状态：进行中` 注明它启动的后台工作可能仍在运行。引擎的列表里已经没有、任务仍为 `running` 且上一次回答是 `状态：进行中` 的代理（`st.agents` 中的记录）另列在最后。
 
 **执行者完成**（`turn.complete`，代理为任务当前负责的执行者）：
 
@@ -1197,7 +1202,7 @@ export function tick(ctx: Ctx): Promise<void>
    - `deliver`：`ownerOf` 有记录且 `ownerAgentId` 与 tg-router 记录的 worker 不同时，发往 `{ agentId: ownerAgentId }`；`long` 为真时不投递，返回交给内层。
    - `prompt.submit`：频道消息 `reply_to` 的 `messageKind` 为 `long`、`magpie`、`decision`、`rating`，或文字匹配 `^\s*评分\s*[1-5]\s*$` 时，不做自己的路由，清除 `armed` 后 `return next(e)`；内层返回 `drop` 时同样清除 `armed`。
    - `taskFor(agentId)`：自己的记录与代理名都找不到时，用 `workerOfAgent` 找 worker 名，再按名取任务（更换后的执行者的回答发到原任务下）。
-3. `src/gate.ts`：`ROUTER_TOOLS` 增加 `mcp__magpie-tasks__forward_long`、`mcp__magpie-tasks__recommend_architect`、`mcp__magpie-tasks__promote_task`；子代理调用这三个工具时拒绝。子代理调用 `mcp__magpie-tasks__open_project` 不受 tg-router 限制（tg-router 不检查子代理的普通工具）。
+3. `src/gate.ts`：`ROUTER_TOOLS` 增加 `mcp__magpie-tasks__forward_long`、`mcp__magpie-tasks__recommend_architect`、`mcp__magpie-tasks__promote_task`；子代理调用这三个工具时拒绝。子代理调用 `mcp__magpie-tasks__open_project` 不受 tg-router 限制（tg-router 不检查子代理的普通工具）。`mcp__magpie-tasks__session_agents` 也在 `ROUTER_TOOLS` 中，Router 和子代理都能调用。Router 模型自己对 worker 的 `SendMessage` 被拒绝并改用 `forward`（`routerSends`）；magpie-tasks 用 `$.session.send` 唤醒 worker（验收不通过、诊断之后）时，这次调用以主对话的 `SendMessage` 到达钩子，`next.origin.plugin` 为 `magpie-tasks`，不在拒绝之列。
 4. `src/prompts.ts`：`workerBrief` 在 `magpieActive` 时去掉“自己建工作副本”一条（由 `open_project` 负责），并说明状态行由 magpie-tasks 的任务规则规定。`routerContext` 与 `terminalContext` 增加 `dispatch` 的 `model`/`model_reason` 用法。
 5. `src/telegram.ts`：`stateDir` 依次读取 `TG_ROUTER_STATE_DIR`、`TELEGRAM_STATE_DIR`、默认目录。
 6. 测试：`tests/magpie.test.ts`（索引查询）；`hooks/register.test.ts` 中现有用例在 `magpieActive` 为 false 时保持通过。
@@ -1347,6 +1352,7 @@ start() { tmux new-session -d -s "$1" -x 220 -y 60 "cd $2 && env -u CLAUDECODE -
 | E13 替代判断 | E8 的环境中把插件选项 `jevKeyFile` 改为不存在的 `$E/missing.key`，重启 Router，输入 `在 $E/repo 里把 greet.py 的 hi 改成 hey，并运行 python3 greet.py 验证` | 执行者的代理记录 `judgment.provider === 'substitute'`，`substituteReason` 为 `key file missing`，判断由 `evaluatorModel` 给出（Magpie 用量中有该模型的一次请求）；Router 窗格的路由说明含“由评估模型代为判断”；任务照常完成验收与整合 |
 | E14 模型不可用（U11） | 对 E3 架构师请求：“按我的指定用模型 `codex/gpt-6-magpie-missing` 委派一个子代理统计 greet.py 的行数，说明中写 `[model-reason user: 测试不可用模型]`” | 启动被接受，选择类型 `user`；插件调试日志记录该子代理的 `StopFailure`（`agent_id` 相同，分类属于不可用集合）与 `reason: error` 的 `turn.complete`；代理记录 `state: 'failed'`、`failure.kind: 'model-unavailable'`；任务有 `model-unavailable` 决定，架构师窗口有一行说明，Telegram 收到问题；没有自动启动接手者 |
 | E15 流程出错 | `mkdir $E/proj3`，其中 `git init`，提交 `a.txt`，再写一个未提交的 `b.txt`；`chmod -R a-w $E/proj3/.git/objects`（基线快照写不进对象库）；`start e15 $E/proj3 claude-magpie`；发送 `检查 a.txt`，在确认对话中选推荐项；结束后 `chmod -R u+w $E/proj3/.git/objects` | 窗格显示 `magpie-tasks 出错（任务 <id>）：…` 的提示与 `Prompt dropped by a hook: magpie-tasks 出错：…`，消息没有交给模型；Telegram 收到含任务 ID 与错误首行的通知；任务记录 `state: 'error'`，`error` 含基线快照失败的原因；`claude agents --json` 中没有新的后台会话；前台窗格仍在运行 |
+| E16 其他代理的状态 | E8 的仓库；`start e16 $E env MAGPIE_TASKS_ROLE=router claude-magpie --model 'claude/claude-opus-5-5[1m]' --plugin-dir ~/sipeng/claude-mods/mods/tg-router`；在窗格输入：(a) 一条让工作者在前台依次运行三次 `python3 -c 'import time; time.sleep(100)'` 的请求，它运行期间再输入 `统计 $E/repo/greet.py 有几行。另外我马上要重启这个 Router 会话，告诉我重启会不会打断别的正在运行的后台任务`；(b) 两个任务都 `done` 之后输入 `统计 $E/repo/greet.py 有几个字符。另外我马上要重启这个 Router 会话，告诉我此刻还有没有别的后台任务在运行` | (a) 第二个任务的工作者调用 `session_agents`，回答把第一个工作者列为 `RUNNING`，第一行的运行个数不为 0。(a) 途中验收不通过时，插件给执行者的消息送达，调试日志没有“没有收到消息”。(b) 工作者再次调用 `session_agents`，回答第一行为 `0 of <n> running`，第一个工作者列为 `not running`。(c) 再输入 `我马上要重启这个 Router 会话，现在重启会不会打断正在运行的后台任务？`：Router 自己调用 `session_agents` 并得到列表 |
 
 E9 与 E11 需要暂停用户常驻的 `claude-telegram` 并由用户在手机上发消息，开始前另外征得用户同意。全部场景通过后，正式安装 `claude plugin install magpie-tasks@sipeng-mods --scope user`（在 jev 与 subagent-opus 之后），替换 `/home/ubuntu/.local/bin/claude-telegram`，由用户重新启动常驻 Router。
 

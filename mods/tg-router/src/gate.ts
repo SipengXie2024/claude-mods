@@ -14,10 +14,12 @@ export const TERMINAL_CHAT = 'tui'
 export const FORWARD_LONG = 'mcp__magpie-tasks__forward_long'
 export const RECOMMEND_ARCHITECT = 'mcp__magpie-tasks__recommend_architect'
 export const PROMOTE_TASK = 'mcp__magpie-tasks__promote_task'
+/** magpie-tasks' list of the session's agents and whether each runs now; the Router and workers both call it */
+export const SESSION_AGENTS = 'mcp__magpie-tasks__session_agents'
 /** tools only the Router itself may call */
 const ROUTER_ONLY = new Set([DISPATCH, FORWARD, FORWARD_LONG, RECOMMEND_ARCHITECT, PROMOTE_TASK])
 
-const ROUTER_TOOLS = new Set([...ROUTER_ONLY, 'TaskStop', 'ToolSearch', 'SendMessage'])
+const ROUTER_TOOLS = new Set([...ROUTER_ONLY, SESSION_AGENTS, 'TaskStop', 'ToolSearch', 'SendMessage'])
 const PANE_CMD = /^(herdr|tmux)$/
 /** tmux commands that run a shell command or script in the tmux server itself, and their aliases */
 const TMUX_SHELL = /^(run(-shell)?|if(-shell)?|pipe-pane|pipep|source(-file)?)$/
@@ -42,6 +44,15 @@ export function isPaneCommand(command: string): boolean {
     if (head[0] === 'tmux' && head.some((w) => TMUX_SHELL.test(w))) return false
     return stages.slice(1).every((s) => PIPE_FILTER.test(words(s)[0] ?? '') && !(words(s)[0] === 'sort' && SORT_OUTPUT.test(s)))
   })
+}
+
+/**
+ * Whether a SendMessage is the Router model's own. magpie-tasks wakes a worker itself (a failed
+ * acceptance, a diagnosis) with `$.session.send`, which reaches the hook as a SendMessage of the main
+ * conversation with that plugin as the call's origin.
+ */
+export function routerSends(e: { tool: string; agentId?: string }, originPlugin: string | undefined): boolean {
+  return !e.agentId && e.tool === 'SendMessage' && originPlugin !== 'magpie-tasks'
 }
 
 export type GateInput = { tool: string; agentId?: string; command?: unknown; file_path?: unknown }

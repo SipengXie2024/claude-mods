@@ -2,6 +2,7 @@
 // session.start and hands each event to the flow module of that role. Errors are handled by kind:
 // flow hooks report and stop the flow, gate hooks refuse, effort hooks let the request go on.
 import type { EngineInterface, PluginOptions, Register, RenderElement, TurnCompleteInput } from 'claude-code'
+import { onSessionAgents } from '../src/agents'
 import { architectTool, onArchitectComplete, onArchitectPrompt, onArchitectToolCall, onSubagentComplete, onSubagentToolCall } from '../src/architect'
 import { agentBand, bandText, clearBands, isEffort, noteBandDone, noteBandStep } from '../src/band'
 import { onDailyComplete, onOpenProject } from '../src/daily'
@@ -339,6 +340,7 @@ export const register: Register = (on, options) => {
       const c = ctxOf($, st, loaded)
       const args = e as unknown as Record<string, unknown>
       try {
+        if (owned.kind === 'session') return { result: await onSessionAgents(c, e.agentId) }
         // Architect and router tools belong to the session's main agent; a subagent reports its result in its answer.
         if (owned.kind !== 'subagent' && e.agentId !== undefined) return { deny: `${e.tool} is for the ${owned.kind} itself; report your result in your answer.` }
         if (owned.kind === 'architect' && st.role === 'architect') return { result: await architectTool(c, owned.name as ArchitectToolName, args) }

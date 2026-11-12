@@ -118,6 +118,9 @@ function taskRules(m: MarkerInfo, a: Placing): string[] {
   const out = [`${TASK_RULES_LINE} Task rules from magpie-tasks (task ${m.taskId}):`]
   const noRecords = '- Do not edit `CONTEXT.md` or `.planning/findings.md`; put findings, decisions and their evidence into your report.'
   const noGit = '- Do not commit, push, create branches, stash or reset; you only check.'
+  // The engine's reminder about SendMessage names the session's agents once, when this one starts, and
+  // names the ones that answered long ago too; an answer written later took it for what runs.
+  const otherAgents = '- Before an answer says that another task, worker or check of this session is running, has finished, or would be cut off (by a restart, for one), call `mcp__magpie-tasks__session_agents` and write what it answers at that moment. The agents a system reminder named when you started are the ones a message can reach, finished ones included, and anything you saw of other tasks earlier in your work is old by the time you answer. Without that call, leave such a statement out.'
   const tellLater = 'The person is told nothing of the acceptance check; a `[magpie-tasks note]` line after the next message you receive says what became of your result.'
   const inWorktree = 'Changes you make in the worktree reach the main directory only when the plugin applies them after your turn ends, after an acceptance check when the result warrants one. ' + tellLater + ' So changes made in this turn cannot be committed yet: say so in your report, and commit and push them when the person asks again.'
   const gitWhenAsked = a.direct !== null
@@ -144,7 +147,7 @@ function taskRules(m: MarkerInfo, a: Placing): string[] {
   } else if (a.daily) {
     out.push('- If the task changes a project, first call `mcp__magpie-tasks__open_project` with `project` set to the project\'s absolute path, then change files only in the directory it returns (`cd` there before Bash commands): the project directory itself while no other task changes that project in place, or a Git worktree of it when one does. A task that changes no project needs no call.')
   }
-  out.push(gitWhenAsked, noRecords, ...STATUS_RULES)
+  out.push(gitWhenAsked, noRecords, otherAgents, ...STATUS_RULES)
   return out
 }
 

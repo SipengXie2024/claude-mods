@@ -642,6 +642,8 @@ describe('the Router does no work', () => {
       { tool: 'Bash', command: 'tmux list-panes && tmux capture-pane -p -t 2' },
       { tool: 'mcp__tg-channel__reply', chat_id: '1', text: 'hi' },
       { tool: 'Read', file_path: `${STATE}/inbox/photo.jpg` },
+      // magpie-tasks' list of the session's agents: the Router asks it before it says what runs
+      { tool: 'mcp__magpie-tasks__session_agents' },
     ]) {
       const r = await $.tool.call(call as never)
       expect(r.deny).toBe(undefined)

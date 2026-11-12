@@ -1,6 +1,6 @@
 import type { EngineInterface, Next, PromptSubmitInput, Register, Timer } from 'claude-code'
 import { describeTool, parseChannelTag, renderFinal, renderLive, type EndReason, type Turn } from '../src/card'
-import { CHANNEL_SERVER, DISPATCH, FORWARD, FORWARD_LONG, routerDeny, TERMINAL_CHAT } from '../src/gate'
+import { CHANNEL_SERVER, DISPATCH, FORWARD, FORWARD_LONG, routerDeny, routerSends, TERMINAL_CHAT } from '../src/gate'
 import { channelBody, DECISION_HANDLED, indexPath, MAGPIE_GATEWAY, messageKind, ownerOf, RATING_TEXT, readIndex, terminalHintLine, workerHintLine, workerOfAgent, type MagpieIndex } from '../src/magpie'
 import { answerNotPosted, followUp, handedBack, lostWorker, restoredNotice, routerContext, takeOver, terminalAnswer, terminalContext, workerBrief } from '../src/prompts'
 import * as tasks from '../src/tasks'
@@ -547,7 +547,7 @@ export const register: Register = (on) => {
     if (e.tool === 'Agent' && next.origin.plugin === 'magpie-tasks') return next(e)
     const deny = routerDeny(e as never, inbox ?? (await inboxDir($)))
     if (deny) return { deny }
-    if (!e.agentId && e.tool === 'SendMessage') {
+    if (routerSends(e, next.origin.plugin)) {
       const named = await workerNamed($, (e as { to?: unknown }).to)
       if (named) return { deny: `给 worker ${named.name}（${named.title}）的后续消息用 ${FORWARD} 转交：chat_id 和 message_id 用这条消息的，worker 填 ${named.name}。forward 会交给任务当前的执行者；消息回答任务的待决定问题时，由插件直接处理。` }
     }

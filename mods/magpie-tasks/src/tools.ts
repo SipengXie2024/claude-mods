@@ -1,19 +1,22 @@
 // The tools magpie-tasks registers, by session role (plan sections 9.5, 9.11, 9.12). Their calls are
 // served by register.ts's tool.call hook: architect tools by architect.ts, Router tools by router.ts,
-// open_project by daily.ts. Descriptions are for the model and in English.
+// open_project by daily.ts, session_agents by agents.ts. Descriptions are for the model and in English.
 import type { Ctx } from './state'
 import type { Role } from './types'
 
 export type ArchitectToolName = 'model_route' | 'task_status' | 'report_outcome' | 'integrate' | 'notify_user' | 'resolve_conflict'
 export type RouterToolName = 'forward_long' | 'recommend_architect' | 'promote_task'
 export type SubagentToolName = 'open_project'
-type ToolName = ArchitectToolName | RouterToolName | SubagentToolName
+// For the session's main conversation and its subagents alike.
+export type SessionToolName = 'session_agents'
+type ToolName = ArchitectToolName | RouterToolName | SubagentToolName | SessionToolName
 
 const PREFIX = 'mcp__magpie-tasks__'
 
 const ARCHITECT_TOOLS: readonly ArchitectToolName[] = ['model_route', 'task_status', 'report_outcome', 'integrate', 'notify_user', 'resolve_conflict']
 const ROUTER_TOOLS: readonly RouterToolName[] = ['forward_long', 'recommend_architect', 'promote_task']
 const SUBAGENT_TOOLS: readonly SubagentToolName[] = ['open_project']
+const SESSION_TOOLS: readonly SessionToolName[] = ['session_agents']
 
 const string = (description: string) => ({ type: 'string', description })
 
@@ -115,13 +118,17 @@ export const TOOL_SPECS: Record<ToolName, { description: string; inputSchema: Re
       additionalProperties: false,
     },
   },
+  session_agents: {
+    description: 'List the agents of this session other than the caller with where each stands at this moment: running a turn, waiting on background work it started, or not running after its last answer, and for a routed agent its task and how its last answer ended. Call it right before an answer says that a task, worker or check is running, has finished, or would be cut off (by a restart of the session, for one). The agents a system reminder names are the ones a message can reach, finished ones included; that reminder does not say which of them run, and a worker\'s answer speaks of the moment it was written.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
 }
 
-// architect: the architect tools and open_project; router: the Router tools and open_project.
+// architect: the architect tools; router: the Router tools; both: the subagent and session tools.
 // Other roles register nothing.
 export async function registerTools(ctx: Ctx, role: Role): Promise<void> {
-  const names: readonly ToolName[] = role === 'architect' ? [...ARCHITECT_TOOLS, ...SUBAGENT_TOOLS]
-    : role === 'router' ? [...ROUTER_TOOLS, ...SUBAGENT_TOOLS]
+  const names: readonly ToolName[] = role === 'architect' ? [...ARCHITECT_TOOLS, ...SUBAGENT_TOOLS, ...SESSION_TOOLS]
+    : role === 'router' ? [...ROUTER_TOOLS, ...SUBAGENT_TOOLS, ...SESSION_TOOLS]
     : []
   for (const name of names) {
     const spec = TOOL_SPECS[name]
@@ -130,13 +137,14 @@ export async function registerTools(ctx: Ctx, role: Role): Promise<void> {
 }
 
 // The tool a full name (mcp__magpie-tasks__<name>) calls, and whose handler serves it.
-export function toolOwner(fullName: string): { name: ToolName; kind: 'architect' | 'router' | 'subagent' } | null {
+export function toolOwner(fullName: string): { name: ToolName; kind: 'architect' | 'router' | 'subagent' | 'session' } | null {
   if (!fullName.startsWith(PREFIX)) return null
   const name = fullName.slice(PREFIX.length)
   if ((ARCHITECT_TOOLS as readonly string[]).includes(name)) return { name: name as ArchitectToolName, kind: 'architect' }
   if ((ROUTER_TOOLS as readonly string[]).includes(name)) return { name: name as RouterToolName, kind: 'router' }
   if ((SUBAGENT_TOOLS as readonly string[]).includes(name)) return { name: name as SubagentToolName, kind: 'subagent' }
+  if ((SESSION_TOOLS as readonly string[]).includes(name)) return { name: name as SessionToolName, kind: 'session' }
   return null
 }
 
-export const TOOL_NAMES: readonly string[] = [...ARCHITECT_TOOLS, ...ROUTER_TOOLS, ...SUBAGENT_TOOLS].map(n => `${PREFIX}${n}`)
+export const TOOL_NAMES: readonly string[] = [...ARCHITECT_TOOLS, ...ROUTER_TOOLS, ...SUBAGENT_TOOLS, ...SESSION_TOOLS].map(n => `${PREFIX}${n}`)
