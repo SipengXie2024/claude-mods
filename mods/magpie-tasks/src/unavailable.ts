@@ -24,9 +24,12 @@ export function isUnavailableError(kind: string | undefined): boolean {
 
 // Magpie answers a model it cannot serve with HTTP 400 `invalid_request_error`, which Claude Code
 // files as `unknown` (E14, 2026-11-09: "API Error: 400 Codex: The 'gpt-6-magpie-missing' model is
-// not supported when using Codex with a ChatGPT account."). A 400 whose text says the model is not
-// served counts as `model_not_found`; every other category is kept as the engine gave it.
-const MODEL_REFUSED = /\b400\b[\s\S]*\bmodel\b[\s\S]*\b(not supported|not found|does not exist|is not available|unknown model)\b/i
+// not supported when using Codex with a ChatGPT account."). Antigravity refuses Claude Code's
+// requests with a 429 "Resource has been exhausted" whatever quota is left, which Magpie passes on as
+// a 400 (2026-11-12, Opus 5.5 and Argon through Antigravity). A 400 whose text says the model is not
+// served, or that the provider's resource is exhausted, counts as `model_not_found`; every other
+// category is kept as the engine gave it.
+const MODEL_REFUSED = /\b400\b[\s\S]*(\bmodel\b[\s\S]*\b(not supported|not found|does not exist|is not available|unknown model)\b|\bResource has been exhausted\b)/i
 
 export function stopFailureCategory(error: string, text: string | undefined): string {
   return (error === 'unknown' || error === 'invalid_request') && text !== undefined && MODEL_REFUSED.test(text) ? 'model_not_found' : error

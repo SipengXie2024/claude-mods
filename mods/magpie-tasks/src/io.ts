@@ -14,7 +14,7 @@ export interface Io {
   // $.clock.sleep: counts against the hook's 10 s budget. Use it only to race another `$` call that is
   // in flight (the budget is already paused by that call); repeated waits go through `wait`.
   sleep(ms: number): Promise<void>
-  fetch(url: string, init: { method: string; headers: Record<string, string>; body: string }): Promise<{ status: number; ok: boolean; text: string }>
+  fetch(url: string, init: { method: string; headers?: Record<string, string>; body?: string }): Promise<{ status: number; ok: boolean; text: string }>
   env(name: string): Promise<string | undefined>
   log(line: string): Promise<void>                     // $.ui.log(..., { to: 'debug' }), prefixed 'magpie-tasks: '
 }

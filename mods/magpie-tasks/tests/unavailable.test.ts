@@ -16,6 +16,16 @@ test('a 400 saying the model is not served counts as model_not_found, so the mod
   expect(isUnavailableError(stopFailureCategory('unknown', LAST_MESSAGE))).toBe(true)
 })
 
+// Magpie's 400 for Antigravity's answer to a Claude Code request (claude-magpie -p --model
+// antigravity/gemini-4-argon, 2026-11-12 03:10Z; the same for antigravity/claude-opus-5-5).
+const ANTIGRAVITY_REFUSAL = "API Error: 400 Antigravity: Resource has been exhausted (e.g. check quota). — Antigravity answers this 429 to the system prompt of Claude Code and the Claude Agent SDK (Claude Desktop's chats) whatever quota is left, so it is not a quota and waiting won't help; use another provider for these chats, or put one after Antigravity in a routing group"
+
+test('Antigravity refusing Claude Code counts as model_not_found, so a substitute takes over', () => {
+  expect(stopFailureCategory('unknown', ANTIGRAVITY_REFUSAL)).toBe('model_not_found')
+  expect(stopFailureCategory('invalid_request', ANTIGRAVITY_REFUSAL)).toBe('model_not_found')
+  expect(isUnavailableError(stopFailureCategory('unknown', ANTIGRAVITY_REFUSAL))).toBe(true)
+})
+
 test('other errors keep the engine category', () => {
   expect(stopFailureCategory('unknown', undefined)).toBe('unknown')
   expect(stopFailureCategory('unknown', 'API Error: 400 messages.3: tool_use ids must be unique')).toBe('unknown')

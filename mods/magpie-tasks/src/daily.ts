@@ -10,6 +10,7 @@ import { integrate, settleDirect, touchedFiles } from './integrate'
 import { newId } from './io'
 import { checkInput, choose, judgeBlocker, judgeCheck, judgeDeep } from './judge'
 import { agentLabel, canonical, displayName, isAvailable, requestId, roleName } from './model'
+import { acceptancePick, readQuotas } from './quota'
 import { raise, ruleById, startEffort, substituteAllowed } from './rules'
 import { judgeCtx, markerFor, markRecorded, registerStarted } from './spawn'
 import type { Ctx, PromptResult } from './state'
@@ -198,8 +199,8 @@ export async function spawnAgent(ctx: Ctx, task: TaskRecord, a: {
   })
 }
 
-// The `review` rule's agent (acceptance or diagnosis): Opus 5.5 at the rule's effort, one level up
-// when Jev judges the brief to need deep reasoning.
+// The `review` rule's agent (acceptance or diagnosis) at the rule's effort, one level up when Jev
+// judges the brief to need deep reasoning.
 async function reviewEfforts(ctx: Ctx, brief: string): Promise<Omit<EffortChange, 'at'>[]> {
   const rule = ruleById(ctx.rules, 'review')
   const d = await judgeDeep(judgeCtx(ctx), [{ role: 'user', content: briefForJev(brief) }])
@@ -443,15 +444,18 @@ export async function rerunCheck(ctx: Ctx, task: TaskRecord, role: 'acceptance' 
   })
 }
 
+// The acceptance runs under the `review` rule on the model of the subscription with the most of its
+// week left (routing rules, `acceptance`), read from Magpie each time a check starts.
 async function startAcceptance(ctx: Ctx, task: TaskRecord, executor: AgentRecord, change: Change | null): Promise<void> {
   const brief = acceptanceBrief(task, executor, change === null ? null : { patchPath: change.patchPath, diffStat: change.diffStat })
   const rule = ruleById(ctx.rules, 'review')
+  const pick = acceptancePick(ctx.rules, await readQuotas(ctx.io, ctx.opts.gatewayUrl))
   await spawnAgent(ctx, task, {
     role: 'acceptance',
     ruleId: rule.id,
-    model: rule.model!,
+    model: pick.model,
     efforts: await reviewEfforts(ctx, brief),
-    selection: { kind: 'rule', reason: `acceptance of ${executor.agentId}'s result (rule review)` },
+    selection: { kind: 'rule', reason: `acceptance of ${executor.agentId}'s result (rule review); ${pick.reason}` },
     brief,
     name: nextName(task, workerOf(task), 'acc'),
     description: `验收：${task.title}`,

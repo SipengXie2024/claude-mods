@@ -65,7 +65,7 @@ const info: MarkerInfo = { taskId: 'd-20261109-k3x9q2', role: 'executor', ruleId
 
 test('the marker round-trips, matches the JEV skip pattern, and briefForJev strips it', () => {
   const m = marker(info)
-  expect(m).toBe('[magpie-tasks task=d-20261109-k3x9q2 role=executor rule=code-change rules=routing-rules.v6 model=claude/claude-opus-5-5 effort=xhigh]')
+  expect(m).toBe('[magpie-tasks task=d-20261109-k3x9q2 role=executor rule=code-change rules=routing-rules.v7 model=claude/claude-opus-5-5 effort=xhigh]')
   expect(parseMarker(m)).toEqual(info)
   expect(parseMarker(marker({ ...info, ruleId: null }))!.ruleId).toBe(null)
   // JEV's MAGPIE_TASKS_MARKER (plan section 10.2)

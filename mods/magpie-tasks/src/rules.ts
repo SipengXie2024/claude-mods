@@ -19,7 +19,13 @@ export interface RatingCell { rule: string; when: 'base-model' | 'deep' }
 // and its two most likely options are rules whose models differ. The model is drawn uniformly from
 // `candidates`, each at its own effort, so the person's ratings can compare them on such work.
 export interface Ambiguous { condition: string; candidates: { model: string; effort: Effort }[]; evidence: string }
-export interface Rules { version: string; thresholds: { ruleConfidence: number; deepYes: number; hardYes: number; architectConfidence: number }; models: Record<string, { name: string }>; rules: Rule[]; architect: { default: string; candidates: ArchitectCandidate[] }; reviewSecond: { effort: Effort; whenOriginalIncludes: Record<string, string>; otherwise: string; order: string[] }; substitutes: Substitute[]; ambiguous: Ambiguous; ratingPriority: { note: string; cells: RatingCell[] } }
+// The model of a daily task's acceptance check (src/quota.ts): the subscription with the largest share
+// of its weekly window left, then that subscription's model for the `review` rule. `provider` is the
+// model ID's prefix, which is also the `provider` of Magpie's quota entry; `week` names the weekly
+// window that is compared, `limits` the other windows of the subscription that stop this model when
+// used up. Listed in order of preference, which decides a tie.
+export interface AcceptanceSubscription { provider: string; model: string; week: string; limits: string[] }
+export interface Rules { version: string; thresholds: { ruleConfidence: number; deepYes: number; hardYes: number; architectConfidence: number }; models: Record<string, { name: string }>; rules: Rule[]; architect: { default: string; candidates: ArchitectCandidate[] }; reviewSecond: { effort: Effort; whenOriginalIncludes: Record<string, string>; otherwise: string; order: string[] }; acceptance: { subscriptions: AcceptanceSubscription[]; evidence: string }; substitutes: Substitute[]; ambiguous: Ambiguous; ratingPriority: { note: string; cells: RatingCell[] } }
 
 // The 19 rules of model-routing-table.md section 2; the file must hold each exactly once.
 export const RULE_IDS: readonly string[] = [
@@ -152,6 +158,23 @@ export function parseRules(json: unknown, jev: { deepYes: number }): Rules {
     order: arr(rs['order'], 'reviewSecond.order').map((m, i) => model(m, `reviewSecond.order[${i}]`)),
   }
 
+  const ac = obj(root['acceptance'], 'acceptance')
+  const subscriptions: AcceptanceSubscription[] = arr(ac['subscriptions'], 'acceptance.subscriptions').map((raw, i) => {
+    const s = obj(raw, `acceptance.subscriptions[${i}]`)
+    const at = `acceptance.subscriptions[${i}]`
+    const m = model(s['model'], `${at}.model`)
+    const slash = m.indexOf('/')
+    if (slash <= 0) fail(`${at}.model`, `"${m}" has no provider prefix`)
+    const week = str(s['week'], `${at}.week`)
+    const limits = arr(s['limits'], `${at}.limits`).map((w, j) => str(w, `${at}.limits[${j}]`))
+    if (limits.includes(week)) fail(`${at}.limits`, `"${week}" is the weekly window itself`)
+    return { provider: m.slice(0, slash), model: m, week, limits }
+  })
+  if (subscriptions.length === 0) fail('acceptance.subscriptions', 'empty')
+  const providers = subscriptions.map(s => s.provider)
+  if (new Set(providers).size !== providers.length) fail('acceptance.subscriptions', 'one model per subscription: a provider appears twice')
+  const acceptance = { subscriptions, evidence: str(ac['evidence'], 'acceptance.evidence') }
+
   const substitutes: Substitute[] = arr(root['substitutes'], 'substitutes').map((raw, i) => {
     const s = obj(raw, `substitutes[${i}]`)
     const id = str(s['id'], `substitutes[${i}].id`)
@@ -206,7 +229,7 @@ export function parseRules(json: unknown, jev: { deepYes: number }): Rules {
   })
   const ratingPriority = { note: str(rp['note'], 'ratingPriority.note'), cells }
 
-  return { version, thresholds, models, rules, architect, reviewSecond, substitutes, ambiguous, ratingPriority }
+  return { version, thresholds, models, rules, architect, reviewSecond, acceptance, substitutes, ambiguous, ratingPriority }
 }
 
 export async function loadRules(io: Io, pluginRoot: string): Promise<Rules> {

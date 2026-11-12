@@ -55,7 +55,7 @@ function tableModelIds(): Record<string, string> {
 test('the file holds the 19 rules, each once', () => {
   expect(rules.rules.map(r => r.id).sort()).toEqual([...RULE_IDS].sort())
   expect(rules.rules).toHaveLength(19)
-  expect(rules.version).toBe('routing-rules.v6')
+  expect(rules.version).toBe('routing-rules.v7')
 })
 
 test('condition, acceptance and evidence are the routing table columns word for word, in the same section', () => {
@@ -129,7 +129,23 @@ test('parseRules refuses a missing, duplicated or unknown rule, a bad effort and
   expect(variant(j => { drawn(j).splice(1) })).toThrow('needs at least two models to draw from')
   expect(variant(j => { drawn(j)[2]!['model'] = drawn(j)[0]!['model'] })).toThrow('ambiguous.candidates: duplicate model')
   expect(variant(j => { delete j['ambiguous'] })).toThrow('ambiguous')
+  const subs = (j: Record<string, unknown>) => (j['acceptance'] as { subscriptions: Record<string, unknown>[] }).subscriptions
+  expect(variant(j => { subs(j)[1]!['model'] = 'claude/claude-sonnet-5-5' })).toThrow('one model per subscription')
+  expect(variant(j => { subs(j)[0]!['model'] = 'claude/claude-opus-5-5[1m]' })).toThrow('acceptance.subscriptions[0].model')
+  expect(variant(j => { subs(j)[0]!['limits'] = ['7 days'] })).toThrow('acceptance.subscriptions[0].limits')
+  expect(variant(j => { subs(j).splice(0) })).toThrow('acceptance.subscriptions: empty')
+  expect(variant(j => { delete j['acceptance'] })).toThrow('acceptance')
   expect(() => parseRules('not an object', { deepYes: 0.85 })).toThrow('routing rules: file')
+})
+
+test('acceptance: Opus 5.5 on the Claude subscription, Sol 6.1 on Codex, both in Magpie\'s model list', () => {
+  expect(rules.acceptance.subscriptions).toEqual([
+    { provider: 'claude', model: OPUS, week: '7 days', limits: ['5 hours'] },
+    { provider: 'codex', model: SOL, week: '7 days', limits: ['5 hours'] },
+  ])
+  for (const s of rules.acceptance.subscriptions) expect([s.model, available(s.model)]).toEqual([s.model, true])
+  // Each is a model the review rule allows: its own model, or review-alt's Sol 6.1 at medium.
+  for (const s of rules.acceptance.subscriptions) expect(substituteAllowed(rules, 'review', s.model, 'medium', same)).not.toBeNull()
 })
 
 test('jevChoices: the 15 Jev-option rules in file order, then none', () => {

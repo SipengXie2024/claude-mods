@@ -2,8 +2,8 @@
 // claude plugin test loads code files only, so the JSON files are carried here verbatim.
 
 export const routingRules: unknown = {
-  "version": "routing-rules.v6",
-  "date": "2026-11-11",
+  "version": "routing-rules.v7",
+  "date": "2026-11-12",
   "source": ".planning/model-routing-table.md",
   "thresholds": {
     "ruleConfidence": 0.5,
@@ -428,6 +428,25 @@ export const routingRules: unknown = {
       "codex/gpt-6.1-sol",
       "antigravity/gemini-4-argon"
     ]
+  },
+  "acceptance": {
+    "subscriptions": [
+      {
+        "model": "claude/claude-opus-5-5",
+        "week": "7 days",
+        "limits": [
+          "5 hours"
+        ]
+      },
+      {
+        "model": "codex/gpt-6.1-sol",
+        "week": "7 days",
+        "limits": [
+          "5 hours"
+        ]
+      }
+    ],
+    "evidence": "用户决定（2026-11-12）：日常任务的验收改用每周额度剩余比例最高的订阅，减少 Anthropic 订阅的消耗；每个订阅用其中最适合 `review` 规则的模型：Claude 订阅 Opus 5.5（CodePanel 召回率 90%），Codex 订阅 Sol 6.1（89%，[E4]）。Antigravity 不在其中：2026-11-12 实测它对 Claude Code 的请求一律回答 Resource has been exhausted（Opus 5.5 与 Argon 都是，Magpie 说明这与剩余额度无关），验收子代理无法在上面运行"
   },
   "substitutes": [
     {
