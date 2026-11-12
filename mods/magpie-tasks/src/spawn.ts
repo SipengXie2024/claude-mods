@@ -12,7 +12,6 @@ import { borderPair, isHardWork, raise, raiseOnRule, reviewSecondTarget, ruleByI
 import type { Ctx } from './state'
 import { EFFORTS, type AgentRecord, type AgentRole, type Effort, type EffortChange, type JevJudgment, type RaiseReason, type SelectionKind, type SessionState, type TaskRecord } from './types'
 import { noteExecutorTurn, tell } from './daily'
-import { parseChannelTag } from './telegram'
 import { workspaceOf } from './workspace'
 
 export type SpawnDecision =
@@ -280,13 +279,14 @@ export function decideSpawn(a: { e: AgentSpawnInput; origin: string; task: Route
 
 // The record of a daily task a tg-router request starts (plan section 9.6 step 4), before its first
 // agent exists.
-export function dailyTaskDraft(a: { prompt: string; id: string; now: number }): RoutedTask & { header: { chatId: string; messageId: number; worker: string } } {
+export function dailyTaskDraft(a: { prompt: string; description: string; id: string; now: number }): RoutedTask & { header: { chatId: string; messageId: number; worker: string } } {
   const header = parseRequestHeader(a.prompt)
   if (header === null) throw new Error('dailyTaskDraft: the brief has no tg-router request header')
   const request = requestText(a.prompt)
-  // A Telegram request is the channel block; its title is the person's words without the tag.
-  const words = parseChannelTag(request)?.body ?? request
-  const title = Array.from(words.replace(/\s+/g, ' ').trim()).slice(0, 30).join('')
+  // tg-router starts the worker with its own short title as the Agent description; it names the
+  // whole request, where a cut of the person's words can stop mid-phrase.
+  const title = a.description.trim()
+  if (title === '') throw new Error('dailyTaskDraft: the worker was started without a title')
   return {
     schema: 1,
     id: a.id,
@@ -324,7 +324,7 @@ export async function onAgentSpawn(ctx: Ctx, e: AgentSpawnInput, next: Next<'age
     if (task === null) throw new Error(`task ${st.taskId} of this architect session is missing`)
   } else if (st.role === 'router') {
     if (e.parentAgentId === undefined && parseRequestHeader(e.prompt) !== null) {
-      draft = dailyTaskDraft({ prompt: e.prompt, id: newId('d', await ctx.io.now()), now: await ctx.io.now() })
+      draft = dailyTaskDraft({ prompt: e.prompt, description: e.description, id: newId('d', await ctx.io.now()), now: await ctx.io.now() })
       task = draft
     } else if (e.parentAgentId !== undefined && st.agents.has(e.parentAgentId)) {
       const id = st.agents.get(e.parentAgentId)!

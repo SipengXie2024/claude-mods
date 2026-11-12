@@ -143,7 +143,7 @@ function spawn(prompt: string, more: Partial<AgentSpawnInput> = {}): AgentSpawnI
 }
 
 const daily = (): RoutedTask => {
-  const { header: _h, ...t } = dailyTaskDraft({ prompt: `${HEADER}\n${WORKER_BRIEFS.telegram}`, id: 'd-20261109-k3x9q2', now: NOW })
+  const { header: _h, ...t } = dailyTaskDraft({ prompt: `${HEADER}\n${WORKER_BRIEFS.telegram}`, description: '实现调度逻辑', id: 'd-20261109-k3x9q2', now: NOW })
   return t
 }
 const WT = '/home/ubuntu/.local/share/magpie-tasks/worktrees/l-20261109-p7m2c4'
@@ -287,9 +287,9 @@ test('no matching rule: the architect gets the reason, a daily request runs on t
   expect(arch.action).toBe('deny')
   expect(arch.action === 'deny' && arch.reason.includes(`choice none, confidence ${j.confidence.toFixed(2)}`)).toBe(true)
   const tg = `${NO_RULE_HEADER}\n${briefDeeperQuestion}`
-  const { header: _h, ...task } = dailyTaskDraft({ prompt: tg, id: 'd-20261108-r8t1w0', now: NOW })
+  const { header: _h, ...task } = dailyTaskDraft({ prompt: tg, description: '一直没问出口的深层问题', id: 'd-20261108-r8t1w0', now: NOW })
   expect(task.telegram).toEqual({ chatId: '7051661301', rootMessageId: 1181, workerName: 'tg-7051661301-1181' })
-  expect(task.title).toBe(Array.from(NO_RULE).slice(0, 30).join(''))
+  expect(task.title).toBe('一直没问出口的深层问题')
   const d = routed(decide(spawn(tg, { name: 'tg-7051661301-1181' }), task, j))
   expect(d.action).toBe('route')
   expect(d.agent).toMatchObject({ role: 'executor', name: 'tg-7051661301-1181', ruleId: 'daily-default', model: 'claude/claude-opus-5-5' })
@@ -327,11 +327,12 @@ test('work on the border of two rules whose models differ: a model drawn from ru
   expect(nextEffort({ rule: null, current: 'high', deep: null, raises: ['acceptance-failed'] }).effort).toBe('xhigh')
 })
 
-test('a Telegram request is the channel block; the daily task title is the person\'s words', () => {
+test('a Telegram request is the channel block; the daily task title is the one tg-router gave it', () => {
   const brief = WORKER_BRIEFS.telegram.replace(/The original message:\n[\s\S]*$/, `The original message:\n${channelPlain953}`)
-  const { header: _h, ...task } = dailyTaskDraft({ prompt: `${HEADER}\n${brief}`, id: 'd-20261110-vghxca', now: NOW })
+  const { header: _h, ...task } = dailyTaskDraft({ prompt: `${HEADER}\n${brief}`, description: ' 实现调度逻辑 ', id: 'd-20261110-vghxca', now: NOW })
   expect(task.request).toBe(channelPlain953)
-  expect(task.title).toBe('看看我们这个设备上有什么没做的？')
+  expect(task.title).toBe('实现调度逻辑')
+  expect(() => dailyTaskDraft({ prompt: `${HEADER}\n${brief}`, description: ' ', id: 'd-20261110-vghxca', now: NOW })).toThrow('started without a title')
 })
 
 test('a daily task whose person-chosen model has no rule effort: the assessment recommends the effort for that model', () => {
@@ -339,7 +340,7 @@ test('a daily task whose person-chosen model has no rule effort: the assessment 
   // tg-router's dispatch under claude-magpie: request header, the person's reason line, then the worker brief.
   const words = '这个用 Sol 6.1 做'
   const prompt = `${NO_RULE_HEADER}\n[model-reason user: ${words}]\n${briefDeeperQuestion}`
-  const { header: _h, ...task } = dailyTaskDraft({ prompt, id: 'd-20261108-r8t1w0', now: NOW })
+  const { header: _h, ...task } = dailyTaskDraft({ prompt, description: '一直没问出口的深层问题', id: 'd-20261108-r8t1w0', now: NOW })
   const d = routed(decide(spawn(prompt, { name: 'tg-7051661301-1181', model: 'codex/gpt-6.1-sol' }), task, j))
   expect(d.action).toBe('assess')
   expect(d.agent).toMatchObject({ role: 'assessment', ruleId: 'route-assessment' })
@@ -438,7 +439,7 @@ test('a model whose ID names its level runs at that level: its start, a resume a
   const asked = routed(decide(spawn(`${NO_RULE}\n[model-reason user: 用 Carbon high]\n[effort xhigh]`, { model: 'hakimi/gemini-4-carbon-high' }), long(), noRule))
   expect(asked.agent).toMatchObject({ effort: 'high', efforts: [{ from: null, to: 'high', reason: 'explicit', note: `xhigh asked; ${at('high')}` }] })
   const tg = `${NO_RULE_HEADER}\n${briefDeeperQuestion}\n[model-reason user: 用 Carbon high]`
-  const { header: _h, ...task } = dailyTaskDraft({ prompt: tg, id: 'd-20261112-c4rb0n', now: NOW })
+  const { header: _h, ...task } = dailyTaskDraft({ prompt: tg, description: '一直没问出口的深层问题', id: 'd-20261112-c4rb0n', now: NOW })
   const executor = routed(decide(spawn(tg, { name: 'tg-7051661301-1181', model: 'hakimi/gemini-4-carbon-high' }), task, noRule))
   expect([executor.action, executor.agent.model, executor.agent.effort]).toEqual(['route', 'hakimi/gemini-4-carbon-high', 'high'])
 
@@ -530,7 +531,7 @@ test('unavailableAction: the person\'s model is theirs to replace; code-change\'
 })
 
 test('the acceptance brief teaches the lines parseVerdict reads, and names the patch when there is a change', () => {
-  const task = dailyTaskDraft({ prompt: `${HEADER}\n${WORKER_BRIEFS.telegram}`, id: 'd-20261109-k3x9q2', now: 1762650000000 })
+  const task = dailyTaskDraft({ prompt: `${HEADER}\n${WORKER_BRIEFS.telegram}`, description: '实现调度逻辑', id: 'd-20261109-k3x9q2', now: 1762650000000 })
   const at = 1762650000000
   const executor = {
     agentId: 'a83b0057bf058d018', role: 'executor' as const, sessionId: 's', ruleId: 'code-change', rulesVersion: rules.version,
