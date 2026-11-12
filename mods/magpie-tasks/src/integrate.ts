@@ -2,13 +2,15 @@
 // directory (the project main directory, or the task worktree for an agent's separate copy), one
 // integration per project at a time, and moves the base so the next integration applies only what
 // came after. Only the target's working tree changes: no index update, no commit, no push; commits
-// and pushes are made by an agent when the person asks. A task that works in the project directory
-// itself has nothing to apply: settleDirect records its change as its result and moves its base.
+// and pushes are made by an agent when the person asks. A project the task changes in the project
+// directory itself has nothing to apply: settleDirect takes its change as the result and moves its
+// base. integrateTask does this for every project of a task and records the outcome on the task's
+// deliverables.
 import { diffToFile, git, gitRun, refLabel, repoRoot, scratchPath, snapshotCommit } from './git'
 import type { Io } from './io'
 import type { Registry } from './registry'
-import type { TaskRecord } from './types'
-import { noteChange, PROJECT_LOCK, projectDir, projectLock } from './workspace'
+import type { IntegrationPart, TaskRecord } from './types'
+import { noteChange, pathOf, PROJECT_LOCK, projectDir, projectLock, workspaceAt, workspaces } from './workspace'
 
 export type IntegrationResult = { status: 'applied'; files: string[]; newBase: string } | { status: 'empty' } | { status: 'conflict'; files: string[]; detail: string }
 
@@ -27,7 +29,7 @@ export async function integrate(io: Io, reg: Registry, a: { taskId: string; repo
       const { tree, files } = await diffToFile(io, a.source, base, tmpIndex, patchPath)
       const entry = { target: a.target, source: a.source, base, tree, files }
       if (files.length === 0) {
-        await record(io, reg, a, { status: 'empty', files: [] }, { type: 'integration', status: 'empty', ...entry })
+        await reg.log(a.taskId, { type: 'integration', status: 'empty', ...entry })
         return { status: 'empty' }
       }
       // Patch paths are relative to the repository top; applied from a subdirectory, git would skip
@@ -38,7 +40,7 @@ export async function integrate(io: Io, reg: Registry, a: { taskId: string; repo
       const check = await gitRun(io, ['-C', top, 'apply', '--binary', '--check', '--whitespace=nowarn', patchPath], { timeoutMs: APPLY_MS })
       if (check.exitCode !== 0) {
         const detail = check.stderr.trim()
-        await record(io, reg, a, { status: 'conflict', files }, { type: 'integration', status: 'conflict', ...entry, detail })
+        await reg.log(a.taskId, { type: 'integration', status: 'conflict', ...entry, detail })
         return { status: 'conflict', files, detail }
       }
       // From here until the 'integration' entry, an interruption leaves an integration-start with
@@ -48,9 +50,9 @@ export async function integrate(io: Io, reg: Registry, a: { taskId: string; repo
       const newBase = await snapshotCommit(io, a.repo, tree, base, `magpie-tasks base ${refLabel(a.baseRef)}`)
       // Compare-and-swap: the ref still names the base this patch was made against.
       await git(io, ['-C', a.repo, 'update-ref', a.baseRef, newBase, base])
-      await record(io, reg, a, { status: 'applied', files }, { type: 'integration', status: 'applied', ...entry, newBase })
+      await reg.log(a.taskId, { type: 'integration', status: 'applied', ...entry, newBase })
       const task = await reg.get(a.taskId)
-      if (task !== undefined && await intoProject(io, task, a.target)) await noteChange(io, reg, top, task, files)
+      if (task !== undefined && await projectRootOf(io, task, a.target) !== null) await noteChange(io, reg, top, task, files)
       return { status: 'applied', files, newBase }
     } finally {
       const r = await io.run(['rm', '-f', tmpIndex, patchPath])
@@ -61,23 +63,26 @@ export async function integrate(io: Io, reg: Registry, a: { taskId: string; repo
 
 export type SettleResult = { status: 'in-place'; files: string[] } | { status: 'empty' }
 
-// The change a task working in the project directory itself made since its base, recorded as its
-// result like an integration ('in-place'). In Git the base then moves to the directory as it is
+// The change a task made since its base in the project `root`, which it changes in the project
+// directory itself: there is nothing to apply. In Git the base then moves to the directory as it is
 // now, so the next result holds only what came after; outside Git the change is the files its
-// agents edited with the file tools, which are cleared once recorded. The other tasks that work in
+// agents edited with the file tools, which are cleared once taken. The other tasks that work in
 // the same directory in place are told which files this one changed (noteChange).
-export async function settleDirect(io: Io, reg: Registry, taskId: string): Promise<SettleResult> {
+export async function settleDirect(io: Io, reg: Registry, taskId: string, root: string): Promise<SettleResult> {
   const first = await reg.get(taskId)
-  const d = first?.direct
-  if (first === undefined || d === undefined || d === null || first.project === null) throw new Error(`settleDirect: task ${taskId} does not work in a project directory`)
-  const target = first.project.root
+  const d = first === undefined ? undefined : workspaceAt(first, root)?.w.direct
+  if (d === undefined || d === null) throw new Error(`settleDirect: task ${taskId} does not work in the project directory ${root}`)
   return reg.lock(projectLock(d.dir), async () => {
     const task = (await reg.get(taskId))!
-    const direct = task.direct!
+    const direct = workspaceAt(task, root)!.w.direct!
     let files: string[]
     if (direct.baseRef === null) {
       files = touchedFiles(task, direct.dir)
-      if (files.length > 0) await reg.update(taskId, t => { for (const a of Object.values(t.agents)) a.filesTouched = [] }, { type: 'touches-recorded', files })
+      if (files.length > 0) {
+        await reg.update(taskId, t => {
+          for (const a of Object.values(t.agents)) a.filesTouched = a.filesTouched.filter(p => !p.startsWith(`${direct.dir}/`))
+        }, { type: 'touches-recorded', dir: direct.dir, files })
+      }
     } else {
       const base = (await git(io, ['-C', direct.dir, 'rev-parse', '--verify', `${direct.baseRef}^{commit}`])).trim()
       const tmpIndex = await scratchPath(io, direct.dir, 'index')
@@ -89,9 +94,10 @@ export async function settleDirect(io: Io, reg: Registry, taskId: string): Promi
           const newBase = await snapshotCommit(io, direct.dir, diff.tree, base, `magpie-tasks base ${refLabel(direct.baseRef)}`)
           await git(io, ['-C', direct.dir, 'update-ref', direct.baseRef, newBase, base])
           await reg.update(taskId, t => {
-            t.direct!.baseCommit = newBase
-            t.alsoChanged = []
-          }, { type: 'base-moved', base, newBase })
+            const w = workspaceAt(t, root)!.w
+            w.direct!.baseCommit = newBase
+            w.alsoChanged = []
+          }, { type: 'base-moved', dir: direct.dir, base, newBase })
         }
       } finally {
         const r = await io.run(['rm', '-f', tmpIndex, patchPath])
@@ -99,7 +105,7 @@ export async function settleDirect(io: Io, reg: Registry, taskId: string): Promi
       }
     }
     const status = files.length === 0 ? 'empty' : 'in-place'
-    await record(io, reg, { taskId, target }, { status, files }, { type: 'integration', status, target, files })
+    await reg.log(taskId, { type: 'integration', status, target: root, files })
     await noteChange(io, reg, direct.dir, task, files)
     return files.length === 0 ? { status: 'empty' } : { status: 'in-place', files }
   }, PROJECT_LOCK)
@@ -118,47 +124,85 @@ export function touchedFiles(task: Pick<TaskRecord, 'agents'>, dir: string): str
   return out
 }
 
-// Writes the outcome to the task log and, for an integration into the project main directory, to
-// the task's deliverables. The latest deliverable stays open while it has no integration or its
-// integration ended in a conflict (the user may resolve it and integrate again): the outcome goes
-// onto it, replacing an earlier conflict. Once it holds an applied, in-place or empty integration,
-// an applied or in-place one gets an entry of its own (the architect integrated without reporting an
-// accepted outcome first), and an empty or conflicting one is only logged. Integrations of a separate copy into the
-// task worktree are internal to the task and only logged.
-async function record(
-  io: Io,
-  reg: Registry,
-  a: { taskId: string; target: string },
-  outcome: { status: 'applied' | 'in-place' | 'empty' | 'conflict'; files: string[] },
-  log: { type: 'integration'; [k: string]: unknown },
-): Promise<void> {
-  const task = await reg.get(a.taskId)
-  if (task === undefined) throw new Error(`integrate: task ${a.taskId} does not exist`)
-  if (!(await intoProject(io, task, a.target))) {
-    await reg.log(a.taskId, log)
-    return
+// One project's outcome of integrateTask; a conflict carries what a retry needs.
+export type ProjectOutcome = IntegrationPart & { conflict?: { source: string; baseRef: string; detail: string } }
+
+// Brings the change of every project of a task into its project directory, one project after the
+// other: a worktree's change is applied (integrate), a change made in place is taken as it is
+// (settleDirect). A conflict in one project leaves the others applied. The outcomes, in the order
+// of the task's projects, are recorded on its deliverables (recordIntegration).
+export async function integrateTask(io: Io, reg: Registry, taskId: string): Promise<ProjectOutcome[]> {
+  const task = await reg.get(taskId)
+  if (task === undefined) throw new Error(`integrateTask: task ${taskId} does not exist`)
+  const out: ProjectOutcome[] = []
+  for (const w of workspaces(task)) {
+    const root = w.project.root
+    if (w.worktree !== null) {
+      const { path: source, baseRef } = w.worktree
+      const r = await integrate(io, reg, { taskId, repo: root, source, target: root, baseRef })
+      if (r.status === 'conflict') out.push({ root, status: 'conflict', files: r.files, conflict: { source, baseRef, detail: r.detail } })
+      else out.push({ root, status: r.status, files: r.status === 'applied' ? r.files : [] })
+    } else if (pathOf(w) !== null) {
+      const r = await settleDirect(io, reg, taskId, root)
+      out.push({ root, status: r.status, files: r.status === 'in-place' ? r.files : [] })
+    }
   }
-  if (!isOpen(task.deliverables[task.deliverables.length - 1]) && outcome.status !== 'applied' && outcome.status !== 'in-place') {
-    await reg.log(a.taskId, log)
-    return
-  }
+  await recordIntegration(io, reg, taskId, out.map(({ root, status, files }) => ({ root, status, files })))
+  return out
+}
+
+// Writes what became of a result's change, one part per project, onto the task's deliverables. The
+// latest deliverable stays open while it has no integration or its integration holds a conflict
+// (the person may resolve it and integrate again): the parts go onto it, each replacing the earlier
+// part of its project, except that nothing new does not replace a part that brought a change. Once
+// it holds an integration without a conflict, parts that brought a change get an entry of their own
+// (the architect integrated without reporting an accepted outcome first), and others are dropped.
+export async function recordIntegration(io: Io, reg: Registry, taskId: string, parts: IntegrationPart[]): Promise<void> {
+  if (parts.length === 0) return
   const at = await io.now()
-  const integration = { status: outcome.status, files: outcome.files, at }
-  await reg.update(a.taskId, t => {
+  await reg.update(taskId, t => {
     const latest = t.deliverables[t.deliverables.length - 1]
-    if (latest !== undefined && isOpen(latest)) latest.integration = integration
-    else t.deliverables.push({ at, summary: `integration into ${a.target} with no accepted deliverable on record`, verification: [], integration })
-  }, log)
+    if (latest !== undefined && (latest.integration === undefined || latest.integration.status === 'conflict')) {
+      const merged = integrationParts(t, latest.integration)
+      for (const p of parts) {
+        const i = merged.findIndex(m => m.root === p.root)
+        if (i < 0) merged.push(p)
+        else if (p.status !== 'empty' || !brought(merged[i]!)) merged[i] = p
+      }
+      latest.integration = summed(merged, at)
+    } else if (parts.some(brought)) {
+      t.deliverables.push({ at, summary: `integration into ${parts.filter(brought).map(p => p.root).join(', ')} with no accepted deliverable on record`, verification: [], integration: summed(parts, at) })
+    }
+  }, { type: 'deliverable-integration', parts: parts.map(p => ({ root: p.root, status: p.status, files: p.files.length })) })
 }
 
-function isOpen(d: TaskRecord['deliverables'][number] | undefined): boolean {
-  return d !== undefined && (d.integration === undefined || d.integration.status === 'conflict')
+const brought = (p: IntegrationPart) => p.status === 'applied' || p.status === 'in-place'
+
+// The parts of a recorded integration, one per project; a record without them holds the task's
+// first project alone.
+export function integrationParts(task: Pick<TaskRecord, 'project'>, i: TaskRecord['deliverables'][number]['integration']): IntegrationPart[] {
+  if (i === undefined) return []
+  return i.parts !== undefined ? [...i.parts] : [{ root: task.project?.root ?? '', status: i.status, files: i.files }]
 }
 
-async function intoProject(io: Io, task: TaskRecord, target: string): Promise<boolean> {
-  if (task.project === null) return false
-  const [projectReal, targetReal] = await Promise.all([io.realPath(task.project.root), io.realPath(target)])
-  if (projectReal === null) throw new Error(`integrate: project root ${task.project.root} of task ${task.id} does not exist`)
-  return projectReal === targetReal
+// The integration record of `parts`: a conflict anywhere makes it a conflict, else a change applied
+// anywhere makes it applied, else a change made in place makes it in-place. `files` are relative to
+// the project when one project has files, and absolute when several have.
+function summed(parts: IntegrationPart[], at: number): NonNullable<TaskRecord['deliverables'][number]['integration']> {
+  const status = (['conflict', 'applied', 'in-place'] as const).find(s => parts.some(p => p.status === s)) ?? 'empty'
+  const withFiles = parts.filter(p => p.files.length > 0)
+  const files = withFiles.length <= 1 ? withFiles[0]?.files ?? [] : withFiles.flatMap(p => p.files.map(f => `${p.root}/${f}`))
+  return { status, files, at, parts }
 }
 
+// The root of the task's project whose main directory `target` is, or null when it is none (the
+// task worktree, as the target of a separate copy).
+export async function projectRootOf(io: Io, task: TaskRecord, target: string): Promise<string | null> {
+  const targetReal = await io.realPath(target)
+  for (const w of workspaces(task)) {
+    const real = await io.realPath(w.project.root)
+    if (real === null) throw new Error(`integrate: project root ${w.project.root} of task ${task.id} does not exist`)
+    if (real === targetReal) return w.project.root
+  }
+  return null
+}

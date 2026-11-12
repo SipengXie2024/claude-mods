@@ -44,3 +44,8 @@ test('Gemini 4 Argon under Magpie is routed; other Gemini models are not', () =>
   for (const model of ['antigravity/gemini-4-argon', 'gemini-4-argon', 'antigravity/gemini-4-argon-trial']) assert.equal(isRoutedModel(model), true, model);
   for (const model of ['antigravity/gemini-3.8-flash', 'antigravity/gemini-3.1-pro-low', 'antigravity/gemini-4-carbon']) assert.equal(isRoutedModel(model), false, model);
 });
+
+test('a model whose ID names its reasoning level is left at that level', () => {
+  for (const model of ['hakimi/gemini-4-argon-high', 'hakimi/gemini-4-argon-medium', 'hakimi/gemini-4-carbon-low', 'hakimi/claude-opus-5-5-high', 'hakimi/claude-sonnet-5-5-medium[1m]']) assert.equal(isRoutedModel(model), false, model);
+  for (const model of ['claude/claude-opus-5-5', 'claude-mythos-5-2[1m]', 'codex/gpt-6-astra-900k', 'codex/gpt-6.1-sol']) assert.equal(isRoutedModel(model), true, model);
+});

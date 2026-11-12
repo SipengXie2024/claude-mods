@@ -2,6 +2,7 @@
 // substitute candidates and the Jev rule options.
 import type { Io } from './io'
 import { jevDeepYes } from './jevconfig'
+import { nameLevel } from './model'
 import { EFFORTS, type Effort } from './types'
 
 // effort: the start; deepEffort: the start when Jev judges the brief deep; raiseOrder: the levels an
@@ -45,6 +46,12 @@ const USES = ['subagent', 'plugin', 'main'] as const
 
 function fail(where: string, what: string): never {
   throw new Error(`routing rules: ${where}: ${what}`)
+}
+// A model whose ID names its level runs at that level: an effort the file pairs with it is that level.
+function atNameLevel(model: string, efforts: Effort[], where: string): void {
+  const level = nameLevel(model)
+  const other = efforts.filter(e => e !== level)
+  if (level !== null && other.length > 0) fail(where, `${model} runs at ${level}, the level its ID names, not ${other.join(', ')}`)
 }
 function obj(v: unknown, where: string): Record<string, unknown> {
   if (typeof v !== 'object' || v === null || Array.isArray(v)) fail(where, 'not an object')
@@ -118,6 +125,8 @@ export function parseRules(json: unknown, jev: { deepYes: number }): Rules {
       if (order.some((v, j) => j > 0 && EFFORTS.indexOf(v) <= EFFORTS.indexOf(order[j - 1]!))) fail(`${at}.raiseOrder`, 'levels must rise strictly')
       if (!order.includes(deepE!)) fail(`${at}.deepEffort`, `${deepE} is not in raiseOrder`)
     }
+    if (m !== null && e !== null) atNameLevel(m, [e, deepE!, ...order!], `${at}`)
+    for (const other of [dm, hm]) if (other !== null) atNameLevel(other, [deepE!], `${at}.deepEffort`)
     const jevOption = bool(r['jevOption'], `${at}.jevOption`)
     if (jevOption && use !== 'subagent') fail(`${at}.jevOption`, 'only subagent rules are Jev options')
     return {
@@ -157,6 +166,7 @@ export function parseRules(json: unknown, jev: { deepYes: number }): Rules {
     otherwise: model(rs['otherwise'], 'reviewSecond.otherwise'),
     order: arr(rs['order'], 'reviewSecond.order').map((m, i) => model(m, `reviewSecond.order[${i}]`)),
   }
+  for (const m of [reviewSecond.otherwise, ...Object.values(whenOriginalIncludes), ...reviewSecond.order]) atNameLevel(m, [reviewSecond.effort], 'reviewSecond.effort')
 
   const ac = obj(root['acceptance'], 'acceptance')
   const subscriptions: AcceptanceSubscription[] = arr(ac['subscriptions'], 'acceptance.subscriptions').map((raw, i) => {
@@ -197,6 +207,7 @@ export function parseRules(json: unknown, jev: { deepYes: number }): Rules {
       } else {
         efforts = arr(ef, `${at}.options[${j}].efforts`).map((x, k) => effort(x, `${at}.options[${j}].efforts[${k}]`))
         if (efforts.length === 0) fail(`${at}.options[${j}].efforts`, 'empty')
+        atNameLevel(m, efforts, `${at}.options[${j}].efforts`)
       }
       return { model: m, efforts }
     })
@@ -210,7 +221,9 @@ export function parseRules(json: unknown, jev: { deepYes: number }): Rules {
   const am = obj(root['ambiguous'], 'ambiguous')
   const drawn = arr(am['candidates'], 'ambiguous.candidates').map((raw, i) => {
     const c = obj(raw, `ambiguous.candidates[${i}]`)
-    return { model: model(c['model'], `ambiguous.candidates[${i}].model`), effort: effort(c['effort'], `ambiguous.candidates[${i}].effort`) }
+    const pick = { model: model(c['model'], `ambiguous.candidates[${i}].model`), effort: effort(c['effort'], `ambiguous.candidates[${i}].effort`) }
+    atNameLevel(pick.model, [pick.effort], `ambiguous.candidates[${i}].effort`)
+    return pick
   })
   if (drawn.length < 2) fail('ambiguous.candidates', 'needs at least two models to draw from')
   if (new Set(drawn.map(c => c.model)).size !== drawn.length) fail('ambiguous.candidates', 'duplicate model')
@@ -338,7 +351,9 @@ function covers(sub: Substitute, ruleId: string): boolean {
 
 // The automatic substitute that allows `model` at `effort` for a task under `ruleId`, or null. A model
 // the rule itself names is allowed at the levels of its raise order, as `rule:<id>`.
-export function substituteAllowed(rules: Rules, ruleId: string, model: string, effort: Effort, same: (a: string, b: string) => boolean): Substitute | null {
+export function substituteAllowed(rules: Rules, ruleId: string, model: string, asked: Effort, same: (a: string, b: string) => boolean): Substitute | null {
+  // A model whose ID names its level runs at that level, whatever effort was asked for.
+  const effort = nameLevel(model) ?? asked
   const rule = ruleById(rules, ruleId)
   if (rule.raiseOrder !== null && rule.raiseOrder.includes(effort) && ownModels(rule).some(m => same(m, model))) {
     return { id: `rule:${rule.id}`, forRules: [rule.id], options: [{ model, efforts: rule.raiseOrder }], auto: true }

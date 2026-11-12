@@ -5,7 +5,7 @@ import { expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { catalogFrom, isAvailable, sameModel } from '../src/model'
+import { catalogFrom, isAvailable, sameModel, sameModelAnyProvider } from '../src/model'
 import { isHardWork, jevChoices, loadRules, parseRules, raise, raiseOnRule, reviewSecondTarget, ruleById, ruleModel, startEffort, substituteAllowed, substituteEffort, RULE_IDS } from '../src/rules'
 import { nodeIo } from './node-io'
 
@@ -23,7 +23,7 @@ const available = (id: string) => isAvailable(id, cat)
 
 const OPUS = 'claude/claude-opus-5-5'
 const MYTHOS = 'claude/claude-mythos-5-2'
-const ARGON = 'antigravity/gemini-4-argon'
+const ARGON = 'hakimi/gemini-4-argon-medium'
 const SOL = 'codex/gpt-6.1-sol'
 const ASTRA = 'codex/gpt-6-astra'
 
@@ -55,7 +55,7 @@ function tableModelIds(): Record<string, string> {
 test('the file holds the 19 rules, each once', () => {
   expect(rules.rules.map(r => r.id).sort()).toEqual([...RULE_IDS].sort())
   expect(rules.rules).toHaveLength(19)
-  expect(rules.version).toBe('routing-rules.v7')
+  expect(rules.version).toBe('routing-rules.v8')
 })
 
 test('condition, acceptance and evidence are the routing table columns word for word, in the same section', () => {
@@ -135,6 +135,12 @@ test('parseRules refuses a missing, duplicated or unknown rule, a bad effort and
   expect(variant(j => { subs(j)[0]!['limits'] = ['7 days'] })).toThrow('acceptance.subscriptions[0].limits')
   expect(variant(j => { subs(j).splice(0) })).toThrow('acceptance.subscriptions: empty')
   expect(variant(j => { delete j['acceptance'] })).toThrow('acceptance')
+  // A model whose ID names its level runs at that level: the file pairs no other effort with it.
+  const sub = (j: Record<string, unknown>, id: string) => (j['substitutes'] as { id: string; options: Record<string, unknown>[] }[]).find(s => s.id === id)!
+  expect(variant(j => { sub(j, 'document-alt').options[0]!['efforts'] = ['medium', 'high'] })).toThrow('substitute document-alt.options[0].efforts: hakimi/gemini-4-carbon-medium runs at medium, the level its ID names, not high')
+  expect(variant(j => { drawn(j)[1]!['effort'] = 'xhigh' })).toThrow('ambiguous.candidates[1].effort: hakimi/gemini-4-carbon-high runs at high')
+  expect(variant(j => { j.rules.find(r => r['id'] === 'explain-write')!['raiseOrder'] = ['high', 'xhigh'] })).toThrow('rule explain-write: hakimi/gemini-4-argon-high runs at high, the level its ID names, not xhigh')
+  expect(variant(j => { (j['reviewSecond'] as Record<string, unknown>)['effort'] = 'high' })).toThrow('reviewSecond.effort: hakimi/gemini-4-argon-medium runs at medium')
   expect(() => parseRules('not an object', { deepYes: 0.85 })).toThrow('routing rules: file')
 })
 
@@ -226,6 +232,15 @@ test('reviewSecondTarget: Sol reviewed → Opus, Opus reviewed → Sol, both rev
   expect(reviewSecondTarget(rules, [SOL, 'claude/claude-opus-5-5[1m]'], available, same)).toEqual({ model: ARGON, effort: 'medium' })
   const none = reviewSecondTarget(rules, [SOL, 'claude/claude-opus-5-5[1m]', ARGON], available, same)
   expect('none' in none && none.none).toContain('excluded as reviewed models')
+})
+
+test('reviewSecondTarget with the comparison spawn uses: another level or provider of a reviewed model is the same model', () => {
+  const anyProvider = (a: string, b: string) => sameModelAnyProvider(a, b, cat)
+  for (const argon of ['hakimi/gemini-4-argon-high', 'antigravity/gemini-4-argon']) {
+    expect('none' in reviewSecondTarget(rules, [SOL, OPUS, argon], available, anyProvider)).toBe(true)
+  }
+  expect(reviewSecondTarget(rules, [SOL, OPUS], available, anyProvider)).toEqual({ model: ARGON, effort: 'medium' })
+  expect(reviewSecondTarget(rules, ['hakimi/claude-opus-5-5-high'], available, anyProvider)).toEqual({ model: SOL, effort: 'medium' })
 })
 
 test('reviewSecondTarget treats the opus alias and the [1m] variant as Opus', () => {

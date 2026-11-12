@@ -8,10 +8,10 @@ import { join } from 'node:path'
 import { baseRefName, createWorktree, diffSince, removeWorktree, removeWorktreeAndRef, repoRoot, scratchPath } from '../src/git'
 import { reclaim } from '../src/reclaim'
 import type { Ctx } from '../src/state'
-import { integrate, settleDirect } from '../src/integrate'
+import { integrate, integrateTask, settleDirect } from '../src/integrate'
 import { Registry } from '../src/registry'
 import type { Options, TaskRecord } from '../src/types'
-import { leaveIfTaken, placeTask } from '../src/workspace'
+import { leaveIfTaken, placeTask, workspacePaths, workspaces, writeRange } from '../src/workspace'
 import { nodeIo } from './node-io'
 
 let root = ''
@@ -77,6 +77,13 @@ function longTask(id: string, projectRoot: string): Omit<TaskRecord, 'schema' | 
     ratings: [],
     pendingRelays: {},
   }
+}
+
+// The task's worktree of its project, made directly and recorded as placeTask records it.
+async function taskWorktree(s: Awaited<ReturnType<typeof scenario>>): Promise<{ baseCommit: string; baseRef: string }> {
+  const made = await createWorktree(s.io, s.project, s.wt, baseRefName(s.taskId), s.project)
+  await s.reg.update(s.taskId, t => { t.worktree = { path: s.wt, baseRef: made.baseRef, baseCommit: made.baseCommit } }, { type: 'worktree' })
+  return made
 }
 
 function logEntries(stateDir: string, taskId: string): { type: string; [k: string]: unknown }[] {
@@ -152,7 +159,7 @@ test('integrate: only the task change is applied, the user change stays; a secon
   committedRepo(s.project)
   await s.task(s.project)
   const ref = baseRefName(s.taskId)
-  const { baseCommit } = await createWorktree(s.io, s.project, s.wt, ref, s.project)
+  const { baseCommit } = await taskWorktree(s)
   // The task's change, and an accepted deliverable as report_outcome records it.
   writeFileSync(join(s.wt, 'greet.py'), 'print("hi")\n')
   await s.reg.update(s.taskId, t => { t.deliverables.push({ at: Date.now(), summary: 'hello → hi', verification: ['python3 greet.py'] }) }, { type: 'report', outcome: 'accepted' })
@@ -161,28 +168,23 @@ test('integrate: only the task change is applied, the user change stays; a secon
   const index = sh(s.project, 'ls-files', '-s')
   const commits = sh(s.project, 'rev-list', '--count', 'HEAD')
 
-  const first = await integrate(s.io, s.reg, { taskId: s.taskId, repo: s.project, source: s.wt, target: s.project, baseRef: ref })
-  if (first.status !== 'applied') throw new Error(`expected applied, got ${JSON.stringify(first)}`)
-  expect(first.files).toEqual(['greet.py'])
+  expect(await integrateTask(s.io, s.reg, s.taskId)).toEqual([{ root: s.project, status: 'applied', files: ['greet.py'] }])
+  const newBase = sh(s.project, 'rev-parse', ref).trim()
   expect(readFileSync(join(s.project, 'greet.py'), 'utf8')).toBe('print("hi")\n')
   expect(readFileSync(join(s.project, 'README.md'), 'utf8')).toBe('# proj\n\nuser note\n')
   expect(readFileSync(join(s.project, 'untracked.txt'), 'utf8')).toBe('not added, edited again\n')
   expect(sh(s.project, 'ls-files', '-s')).toBe(index)
   expect(sh(s.project, 'rev-list', '--count', 'HEAD')).toBe(commits)
-  expect(sh(s.project, 'rev-parse', ref).trim()).toBe(first.newBase)
-  expect(sh(s.project, 'log', '-1', '--format=%P', first.newBase).trim()).toBe(baseCommit)
+  expect(sh(s.project, 'log', '-1', '--format=%P', newBase).trim()).toBe(baseCommit)
 
   // The user reworks the integrated file; the task then changes another file only.
   writeFileSync(join(s.project, 'greet.py'), 'print("hi there")\n')
   writeFileSync(join(s.wt, 'farewell.py'), 'print("bye")\n')
-  const second = await integrate(s.io, s.reg, { taskId: s.taskId, repo: s.project, source: s.wt, target: s.project, baseRef: ref })
-  if (second.status !== 'applied') throw new Error(`expected applied, got ${JSON.stringify(second)}`)
-  expect(second.files).toEqual(['farewell.py'])
+  expect(await integrateTask(s.io, s.reg, s.taskId)).toEqual([{ root: s.project, status: 'applied', files: ['farewell.py'] }])
   expect(readFileSync(join(s.project, 'farewell.py'), 'utf8')).toBe('print("bye")\n')
   expect(readFileSync(join(s.project, 'greet.py'), 'utf8')).toBe('print("hi there")\n')
 
-  const third = await integrate(s.io, s.reg, { taskId: s.taskId, repo: s.project, source: s.wt, target: s.project, baseRef: ref })
-  expect(third).toEqual({ status: 'empty' })
+  expect(await integrateTask(s.io, s.reg, s.taskId)).toEqual([{ root: s.project, status: 'empty', files: [] }])
 
   // Records: the accepted deliverable carries the first integration; the second, made with no new
   // deliverable, gets an entry of its own; the empty third is only logged. integration-start and
@@ -201,7 +203,7 @@ test('integrate: only the task change is applied, the user change stays; a secon
   expect(log[0]!.tree).toBe(log[1]!.tree)
   expect(log[2]!.tree).toBe(log[3]!.tree)
   expect(log[0]!.tree).not.toBe(log[2]!.tree)
-  expect(log[1]!.newBase).toBe(first.newBase)
+  expect(log[1]!.newBase).toBe(newBase)
 })
 
 test('integrate: a change that collides with the user change is a conflict and the main directory stays as it was', async () => {
@@ -209,7 +211,7 @@ test('integrate: a change that collides with the user change is a conflict and t
   committedRepo(s.project)
   await s.task(s.project)
   const ref = baseRefName(s.taskId)
-  const { baseCommit } = await createWorktree(s.io, s.project, s.wt, ref, s.project)
+  const { baseCommit } = await taskWorktree(s)
   writeFileSync(join(s.wt, 'greet.py'), 'print("hi")\n')
   writeFileSync(join(s.wt, 'other.py'), 'print("other")\n')
   writeFileSync(join(s.project, 'greet.py'), 'print("hey")\n')
@@ -217,10 +219,9 @@ test('integrate: a change that collides with the user change is a conflict and t
   const bytes = Object.fromEntries(files.map(f => [f, readFileSync(join(s.project, f))]))
   const before = userState(s.project)
 
-  const r = await integrate(s.io, s.reg, { taskId: s.taskId, repo: s.project, source: s.wt, target: s.project, baseRef: ref })
-  if (r.status !== 'conflict') throw new Error(`expected conflict, got ${JSON.stringify(r)}`)
-  expect(r.files).toEqual(['greet.py', 'other.py'])
-  expect(r.detail).toContain('greet.py')
+  const [r] = await integrateTask(s.io, s.reg, s.taskId)
+  expect(r).toMatchObject({ root: s.project, status: 'conflict', files: ['greet.py', 'other.py'], conflict: { source: s.wt, baseRef: ref } })
+  expect(r!.conflict!.detail).toContain('greet.py')
   for (const f of files) expect(readFileSync(join(s.project, f)).equals(bytes[f]!)).toBe(true)
   expect(existsSync(join(s.project, 'other.py'))).toBe(false)
   expect(userState(s.project)).toEqual(before)
@@ -235,29 +236,28 @@ test('integrate: after a conflict the accepted deliverable stays open, and a ret
   const s = await scenario('retry')
   committedRepo(s.project)
   await s.task(s.project)
-  const ref = baseRefName(s.taskId)
-  await createWorktree(s.io, s.project, s.wt, ref, s.project)
+  await taskWorktree(s)
   writeFileSync(join(s.wt, 'greet.py'), 'print("hi")\n')
   await s.reg.update(s.taskId, t => { t.deliverables.push({ at: Date.now(), summary: 'hello → hi', verification: ['python3 greet.py'] }) }, { type: 'report', outcome: 'accepted' })
-  const args = { taskId: s.taskId, repo: s.project, source: s.wt, target: s.project, baseRef: ref }
+  const status = async () => (await integrateTask(s.io, s.reg, s.taskId)).map(o => o.status)
   const outcomes = async () => (await s.reg.get(s.taskId))!.deliverables.map(d => [d.summary, d.integration?.status, d.integration?.files])
 
   // The user edits the same file: a conflict, recorded on the accepted deliverable.
   writeFileSync(join(s.project, 'greet.py'), 'print("hey")\n')
-  expect((await integrate(s.io, s.reg, args)).status).toBe('conflict')
+  expect(await status()).toEqual(['conflict'])
   expect(await outcomes()).toEqual([['hello → hi', 'conflict', ['greet.py']]])
   // A retry before the user resolves it conflicts again and replaces the earlier conflict.
-  expect((await integrate(s.io, s.reg, args)).status).toBe('conflict')
+  expect(await status()).toEqual(['conflict'])
   expect(await outcomes()).toEqual([['hello → hi', 'conflict', ['greet.py']]])
   // The user restores the file; the retry applies onto the same deliverable.
   writeFileSync(join(s.project, 'greet.py'), 'print("hello")\n')
-  expect((await integrate(s.io, s.reg, args)).status).toBe('applied')
+  expect(await status()).toEqual(['applied'])
   expect(readFileSync(join(s.project, 'greet.py'), 'utf8')).toBe('print("hi")\n')
   expect(await outcomes()).toEqual([['hello → hi', 'applied', ['greet.py']]])
   // Once applied, a later conflict is only logged.
   writeFileSync(join(s.wt, 'greet.py'), 'print("hi!")\n')
   writeFileSync(join(s.project, 'greet.py'), 'print("yo")\n')
-  expect((await integrate(s.io, s.reg, args)).status).toBe('conflict')
+  expect(await status()).toEqual(['conflict'])
   expect(await outcomes()).toEqual([['hello → hi', 'applied', ['greet.py']]])
   const log = logEntries(s.opts.stateDir, s.taskId).filter(e => e.type.startsWith('integration'))
   expect(log.map(e => [e.type, e.status ?? null])).toEqual([
@@ -299,7 +299,7 @@ test('placeTask: the first live task on a project works in place, a second one g
   expect(sh(s.project, 'show', `${a.direct!.baseCommit}:README.md`)).toBe('# proj\n\nuser note\n')
   expect(sh(s.project, 'show', `${a.direct!.baseCommit}:untracked.txt`)).toBe('not added\n')
   expect(userState(s.project)).toEqual(before)
-  await expect(placeTask(s.io, s.reg, s.opts, s.taskId, s.project)).rejects.toThrow('already works in')
+  await expect(placeTask(s.io, s.reg, s.opts, s.taskId, s.project)).rejects.toThrow(`already works on ${s.project}`)
 
   const second = 'l-20261112-second'
   await s.reg.create({ ...longTask(second, s.project), title: '第二个任务' })
@@ -335,13 +335,13 @@ test('settleDirect: the files changed since the base become the result in place,
   writeFileSync(join(s.project, 'greet.py'), 'print("hi")\n')
   await s.reg.update(s.taskId, t => { t.deliverables.push({ at: 1, summary: 'accepted', verification: [] }) }, { type: 'outcome' })
   const before = userState(s.project)
-  expect(await settleDirect(s.io, s.reg, s.taskId)).toEqual({ status: 'in-place', files: ['greet.py'] })
+  expect(await integrateTask(s.io, s.reg, s.taskId)).toEqual([{ root: s.project, status: 'in-place', files: ['greet.py'] }])
   expect(userState(s.project)).toEqual(before)
   const a = (await s.reg.get(s.taskId))!
   expect(a.deliverables[0]!.integration).toMatchObject({ status: 'in-place', files: ['greet.py'] })
   expect(sh(s.project, 'rev-parse', baseRefName(s.taskId)).trim()).toBe(a.direct!.baseCommit!)
   expect(sh(s.project, 'show', `${a.direct!.baseCommit}:greet.py`)).toBe('print("hi")\n')
-  expect(await settleDirect(s.io, s.reg, s.taskId)).toEqual({ status: 'empty' })
+  expect(await settleDirect(s.io, s.reg, s.taskId, s.project)).toEqual({ status: 'empty' })
 
   // A task in a worktree integrates into the project: the direct task learns which files are not its own.
   const other = 'l-20261112-wtwtwt'
@@ -353,7 +353,7 @@ test('settleDirect: the files changed since the base become the result in place,
   expect(r.status).toBe('applied')
   expect((await s.reg.get(s.taskId))!.alsoChanged).toMatchObject([{ taskId: other, title: '改 README', files: ['README.md'] }])
   // Its own next settle clears that note with the moved base.
-  await settleDirect(s.io, s.reg, s.taskId)
+  await settleDirect(s.io, s.reg, s.taskId, s.project)
   expect((await s.reg.get(s.taskId))!.alsoChanged).toEqual([])
 
   // Outside Git the result is the files the agents edited with the file tools.
@@ -365,9 +365,9 @@ test('settleDirect: the files changed since the base become the result in place,
   await s.reg.update(p, t => {
     t.agents['a1'] = { agentId: 'a1', role: 'implementer', sessionId: 's', ruleId: null, rulesVersion: 'v', selection: { kind: 'rule', reason: 'r' }, judgment: null, model: 'claude/claude-opus-5-5', effort: 'high', efforts: [], contextSource: 'brief', cwd: plain, worktree: plain, state: 'idle', pendingRaises: [], filesTouched: [join(plain, 'a.txt'), '/tmp/elsewhere.txt'], reports: [], startedAt: 1 }
   }, { type: 'spawn' })
-  expect(await settleDirect(s.io, s.reg, p)).toEqual({ status: 'in-place', files: ['a.txt'] })
-  expect((await s.reg.get(p))!.agents['a1']!.filesTouched).toEqual([])
-  expect(await settleDirect(s.io, s.reg, p)).toEqual({ status: 'empty' })
+  expect(await settleDirect(s.io, s.reg, p, plain)).toEqual({ status: 'in-place', files: ['a.txt'] })
+  expect((await s.reg.get(p))!.agents['a1']!.filesTouched).toEqual(['/tmp/elsewhere.txt'])
+  expect(await settleDirect(s.io, s.reg, p, plain)).toEqual({ status: 'empty' })
 })
 
 test('leaveIfTaken: an ended direct task that resumes while another task works in place moves to a worktree of the project as it is now', async () => {
@@ -376,9 +376,9 @@ test('leaveIfTaken: an ended direct task that resumes while another task works i
   await s.task(s.project)
   await placeTask(s.io, s.reg, s.opts, s.taskId, s.project)
   // Still live, or ended with nobody else in place: it stays.
-  expect(await leaveIfTaken(s.io, s.reg, s.opts, s.taskId)).toBeNull()
+  expect(await leaveIfTaken(s.io, s.reg, s.opts, s.taskId, s.project)).toBeNull()
   await s.reg.update(s.taskId, t => { t.state = 'done' }, { type: 'state', state: 'done' })
-  expect(await leaveIfTaken(s.io, s.reg, s.opts, s.taskId)).toBeNull()
+  expect(await leaveIfTaken(s.io, s.reg, s.opts, s.taskId, s.project)).toBeNull()
 
   const next = 'l-20261112-nextnx'
   await s.reg.create({ ...longTask(next, s.project), title: '下一个任务' })
@@ -387,7 +387,7 @@ test('leaveIfTaken: an ended direct task that resumes while another task works i
   await s.reg.update(s.taskId, t => {
     t.agents['x1'] = { agentId: 'x1', role: 'executor', sessionId: 's', ruleId: null, rulesVersion: 'v', selection: { kind: 'rule', reason: 'r' }, judgment: null, model: 'claude/claude-opus-5-5', effort: 'high', efforts: [], contextSource: 'brief', cwd: s.project, worktree: s.project, state: 'running', pendingRaises: [], filesTouched: [], reports: [], startedAt: 1 }
   }, { type: 'spawn' })
-  const moved = await leaveIfTaken(s.io, s.reg, s.opts, s.taskId)
+  const moved = await leaveIfTaken(s.io, s.reg, s.opts, s.taskId, s.project)
   expect(moved).toEqual({ path: s.wt, others: [{ id: next, title: '下一个任务' }] })
   const a = (await s.reg.get(s.taskId))!
   expect(a.direct).toBeNull()

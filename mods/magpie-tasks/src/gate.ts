@@ -242,27 +242,37 @@ export async function architectDeny(e: ToolEvent, a: { projectRoot: string; home
   return null
 }
 
-// The refusal for a routed subagent's write, or null. A write into a Git repository must land in the
-// agent's working directory (`worktree`: the task worktree, or the project directory of a direct
-// task; null: the agent has none yet); writes outside every repository (/tmp and the like) pass;
-// CONTEXT.md and .planning/findings.md are the architect's even there.
-export async function subagentWriteDeny(e: ToolEvent, a: { worktree: string | null; place: (path: string) => Promise<string | null>; repoOf: (path: string) => Promise<string | null> }): Promise<string | null> {
+// The refusal for a routed subagent's write, or null. A write into a Git repository must land in
+// one of the agent's working directories (`dirs`: its own first, then those of the task's other
+// projects; empty: the agent has none yet); `copies` maps a directory it must leave alone to the
+// copy it changes instead (workspace.ts writeRange). Writes outside every repository (/tmp and the
+// like) pass; CONTEXT.md and .planning/findings.md are the architect's in every working directory.
+export async function subagentWriteDeny(e: ToolEvent, a: { dirs: string[]; copies: Record<string, string>; place: (path: string) => Promise<string | null>; repoOf: (path: string) => Promise<string | null> }): Promise<string | null> {
   if (!SUBAGENT_WRITE_TOOLS.has(e.tool)) return null
   const path = filePath(e)
   if (path === null) return null
   const real = await a.place(path)
-  if (real === null) return `${e.tool} on ${path}: the path could not be resolved, so it cannot be checked against your worktree.`
+  if (real === null) return `${e.tool} on ${path}: the path could not be resolved, so it cannot be checked against your working directories.`
   const repo = await a.repoOf(real)
   if (repo === null) return null
-  if (a.worktree === null) {
-    return `${path} is inside the Git repository ${repo}, and you have no working directory for it yet. Call mcp__magpie-tasks__open_project with { "project": "${repo}" } first, then make every change in the directory it returns (cd there before running commands).`
+  const open = `Call mcp__magpie-tasks__open_project with { "project": "${repo}" } first, then make every change to that project in the directory it returns (cd there before running commands).`
+  if (a.dirs.length === 0) return `${path} is inside the Git repository ${repo}, and you have no working directory for it yet. ${open}`
+  for (const dir of a.dirs) {
+    const wt = await a.place(dir)
+    if (wt === null) {
+      if (dir === a.dirs[0]) return `Your working directory ${dir} does not exist; report this and end your turn.`
+      continue
+    }
+    const rel = relativeTo(real, wt)
+    if (rel === null) continue
+    if (rel === 'CONTEXT.md' || rel === '.planning/findings.md') return `${rel} is a design record the architect writes in the project main directory. Put what you found in your report instead.`
+    return null
   }
-  const wt = await a.place(a.worktree)
-  if (wt === null) return `Your working directory ${a.worktree} does not exist; report this and end your turn.`
-  const rel = relativeTo(real, wt)
-  if (rel === null) return `Write only inside your working directory ${wt}; ${path} is outside it (in ${repo}). Make the change in the copy of the file there instead.`
-  if (rel === 'CONTEXT.md' || rel === '.planning/findings.md') return `${rel} is a design record the architect writes in the project main directory. Put what you found in your report instead.`
-  return null
+  for (const [left, copy] of Object.entries(a.copies)) {
+    const dir = await a.place(left)
+    if (dir !== null && relativeTo(real, dir) !== null) return `Write only inside your working directory ${copy}; ${path} is outside it (in ${repo}). Make the change in the copy of the file there instead.`
+  }
+  return `${path} is inside the Git repository ${repo}, which this task has not opened: its working ${a.dirs.length === 1 ? 'directory is' : 'directories are'} ${a.dirs.join(', ')}. If the task has to change that project as well: ${open}`
 }
 
 // A `place` over a real-path lookup: the real path of `path`, or, when it does not exist, the real

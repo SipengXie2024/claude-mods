@@ -24,6 +24,7 @@ const STANDS: Record<AgentStatus, { runs: boolean; text: string }> = {
 // How the last answer of an agent that reports with a status line (brief.ts STATUS_RULES) ended.
 const STATUS_LINE: Record<AgentReport['status'], string> = {
   done: 'ended with 状态：已完成',
+  stopped: 'ended with 状态：已停止: the person told it to stop',
   'needs-user': 'ended with 状态：需要用户决定',
   blocked: 'ended with 状态：受阻',
   working: 'ended with 状态：进行中, so background work it started may still run',

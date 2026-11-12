@@ -45,7 +45,8 @@ export interface JevJudgment {
 
 export interface EffortChange { at: number; from: Effort | null; to: Effort; reason: 'rule' | 'explicit' | RaiseReason; note?: string }
 
-export interface AgentReport { at: number; status: 'done' | 'needs-user' | 'blocked' | 'working' | 'missing'; text: string; verification: string[] }
+// stopped: the agent ended its work because the person told it to stop (状态：已停止)
+export interface AgentReport { at: number; status: 'done' | 'stopped' | 'needs-user' | 'blocked' | 'working' | 'missing'; text: string; verification: string[] }
 
 export interface AgentRecord {
   agentId: string
@@ -64,12 +65,14 @@ export interface AgentRecord {
   reviewOf?: string[]                   // canonical IDs of the reviewed models
   contextSource: 'brief'                // ordinary subagents receive only the brief
   cwd: string
-  worktree: string | null               // the directory it may write in: the task worktree, or the project directory of a direct task
+  worktree: string | null               // the directory it works in: a task worktree, or the project directory of a direct task; it may write in the task's other projects too (workspace.ts writeRange)
   state: 'running' | 'idle' | 'paused' | 'done' | 'failed'
   pausedFor?: string                    // ID of the decision it waits for
   failure?: { at: number; kind: 'model-unavailable' | 'api-error'; error: string }   // section 9.16; error is the StopFailure category
   replacedBy?: string                   // ID of the agent that took over from it
   pendingRaises: RaiseReason[]          // raises applied when its next turn starts; mirrors st.pendingRaises and is loaded from here after a session resumes
+  turnAt?: number                       // a daily executor: when its latest resumed turn started (a message reached it after it had answered)
+  checks?: number                       // an acceptance agent: the `at` of the deliverable its brief was written from
   filesTouched: string[]
   reports: AgentReport[]
   startedAt: number
@@ -94,6 +97,24 @@ export interface Decision {
 // later reports name it (architect: blocker_id; daily: the blocker judgment of section 9.11)
 export interface Blocker { id: string; description: string; diagnoses: number; modelChanges: number; history: { at: number; step: 'diagnosis' | 'model-change'; agentId: string; note: string; match?: { provider: 'architect' | 'jev' | 'substitute'; confidence: number | null } }[] }
 
+// One project a task changes and where it changes it (src/workspace.ts). `root` is the top of the
+// project's repository, or the project directory itself outside Git. The task works in `direct.dir`
+// (the project directory itself) or, once another task works there directly, in the Git worktree
+// `worktree.path`; with neither, the worktree was removed when the task finished and the project is
+// opened again before the task changes it. The base ref is absent outside Git, where no diff is taken.
+export interface Workspace {
+  project: { root: string }
+  direct?: { dir: string; baseRef: string | null; baseCommit: string | null } | null
+  worktree: { path: string; baseRef: string; baseCommit: string } | null
+  // Files other tasks changed in `direct.dir` since this task's base: they show in its diff without
+  // being its own. Cleared when its base moves.
+  alsoChanged?: { taskId: string; title: string; files: string[]; at: number }[]
+}
+
+// What became of a result's change in one project: applied from the task worktree, recorded where a
+// direct task made it ('in-place'), nothing new ('empty'), or refused by the project's current files.
+export interface IntegrationPart { root: string; status: 'applied' | 'in-place' | 'empty' | 'conflict'; files: string[] }
+
 export interface TaskRecord {
   schema: 1
   id: string                            // l-YYYYMMDD-xxxxxx or d-YYYYMMDD-xxxxxx
@@ -105,16 +126,15 @@ export interface TaskRecord {
   updatedAt: number
   request: string                       // the first message, or the daily task's original request
   followUps: { at: number; source: 'telegram' | 'window'; text: string }[]
+  // The first project the task changes, with where it changes it (`direct`, `worktree`,
+  // `alsoChanged`: the fields of a Workspace); a long task's architect runs in its main directory.
+  // Null before the task names a project.
   project: { root: string } | null
-  // Where the task changes its project (src/workspace.ts): `direct` while it works in the project
-  // directory itself, `worktree` once it got a Git worktree because another task works there
-  // directly; neither before it names a project. `dir` is the repository top, or the directory
-  // itself outside Git; the base ref is absent outside Git, where no diff is taken.
-  direct?: { dir: string; baseRef: string | null; baseCommit: string | null } | null
-  worktree: { path: string; baseRef: string; baseCommit: string } | null
-  // Files other tasks changed in `direct.dir` since this task's base: they show in its diff without
-  // being its own. Cleared when its base moves.
-  alsoChanged?: { taskId: string; title: string; files: string[]; at: number }[]
+  direct?: Workspace['direct']
+  worktree: Workspace['worktree']
+  alsoChanged?: Workspace['alsoChanged']
+  // The further projects the task changes, in the order it opened them (src/workspace.ts).
+  more?: Workspace[]
   extraWorktrees: Record<string, { path: string; baseRef: string; forAgent: string }>
   owner:
     | { kind: 'session'; sessionId: string; jobShortId?: string; previousSessionIds: string[]; model: string; contextMemoryFingerprint: string }
@@ -128,8 +148,10 @@ export interface TaskRecord {
   // check: a daily turn's judgment of whether an acceptance is worth running (p is Jev's probability, null from the evaluator)
   // acceptance.fixed: the executor answered a failed acceptance with its fix; decisionId is the fix-confirm question asked about a fixed change
   // told: the outcome the executor was last told of with a message that reached it (brief.ts outcomeNote)
-  // integration 'in-place': a direct task's change, already in the project directory, recorded as its result
-  deliverables: { at: number; summary: string; verification: string[]; check?: { needed: boolean; p: number | null; provider: 'jev' | 'substitute' }; acceptance?: { agentId: string; pass: boolean; notes: string; fixed?: { at: number; decisionId?: string } }; told?: string; integration?: { status: 'applied' | 'in-place' | 'empty' | 'conflict'; files: string[]; at: number } }[]
+  // integration: what became of the result's change, one part per project (`parts`; a record without it holds the
+  // task's first project alone); `status` and `files` sum the parts up (src/integrate.ts recordIntegration)
+  // stopped: the executor stopped at the person's word, so the result was not checked
+  deliverables: { at: number; summary: string; verification: string[]; stopped?: true; check?: { needed: boolean; p: number | null; provider: 'jev' | 'substitute' }; acceptance?: { agentId: string; pass: boolean; notes: string; fixed?: { at: number; decisionId?: string } }; told?: string; integration?: { status: IntegrationPart['status']; files: string[]; at: number; parts?: IntegrationPart[] } }[]
   feedback: { at: number; source: 'telegram' | 'window'; text: string; unsuitable: boolean | null; modelOpinion: boolean | null }[]
   ratings: { at: number; score: number; raw: string; invited: boolean }[]
   pendingRelays: Record<string, RelayRequest>

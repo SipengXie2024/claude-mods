@@ -1,5 +1,5 @@
 {
-  "version": "routing-rules.v7",
+  "version": "routing-rules.v8",
   "date": "2026-11-12",
   "source": ".planning/model-routing-table.md",
   "thresholds": {
@@ -35,8 +35,17 @@
     "codex/gpt-6-sol": {
       "name": "Sol 6"
     },
-    "antigravity/gemini-4-argon": {
-      "name": "Argon"
+    "hakimi/gemini-4-argon-high": {
+      "name": "Argon high"
+    },
+    "hakimi/gemini-4-argon-medium": {
+      "name": "Argon medium"
+    },
+    "hakimi/gemini-4-carbon-high": {
+      "name": "Carbon high"
+    },
+    "hakimi/gemini-4-carbon-medium": {
+      "name": "Carbon medium"
     }
   },
   "rules": [
@@ -243,14 +252,14 @@
       "section": "2.2",
       "condition": "依据已有材料写笔记、讲解、说明或报告",
       "role": "写作子代理",
-      "model": "antigravity/gemini-4-argon",
+      "model": "hakimi/gemini-4-argon-high",
       "effort": "high",
       "deepEffort": "high",
       "raiseOrder": [
         "high"
       ],
       "acceptance": "用户能理解，结论忠于材料，关键条件与数字保留",
-      "evidence": "[E3]、[E15]；Arena Text 总榜 Argon high 1522±5（Opus 5.5 1506±6），中文与专家分榜分数更高但在误差范围内；Argon 只有 low、medium、high 三档；主对话已有固定模型时保持原模型",
+      "evidence": "[E3]、[E15]、[E18]；Arena Text 总榜 Argon high 1522±5（Opus 5.5 1506±6），中文与专家分榜分数更高但在误差范围内；Carbon high 1526±10，三项都与 Argon 区间重叠；Argon 经 sub2api 接入，档位由模型名决定，规则用 high 档，不再提升；主对话已有固定模型时保持原模型",
       "use": "subagent",
       "jevOption": true
     },
@@ -423,7 +432,7 @@
     "order": [
       "claude/claude-opus-5-5",
       "codex/gpt-6.1-sol",
-      "antigravity/gemini-4-argon"
+      "hakimi/gemini-4-argon-medium"
     ]
   },
   "acceptance": {
@@ -443,7 +452,7 @@
         ]
       }
     ],
-    "evidence": "用户决定（2026-11-12）：日常任务的验收改用每周额度剩余比例最高的订阅，减少 Anthropic 订阅的消耗；每个订阅用其中最适合 `review` 规则的模型：Claude 订阅 Opus 5.5（CodePanel 召回率 90%），Codex 订阅 Sol 6.1（89%，[E4]）。Antigravity 不在其中：2026-11-12 实测它对 Claude Code 的请求一律回答 Resource has been exhausted（Opus 5.5 与 Argon 都是，Magpie 说明这与剩余额度无关），验收子代理无法在上面运行"
+    "evidence": "用户决定（2026-11-12）：日常任务的验收改用每周额度剩余比例最高的订阅，减少 Anthropic 订阅的消耗；每个订阅用其中最适合 `review` 规则的模型：Claude 订阅 Opus 5.5（CodePanel 召回率 90%），Codex 订阅 Sol 6.1（89%，[E4]）。Argon 与 Carbon 不在其中：它们经 sub2api 的 hakimi 分组接入，Magpie 的额度接口没有这个账号的额度窗口，无法参与比较；Magpie 自己登录的 Antigravity 订阅对 Claude Code 的请求一律回答 Resource has been exhausted（2026-11-12 实测，Opus 5.5 与 Argon 都是，Magpie 说明这与剩余额度无关），验收子代理无法在上面运行"
   },
   "substitutes": [
     {
@@ -458,10 +467,16 @@
             "xhigh",
             "max"
           ]
+        },
+        {
+          "model": "hakimi/gemini-4-carbon-medium",
+          "efforts": [
+            "medium"
+          ]
         }
       ],
       "auto": true,
-      "note": "路由表规定由架构师依据任务和失败证据选择档位；日常任务由诊断建议的档位代替架构师的选择"
+      "note": "路由表规定由架构师依据任务和失败证据选择档位；日常任务由诊断建议的档位代替架构师的选择；Carbon 用 medium 档：FrontierCode 2.0 medium 39.5%、high 40.6%（AA，Astra xhigh 41.4%），Cognition 榜 medium 40.00% 高于 high 37.48%"
     },
     {
       "id": "science-math-alt",
@@ -486,11 +501,33 @@
       "note": "Astra 使用 high 或 max（此前科学规则的档位：Terminal-Bench-Science high 59.5%、max 63.3%），取不低于当前档位的一档；Sol 6.1 取 math-* 规则的强度"
     },
     {
+      "id": "science-extra",
+      "forRules": [
+        "science-compute"
+      ],
+      "options": [
+        {
+          "model": "hakimi/gemini-4-carbon-high",
+          "efforts": [
+            "high"
+          ]
+        }
+      ],
+      "auto": true,
+      "note": "Astra 与 Sol 6.1 之后的科学计算替代：Terminal-Bench-Science Carbon high 64.8%（Astra high 59.5%、max 63.3%），CritPt hard Carbon high 69.0%（Astra high 71.5%）"
+    },
+    {
       "id": "assessment-alt",
       "forRules": [
         "route-assessment"
       ],
       "options": [
+        {
+          "model": "hakimi/gemini-4-carbon-high",
+          "efforts": [
+            "high"
+          ]
+        },
         {
           "model": "claude/claude-opus-5-5",
           "efforts": [
@@ -498,7 +535,8 @@
           ]
         }
       ],
-      "auto": true
+      "auto": true,
+      "note": "AA Intelligence Index：Carbon high 60，Opus 5.5 xhigh 57"
     },
     {
       "id": "review-alt",
@@ -522,6 +560,22 @@
       "auto": true
     },
     {
+      "id": "ops-alt",
+      "forRules": [
+        "machine-ops"
+      ],
+      "options": [
+        {
+          "model": "hakimi/gemini-4-carbon-high",
+          "efforts": [
+            "high"
+          ]
+        }
+      ],
+      "auto": true,
+      "note": "Terminal-Bench 4.0：Carbon high 65.2%，Sonnet 5.5 max 63.6%，Opus 5.5 max 59.6%；66 题，相差在 1 题左右"
+    },
+    {
       "id": "writing-alt",
       "forRules": [
         "explain-write"
@@ -538,6 +592,22 @@
       ],
       "auto": true,
       "note": "Argon 不可用或额度用完时由 Opus 5.5 接手，取不低于当前档位的一档"
+    },
+    {
+      "id": "document-alt",
+      "forRules": [
+        "document-analysis"
+      ],
+      "options": [
+        {
+          "model": "hakimi/gemini-4-carbon-medium",
+          "efforts": [
+            "medium"
+          ]
+        }
+      ],
+      "auto": true,
+      "note": "GDP.pdf：Carbon medium 29.6%（high 28.4%），Sol 6.1 high 32.0%，Fable 5.2 high 21.8%"
     },
     {
       "id": "math-extra",
@@ -592,6 +662,10 @@
         "effort": "high"
       },
       {
+        "model": "hakimi/gemini-4-carbon-high",
+        "effort": "high"
+      },
+      {
         "model": "claude/claude-opus-5-5",
         "effort": "xhigh"
       },
@@ -600,7 +674,7 @@
         "effort": "max"
       }
     ],
-    "evidence": "用户决定（2026-11-11）：边界工作交给综合智能指数最高的三个模型，均匀随机选一个，以便比较哪个模型更适合这类工作。AA Intelligence Index v5.0.1：Mythos 5.2 high 62（max 65）、Opus 5.5 xhigh 57（max 59）、Astra max 57，其后 Sol 6.1 与 Sonnet 5.5 均为 55、Argon high 50；每个模型取达到所列分数的最低一档。2026-10-12–11-11 的 343 次委派（翻译项目与拒答除外）中有 13 次符合条件"
+    "evidence": "用户决定（2026-11-11）：边界工作交给综合智能指数排在前三的模型（并列的都收），均匀随机选一个，以便比较哪个模型更适合这类工作。AA Intelligence Index v5.0.1：Mythos 5.2 high 62（max 65）、Carbon high 60（medium 58）、Opus 5.5 xhigh 57（max 59）与 Astra max 57 并列第三，其后 Sol 6.1 与 Sonnet 5.5 均为 55、Argon high 50；每个模型取达到所列分数的最低一档。2026-10-12–11-11 的 343 次委派（翻译项目与拒答除外）中有 13 次符合条件"
   },
   "ratingPriority": {
     "note": "这些设置在用户自己任务上的结果还没有比较过：code-change 交给 Opus 5.5 的任务，以及 Opus 5.5、Mythos 5.2 判为需要深入推理、起步限在 high 的任务；另外，规则拿不准、按 ambiguous 随机分配的任务也在其中。每天的评分邀请先从这些任务中选",

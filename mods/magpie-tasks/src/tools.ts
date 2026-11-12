@@ -22,7 +22,7 @@ const string = (description: string) => ({ type: 'string', description })
 
 export const TOOL_SPECS: Record<ToolName, { description: string; inputSchema: Record<string, unknown> }> = {
   model_route: {
-    description: 'Delegate a piece of work to a subagent. Jev judges which routing rule fits the brief and whether it needs deep reasoning, and the routing table gives the model and effort. You may recommend a model with a reason (and an effort): Jev weighs your recommendation against the table\'s choice and the table\'s notes on both models, and the table\'s choice stands unless Jev prefers yours. The subagent starts at once in the task worktree and runs in the background; its result reaches you like any background subagent\'s. The answer names the model, effort and why, or why nothing was started.',
+    description: 'Delegate a piece of work to a subagent. Jev judges which routing rule fits the brief and whether it needs deep reasoning, and the routing table gives the model and effort. You may recommend a model with a reason (and an effort): Jev weighs your recommendation against the table\'s choice and the table\'s notes on both models, and the table\'s choice stands unless Jev prefers yours. The subagent starts at once in the task\'s working directory and runs in the background; its result reaches you like any background subagent\'s. The answer names the model, effort and why, or why nothing was started.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -37,7 +37,7 @@ export const TOOL_SPECS: Record<ToolName, { description: string; inputSchema: Re
     },
   },
   task_status: {
-    description: 'Show this long task\'s record: project main directory, task worktree and separate worktrees, each subagent\'s rule, model, effort with the reasons it changed, and state, the blockers (ID, description, diagnoses, model changes) and the open decisions.',
+    description: 'Show this long task\'s record: project main directory, the working directory of each project it changes and separate worktrees, each subagent\'s rule, model, effort with the reasons it changed, and state, the blockers (ID, description, diagnoses, model changes) and the open decisions.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   report_outcome: {
@@ -56,7 +56,7 @@ export const TOOL_SPECS: Record<ToolName, { description: string; inputSchema: Re
     },
   },
   integrate: {
-    description: 'Apply the changes in this task\'s worktree since the last integration to the project main directory (only its working tree: nothing is committed or pushed). Returns the files applied, or the conflicting files and git\'s message, in which case the person is asked on Telegram.',
+    description: 'Bring the change of every project this task changes into its project directory: the changes in a task worktree since the last integration are applied to that project\'s main directory (only its working tree: nothing is committed or pushed), and a change subagents made in a project directory itself is recorded as the result. Returns, for each project, the files applied or recorded, or the conflicting files and git\'s message, in which case the person is asked on Telegram about that project while the others are applied.',
     inputSchema: { type: 'object', properties: { note: string('What is being integrated, in one sentence.') }, additionalProperties: false },
   },
   notify_user: {
@@ -108,7 +108,7 @@ export const TOOL_SPECS: Record<ToolName, { description: string; inputSchema: Re
     },
   },
   open_project: {
-    description: 'Before changing a project for this task, name it here and change files only in the directory this returns (cd there before Bash commands): the project directory itself while no other task changes that project in place, or a Git worktree of it when another task does. Outside Git the task always works in the directory itself.',
+    description: 'Before changing a project for this task, name it here and change that project\'s files only in the directory this returns (cd there before Bash commands): the project directory itself while no other task changes that project in place, or a Git worktree of it when another task does. Outside Git the task always works in the directory itself. A task may change several projects: call this once for each, and the directories returned earlier stay open.',
     inputSchema: {
       type: 'object',
       properties: {

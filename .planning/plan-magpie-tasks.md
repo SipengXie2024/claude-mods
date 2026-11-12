@@ -207,10 +207,11 @@ export interface TaskRecord {
   updatedAt: number
   request: string                       // 第一条消息或日常任务的原始请求
   followUps: { at: number; source: 'telegram' | 'window'; text: string }[]
-  project: { root: string } | null
+  project: { root: string } | null                                                     // 任务修改的第一个项目；下面三个字段是它的工作目录（与 Workspace 同形）
   direct?: { dir: string; baseRef: string | null; baseCommit: string | null } | null   // 直接修改项目目录（第 9.9 节）
   alsoChanged?: { taskId: string; title: string; files: string[]; at: number }[]       // 其他任务在同一目录改过的文件
   worktree: { path: string; baseRef: string; baseCommit: string } | null
+  more?: Workspace[]                                                                   // 任务修改的其余项目，按打开的先后；Workspace = { project, direct?, worktree, alsoChanged? }
   extraWorktrees: Record<string, { path: string; baseRef: string; forAgent: string }>
   owner:
     | { kind: 'session'; sessionId: string; jobShortId?: string; previousSessionIds: string[]; model: string; contextMemoryFingerprint: string }
@@ -332,7 +333,7 @@ export function listAgents(io: Io, opts: Options): Promise<AgentsRow[]>         
 
 // src/gate.ts（E）
 export function architectDeny(e: { tool: string; [k: string]: unknown }, a: { projectRoot: string; home: string; place: (path: string) => Promise<string | null> }): Promise<string | null>
-export function subagentWriteDeny(e: { tool: string; [k: string]: unknown }, a: { worktree: string | null; place: (path: string) => Promise<string | null>; repoOf: (path: string) => Promise<string | null> }): Promise<string | null>
+export function subagentWriteDeny(e: { tool: string; [k: string]: unknown }, a: { dirs: string[]; copies: Record<string, string>; place: (path: string) => Promise<string | null>; repoOf: (path: string) => Promise<string | null> }): Promise<string | null>
 export function isReadOnlyBash(command: string): boolean
 export function isPlanCommand(command: string, projectRoot: string, home: string): boolean
 export function isRecordPath(realPath: string, projectRoot: string): boolean
@@ -379,7 +380,7 @@ export function decideSpawn(a: { e: AgentSpawnInput; origin: string; task: TaskR
 export function onAgentSpawn(ctx: Ctx, e: AgentSpawnInput, next: Next<'agent.spawn'>): Promise<AgentSpawnResult>
 export function onTurnStart(ctx: Ctx, e: TurnStartInput): Promise<void>                    // 第 9.7 节：续接判定
 export function onTurnStep(ctx: Ctx, e: TurnStepInput): Promise<Effort | undefined>        // register.ts 的生成器钩子据此改写 effort
-export function nextEffort(a: { rule: Rule | null; current: Effort; deep: boolean | null; raises: RaiseReason[]; explicit?: Effort }): { effort: Effort; changes: Omit<EffortChange, 'at'>[] }
+export function nextEffort(a: { rule: Rule | null; current: Effort; deep: boolean | null; raises: RaiseReason[]; explicit?: Effort; level?: Effort | null }): { effort: Effort; changes: Omit<EffortChange, 'at'>[] }
 
 // src/daily.ts（F）
 export function relay(ctx: Ctx, req: RelayRequest): Promise<string>                        // 第 9.8 节：启动与唤醒子代理的唯一入口，在调用处直接执行；返回显示在会话中的一行
@@ -562,7 +563,7 @@ export function substituteEffort(rules: Rules, sub: Substitute, model: string, r
 
 `reviewSecondTarget` 的计算：
 
-1. `originals` 是被复核模型的集合（来自说明中的 `[review-of …]`，第 9.6 节），比较前都经过 `model.canonical`，别名与 1M 变体视为同一模型，强度不同也视为同一模型。
+1. `originals` 是被复核模型的集合（来自说明中的 `[review-of …]`，第 9.6 节），用 `model.sameModelAnyProvider` 比较：别名与 1M 变体、强度、模型 ID 末尾的档位（`hakimi/gemini-4-argon-high` 与 `-medium`）和供应商（`antigravity/gemini-4-argon` 与 `hakimi/gemini-4-argon-medium`）都视为同一模型。
 2. 首选：集合中含 Sol 6.1 时为 Opus 5.5，否则为 Sol 6.1。
 3. 候选顺序：首选在前，`order` 中其余模型随后；去掉与集合中任一模型相同的候选，再去掉 `available` 为 false 的候选（Magpie 模型列表中没有）。
 4. 取第一个剩余候选，强度为 `reviewSecond.effort`（medium）；没有剩余候选时返回 `{ none: 说明 }`，由调用方报告用户并等待决定。
@@ -573,7 +574,9 @@ export function substituteEffort(rules: Rules, sub: Substitute, model: string, r
 export interface ModelCatalog { picker: string[]; aliases: Record<string, string>; capabilities: Record<string, Set<string>> }
 export function catalogFrom(flagSettings: unknown): ModelCatalog   // 读取 $.settings.read({ source: 'flag' })
 export function canonical(id: string, cat: ModelCatalog): string    // 去掉 [1m]；opus/sonnet/haiku/fable 别名经 ANTHROPIC_DEFAULT_*_MODEL 解析
-export function sameModel(a: string, b: string, cat: ModelCatalog): boolean
+export function nameLevel(id: string): Effort | null                // 模型 ID 末尾的档位（-low … -max），经 sub2api 接入的 Argon、Carbon 按它运行
+export function sameModel(a: string, b: string, cat: ModelCatalog): boolean            // canonical 相同，不计 ID 末尾的档位
+export function sameModelAnyProvider(a: string, b: string, cat: ModelCatalog): boolean // 再不计供应商前缀，用于 review-second
 export function requestId(id: string, cat: ModelCatalog): string    // picker 中有 `${id}[1m]` 时用它，否则用 id
 export function withRuleModels(cat: ModelCatalog, ruleModels: string[]): ModelCatalog   // session.start 用它把规则文件的模型加进列表
 export function isAvailable(id: string, cat: ModelCatalog): boolean
@@ -599,6 +602,8 @@ Magpie 的列表来自各家服务自己的模型列表，可能晚于已经能�
 | 验收不通过后交回修复 | `raiseOnRule(rule, 上一项结果)`：规则提升顺序中的下一档（没有规则时提高一级） | `acceptance-failed` |
 | 诊断后重新委派同一任务（原代理继续或更换模型） | 同上 | `diagnosis-redelegate` |
 | 每一步 | `clampEffort(model, …)`，最高 max | — |
+
+模型 ID 末尾带档位的模型（`nameLevel` 不为 null，如 `hakimi/gemini-4-carbon-medium`）只按这一档运行：启动强度就是这一档，说明里写的其他强度记在备注中（`startAtLevel`，用于 `decideSpawn` 与 `spawnAgent`）；深入推理与续接不改变它，也不记录；验收不通过和诊断后重新委派仍记一条原因，`from` 与 `to` 都是这一档（`nextEffort` 的 `level`），校准照样计入这次失败。规则文件给这类模型配的强度必须是这一档，`parseRules` 加载时检查。
 
 Opus 5.5 与 Mythos 5.2 的规则判为需要深入推理时也从 high 起步，xhigh、max 只经由上表的提高（验收不通过、诊断后重新委派）或明确指定（路由表第 2.4 节）。`code-change` 的 `hardModel` 只改变模型，不改变强度（第 4.1 节）。
 
@@ -866,7 +871,7 @@ export class Registry {
 
 每轮上下文告诉架构师：验收一个子代理的成果后调用 `report_outcome`（通过、退回修复）；安排诊断或依据诊断重新委派、更换实施模型时同样申报，插件据此提高该子代理下次续接的强度并累计阻碍次数。
 
-子代理的写入范围（`gate.subagentWriteDeny`），对路由过且记录了 `worktree` 的子代理生效：`Edit`/`Write`/`MultiEdit`/`NotebookEdit` 的真实路径位于某个 Git 仓库之内时，必须在该子代理的 `worktree` 之内（任务工作副本，或直接修改的任务的项目目录）；位于仓库之外（例如 `/tmp`）的写入放行。日常任务的执行者在调用 `open_project` 之前写入仓库会被拒绝，理由中要求先调用 `mcp__magpie-tasks__open_project`。`CONTEXT.md` 与 `.planning/findings.md` 在任务的工作目录中也拒绝写入（设计记录由架构师写在主目录）。一个已结束的直接修改任务被续接后，若另一个进行中的任务正在直接修改同一项目，它的文件写入被拒绝，理由要求再次调用 `open_project`，插件随之把它转到工作副本（`leaveIfTaken`）。
+子代理的写入范围（`gate.subagentWriteDeny`），对路由过且记录了 `worktree` 的子代理生效：`Edit`/`Write`/`MultiEdit`/`NotebookEdit` 的真实路径位于某个 Git 仓库之内时，必须在该子代理的写入范围之内（`workspace.writeRange`：它自己的 `worktree`，加上任务其余项目的工作目录，即工作副本或直接修改的项目目录）；位于仓库之外（例如 `/tmp`）的写入放行。写到任务用工作副本修改的那个项目的主目录时，拒绝理由指向工作副本；写到任务还没有打开的仓库时，拒绝理由列出任务现有的工作目录，并要求先对那个仓库调用 `mcp__magpie-tasks__open_project`。日常任务的执行者在调用 `open_project` 之前写入仓库会被拒绝，理由中要求先调用 `mcp__magpie-tasks__open_project`。`CONTEXT.md` 与 `.planning/findings.md` 在任务的工作目录中也拒绝写入（设计记录由架构师写在主目录）。一个已结束的任务被续接后，若另一个进行中的任务正在直接修改它直接修改过的某个项目，它在那个项目目录中的文件写入被拒绝，理由要求再次调用 `open_project`，插件随之把它转到工作副本（`leaveIfTaken`）。
 
 ### 9.6 子代理启动路由（`agent.spawn`）
 
@@ -934,10 +939,11 @@ on('turn.step', async function* ($, e, next) { … })
 
 任务在哪里修改项目（`workspace.ts`，用户 2026-11-12 决定：工作副本只在有并行任务时使用）：
 
-- `placeTask(taskId, root)` 在项目锁（与整合相同的 `project-<fnv1a64(目录)>`）内判断：没有其他进行中（不是 `done` 或 `abandoned`）的任务在直接修改同一目录时，任务直接修改项目目录（`direct`）；在 Git 仓库中同时用 `snapshotBase` 为当时的目录内容做基线提交 `refs/magpie-tasks/<taskId>/base`，用来区分任务自己的改动。已有任务在直接修改时，后来的任务得到工作副本（`createWorktree`，下文）。不是 Git 仓库的目录总是直接修改，`direct.baseRef` 为空，没有差异，任务的改动是子代理用文件工具改过的文件（`filesTouched`）；插件从不建立仓库。
-- `settleDirect(taskId)`：直接修改的任务的结果在项目目录中已经存在，记为整合 `in-place`（文件为基线到当前目录的差异，或文件工具改过的文件），基线移到当前目录内容，下一次只记之后的改动。
+- 一个任务可以修改多个项目（用户 2026-11-12 决定）。任务记录本身是第一个项目的 `Workspace`（`project`、`direct`、`worktree`、`alsoChanged`），其余项目按打开的先后记在 `more` 中，`workspaces(task)` 依次给出全部；项目根总是仓库顶层（不是仓库时为目录本身），同一个项目只记一次。每个项目各自按下面的规则确定直接修改还是工作副本，各自有基线、差异、整合和回收。第 n 个项目（n ≥ 2）的工作副本在 `<worktreeDir>/<taskId>-p<n>`，基线引用为 `refs/magpie-tasks/<taskId>/p<n>/base`，补丁文件为 `tasks/<taskId>.p<n>.patch`（一个任务的两个项目可能共用引用库，例如同一仓库的两个工作副本，所以引用名带序号）。子代理记录的 `worktree` 是它启动和主要工作的目录；它的写入范围由 `writeRange(task, agent)` 给出：自己的 `worktree`，加上任务其余项目的工作目录。
+- `placeTask(taskId, root)` 把任务放到它还没有工作目录的一个项目上（新项目，或工作副本已被回收的项目）。它在任务的放置锁内进行（`placing(reg, taskId, fn)`，锁名 `placement-<taskId>`，先于项目锁取得）：新项目的序号在 Git 操作之前读出、之后写入，没有这把锁，同一任务并行放置的两个项目会取到同一个序号并写进同一项。已在放置锁内的调用方用 `placeLocked`。随后在项目锁（与整合相同的 `project-<fnv1a64(目录)>`）内判断：没有其他进行中（不是 `done` 或 `abandoned`）的任务在直接修改同一目录时，任务直接修改项目目录（`direct`）；在 Git 仓库中同时用 `snapshotBase` 为当时的目录内容做基线提交 `refs/magpie-tasks/<taskId>/base`，用来区分任务自己的改动。已有任务在直接修改时，后来的任务得到工作副本（`createWorktree`，下文）。不是 Git 仓库的目录总是直接修改，`direct.baseRef` 为空，没有差异，任务的改动是子代理用文件工具改过的文件（`filesTouched`）；插件从不建立仓库。
+- `settleDirect(taskId, root)`：任务在项目 `root` 直接修改的结果在项目目录中已经存在，记为整合 `in-place`（文件为基线到当前目录的差异，或文件工具改过的文件），基线移到当前目录内容，下一次只记之后的改动。
 - `noteChange`：一个任务的改动进入某个目录（工作副本整合或 `settleDirect`）后，其他直接修改这个目录的任务在 `alsoChanged` 里记下这些文件；它们的差异统计据此注明哪些文件也被别的任务改过。差异同样会带上用户在这段时间里在项目目录中的修改，验收说明写明这一点。
-- `leaveIfTaken(taskId)`：已结束的直接修改任务被续接时，若另一个进行中的任务正在直接修改同一目录，删除它的基线引用，按当前目录内容建立工作副本，任务转为工作副本模式。
+- `leaveIfTaken(taskId, dir)`：已结束的任务被续接时，若另一个进行中的任务正在直接修改它直接修改过的目录 `dir`，删除它在这个项目的基线引用，按当前目录内容建立工作副本，任务在这个项目转为工作副本模式。
 
 `git.ts`：
 
@@ -990,7 +996,7 @@ export function integrate(io: Io, reg: Registry, a: { taskId: string; repo: stri
 2. `diffSince(source, base)`：在 `source` 中用临时索引得到当前树 `T`，`git diff --binary <base> <T>` 得到补丁与文件列表。补丁为空返回 `empty`。
 3. `git -C <target> apply --binary --check -`（补丁从标准输入传入）。失败返回 `conflict`，`detail` 为 stderr，`files` 为补丁涉及的文件。
 4. 日志 `integration-start`（`target`、`base`、新树 `T`、文件列表），然后 `git -C <target> apply --binary -`：只改工作区，不动用户的索引；成功后 `snapshotCommit(T, parent = base)` 得到新基线，`update-ref` 移动 `baseRef`，下一次整合只应用之后的改动。
-5. 记录 `deliverables[].integration` 与日志 `integration`（与 `integration-start` 用同一个树 `T` 对应）。只有 `integration-start` 没有对应 `integration` 的整合，就是开始了而不知道是否完成的整合（第 9.13 节）。
+5. 写日志 `integration`（与 `integration-start` 用同一个树 `T` 对应）。`integrateTask(taskId)` 对任务的每个项目依次执行：工作副本的项目调用 `integrate`，直接修改的项目调用 `settleDirect`，一个项目冲突不影响其余项目；各项目的结果由 `recordIntegration` 一次写入 `deliverables[].integration`：`parts` 每个项目一项（`root`、`status`、`files`），`status` 与 `files` 是汇总（有冲突为 `conflict`，否则有应用为 `applied`，否则有就地记录为 `in-place`，否则 `empty`；多个项目有文件时 `files` 写绝对路径）。最新的交付物没有整合记录或整合记录含冲突时，新结果按项目并入它，`empty` 不覆盖已带来改动的那一项。只有 `integration-start` 没有对应 `integration` 的整合，就是开始了而不知道是否完成的整合（第 9.13 节）。
 
 项目锁的等待上限是 120 秒，等待用 `wait`（第 7.2 节），在 `tool.call`（`integrate` 工具）与 `turn.complete`（日常任务验收通过）中等待也不会使钩子超时。
 
@@ -1004,14 +1010,14 @@ export function integrate(io: Io, reg: Registry, a: { taskId: string; repo: stri
 
 **执行者的说明。** 第 9.6 节附加的任务规则中包括：
 
-- 需要修改某个项目时，先调用 `mcp__magpie-tasks__open_project { project: <绝对路径> }`，此后只在返回的目录中修改（Bash 先 `cd` 到该目录）：没有其他任务直接修改这个项目时就是项目目录本身，否则是工作副本；不修改项目的任务不需要调用。
+- 需要修改某个项目时，先调用 `mcp__magpie-tasks__open_project { project: <绝对路径> }`，此后只在返回的目录中修改（Bash 先 `cd` 到该目录）：没有其他任务直接修改这个项目时就是项目目录本身，否则是工作副本；修改多个项目的任务对每个项目各调用一次，之前返回的目录继续可写；不修改项目的任务不需要调用。
 - 回答要说本会话里别的任务、工作者或验收正在运行、已经结束或会被打断（例如被重启打断）之前，先调用 `mcp__magpie-tasks__session_agents`，按它当时的回答写；没有调用就不写这类话。子代理启动时会话提醒里的代理名单列的是能收消息的代理，早已交了回答的也在内。
 - 回答末尾的状态行：`状态：已完成`、`状态：需要用户决定` 或 `状态：受阻：<一句话说明阻碍>`。完成时在状态行之前写 `验证：`，每行一条实际运行过的验证命令及结果。
 
 **`open_project` 工具**（执行者调用，`daily.onOpenProject`）：
 
 1. `project` 必须是存在的绝对路径；项目根为它所在仓库的顶层目录，不是仓库时为它自己。
-2. 任务还没有工作目录时按 `placeTask` 确定（第 9.9 节），写入任务的 `project` 与 `direct` 或 `worktree`，该代理记录的 `worktree` 与 `cwd` 同步设置。任务已有工作目录时，不同项目返回错误（一个任务只改一个项目），同一项目先经 `leaveIfTaken` 判断是否转到工作副本，再返回当前目录。
+2. 任务在这个项目还没有工作目录时（任务的新项目，或工作副本已被回收的项目）按 `placeTask` 确定（第 9.9 节），写入这个项目的 `Workspace`（第一个项目写在任务记录上，其余追加到 `more`）；只做检查的角色（验收、诊断、评估）不能为任务打开新项目。任务在这个项目已有工作目录时，先经 `leaveIfTaken` 判断是否转到工作副本，再返回当前目录；项目路径在任务某个工作目录之内时，指的就是那个项目。整个过程（读取任务的项目、判断、放置或转移、更新代理记录）在任务的放置锁内进行，同一个子代理并行发出的几次调用依次处理，对同一个项目的两次调用得到同一个目录。调用的代理还没有 `worktree` 时，这个目录成为它的 `worktree` 与 `cwd`；已有时保持不变，新目录进入它的写入范围。有单独副本的代理打开被复制的那个项目时，得到的是它自己的副本。
 3. 返回目录与说明：直接修改时写明改动立即在项目目录中、验收在之后；工作副本时写明依赖安装、只在此目录修改，以及是哪个任务在直接修改项目。
 
 **`session_agents` 工具**（Router 或架构师的主对话以及它们的子代理调用，`agents.onSessionAgents`）：没有参数。读取 `$.agent.list()`，去掉调用者自己（主对话不在这份列表里），按调用那一刻的状态列出其余每个代理：`pending`、`running`、`waiting` 写为 `RUNNING`，`idle`、`completed`、`failed`、`killed` 写为 `not running`，运行中的排在前面，第一行写出运行中的个数与总数。插件路由过的代理另外写出角色、任务 ID 与标题，以及上一次回答距今多久；执行者和实施子代理还写出上一次回答的状态行，其中 `状态：进行中` 注明它启动的后台工作可能仍在运行。引擎的列表里已经没有、任务仍为 `running` 且上一次回答是 `状态：进行中` 的代理（`st.agents` 中的记录）另列在最后。
@@ -1302,6 +1308,7 @@ U1、U2 是实现方案第 11 节列出的待验证行为；U9 来自官方文�
 | lock | `io-tests/lock.spec.ts` | 两个并发 `withLock` 串行执行；持有者进程被杀后旧锁超过 `staleMs` 被接管；`waitMs` 超时抛出；等待期间调用的是 `io.run(['sleep', …])` 而不是 `io.sleep`（node-io 记录调用）。钩子中长时间等待不超时由场景 E8 的锁等待步骤检查 |
 | registry | `io-tests/registry.spec.ts` | 创建、更新、日志追加；20 个并发 `update` 不丢修改；认领只被取走一次；过期认领清理；索引读写；会话索引随换 ID 更新 |
 | git、integrate | `io-tests/git.spec.ts` | 真实仓库：未提交与未跟踪文件进入工作副本，用户索引不变；整合只应用任务改动并保留用户未提交改动；第二次整合只应用新改动；与用户改动冲突时 `conflict` 且主目录不变；`placeTask` 的直接修改与工作副本两种结果，非仓库目录直接修改且不建立仓库；`settleDirect` 记录改动、移动基线并告知同一目录的其他任务；`leaveIfTaken` 转到工作副本；空仓库（无 HEAD）；二进制文件 |
+| 多个项目 | `io-tests/projects.spec.ts` | 真实仓库与注册表：一个任务经 `open_project` 打开三个项目（工作副本、直接修改、非 Git 目录），写入范围覆盖三个工作目录而项目主目录与未打开的仓库被拒绝；改动与补丁按项目给出；整合按项目进行，一个项目冲突时其余照常，重试后记录补全；任务结束后工作副本被回收而项目保留，再次 `open_project` 重新放置；并行打开的几个项目（`open_project` 与 `placeTask` 各一组，含任务的头几个项目）各占一项登记，序号、工作目录与基线引用一致；同一仓库的两个工作副本作为两个项目时基线引用不冲突 |
 | conflict | `tests/conflict.test.ts` | `touchedPaths`、`porcelainChanged`（`-z` 输出含空格与改名）、`findConflict`、`isCheckCommand` |
 | gate | `tests/gate.test.ts` | 写入白名单的路径（含 `..`、符号链接解析结果、工作副本中的同名文件）；只读 Bash 的放行与拒绝（重定向、`$(…)`、`sed -i`、`find -delete`、`git commit`）；打包与发布命令 |
 | brief | `tests/brief.test.ts` | 标记生成与解析、`[model-reason …]`、`[review-of …]`、`[effort …]`、tg-router 请求头、`requestText`；状态行、验收结论、选模确认、诊断建议的解析（含全角冒号与多余空白） |
@@ -1353,6 +1360,7 @@ start() { tmux new-session -d -s "$1" -x 220 -y 60 "cd $2 && env -u CLAUDECODE -
 | E14 模型不可用（U11） | 对 E3 架构师请求：“按我的指定用模型 `codex/gpt-6-magpie-missing` 委派一个子代理统计 greet.py 的行数，说明中写 `[model-reason user: 测试不可用模型]`” | 启动被接受，选择类型 `user`；插件调试日志记录该子代理的 `StopFailure`（`agent_id` 相同，分类属于不可用集合）与 `reason: error` 的 `turn.complete`；代理记录 `state: 'failed'`、`failure.kind: 'model-unavailable'`；任务有 `model-unavailable` 决定，架构师窗口有一行说明，Telegram 收到问题；没有自动启动接手者 |
 | E15 流程出错 | `mkdir $E/proj3`，其中 `git init`，提交 `a.txt`，再写一个未提交的 `b.txt`；`chmod -R a-w $E/proj3/.git/objects`（基线快照写不进对象库）；`start e15 $E/proj3 claude-magpie`；发送 `检查 a.txt`，在确认对话中选推荐项；结束后 `chmod -R u+w $E/proj3/.git/objects` | 窗格显示 `magpie-tasks 出错（任务 <id>）：…` 的提示与 `Prompt dropped by a hook: magpie-tasks 出错：…`，消息没有交给模型；Telegram 收到含任务 ID 与错误首行的通知；任务记录 `state: 'error'`，`error` 含基线快照失败的原因；`claude agents --json` 中没有新的后台会话；前台窗格仍在运行 |
 | E16 其他代理的状态 | E8 的仓库；`start e16 $E env MAGPIE_TASKS_ROLE=router claude-magpie --model 'claude/claude-opus-5-5[1m]' --plugin-dir ~/sipeng/claude-mods/mods/tg-router`；在窗格输入：(a) 一条让工作者在前台依次运行三次 `python3 -c 'import time; time.sleep(100)'` 的请求，它运行期间再输入 `统计 $E/repo/greet.py 有几行。另外我马上要重启这个 Router 会话，告诉我重启会不会打断别的正在运行的后台任务`；(b) 两个任务都 `done` 之后输入 `统计 $E/repo/greet.py 有几个字符。另外我马上要重启这个 Router 会话，告诉我此刻还有没有别的后台任务在运行` | (a) 第二个任务的工作者调用 `session_agents`，回答把第一个工作者列为 `RUNNING`，第一行的运行个数不为 0。(a) 途中验收不通过时，插件给执行者的消息送达，调试日志没有“没有收到消息”。(b) 工作者再次调用 `session_agents`，回答第一行为 `0 of <n> running`，第一个工作者列为 `not running`。(c) 再输入 `我马上要重启这个 Router 会话，现在重启会不会打断正在运行的后台任务？`：Router 自己调用 `session_agents` 并得到列表 |
+| E17 一个任务改两个仓库 | `$E/repo` 与 `$E/proj2` 各建一个仓库并提交 `greet.py`；`start e17 $E env MAGPIE_TASKS_ROLE=router claude-magpie --model 'claude/claude-opus-5-5[1m]' --plugin-dir ~/sipeng/claude-mods/mods/tg-router`；在窗格输入：`把 $E/repo 和 $E/proj2 这两个仓库里 greet.py 输出的 hello 都改成 hi，各自运行 python3 greet.py 验证` | 一个日常任务；任务记录的 `project` 与 `more` 合起来是这两个仓库，都直接修改，日志中每个仓库一条 `workspace`；第二个仓库有自己的基线引用 `refs/magpie-tasks/<taskId>/p2/base`；任务 `done`，交付物的 `integration.parts` 里两个仓库各有一项 `in-place` 且含 `greet.py`；两个 `greet.py` 都输出 `hi` |
 
 E9 与 E11 需要暂停用户常驻的 `claude-telegram` 并由用户在手机上发消息，开始前另外征得用户同意。全部场景通过后，正式安装 `claude plugin install magpie-tasks@sipeng-mods --scope user`（在 jev 与 subagent-opus 之后），替换 `/home/ubuntu/.local/bin/claude-telegram`，由用户重新启动常驻 Router。
 

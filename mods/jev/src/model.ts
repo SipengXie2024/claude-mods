@@ -19,9 +19,16 @@ export function isArgon(model: string | null): boolean {
   return /(?:^|\/)gemini-4-argon(?:-trial)?(?:\[1m\])?$/i.test(model ?? '')
 }
 
-/** jev/ 网关自行设置推理强度，避免重复判断覆盖它的设置。 */
+/**
+ * A model whose ID ends in a reasoning level (`hakimi/gemini-4-argon-high`, `hakimi/claude-opus-5-5-medium`)
+ * runs at that level whatever effort the request carries: sub2api's Antigravity gateway sets the level
+ * from the model name, so Magpie lists each level as its own model.
+ */
+const LEVEL_IN_NAME = /-(?:minimal|low|medium|high|xhigh|max)(?:\[1m\])?$/i
+
+/** jev/ 网关自行设置推理强度，避免重复判断覆盖它的设置；名字里带档位的模型没有可选的强度。 */
 export function isRoutedModel(model: string): boolean {
-  return !/^jev\//i.test(model) && (/opus|mythos/i.test(model) || openAIModelScale(model) !== null || isArgon(model))
+  return !/^jev\//i.test(model) && !LEVEL_IN_NAME.test(model) && (/opus|mythos/i.test(model) || openAIModelScale(model) !== null || isArgon(model))
 }
 
 /**

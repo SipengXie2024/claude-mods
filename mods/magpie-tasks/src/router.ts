@@ -17,7 +17,7 @@ import { clip, defaultChat, parseChannelTag, send } from './telegram'
 import type { RouterToolName } from './tools'
 import type { Decision, JevJudgment, TaskRecord, TelegramIndex } from './types'
 import type { Rules } from './rules'
-import { workspaceOf } from './workspace'
+import { firstPlaced, pathOf, workspacePaths, workspaces } from './workspace'
 
 type LongAnswer = 'separate' | 'wait' | 'approve' | 'reject' | 'unclear'
 type Tg = { chatId: string; messageId: number }
@@ -206,11 +206,12 @@ export function promotionBrief(task: TaskRecord, a: { worker: string; confirmati
       for (const h of b.history) lines.push(`  ${h.step} (${h.agentId}): ${h.note}`)
     }
   }
-  lines.push('', task.direct != null
-    ? `The task works directly in the project directory ${task.direct.dir}; its subagents keep working there.`
-    : task.worktree !== null
-      ? `Task worktree: ${task.worktree.path}`
-      : 'The task has no project yet: no project was named. Once the person names the project, delegate the work there; magpie-tasks gives the task its working directory.')
+  const placed = workspaces(task).filter(w => pathOf(w) !== null)
+  lines.push('', ...(placed.length === 0
+    ? ['The task has no project yet: no project was named. Once the person names the project, delegate the work there; magpie-tasks gives the task its working directory.']
+    : placed.map(w => (w.worktree !== null
+        ? `Task worktree: ${w.worktree.path}${placed.length > 1 ? ` (of the project ${w.project.root})` : ''}`
+        : `The task works directly in the project directory ${w.direct!.dir}; its subagents keep working there.`))))
   const decisions = Object.values(task.decisions)
   const settled = decisions.filter(d => d.resolvedAt !== undefined)
   const open = decisions.filter(d => d.resolvedAt === undefined)
@@ -430,11 +431,15 @@ async function executorReply(ctx: Ctx, task: TaskRecord, tag: { body: string; im
   return { drop: `magpie-tasks: 任务「${task.title}」的执行者已不在，已告诉用户` }
 }
 
-// The note a daily task's agent reads under the person's words once the task's worktree was removed
-// after the task finished: a change to the project needs a fresh worktree first.
+// The note a daily task's agent reads under the person's words once a worktree of the task was
+// removed after the task finished: a change to that project needs a fresh working directory first.
 export function worktreeGoneNote(task: TaskRecord): string | null {
-  if (task.kind !== 'daily' || task.project === null || task.worktree !== null || task.direct != null) return null
-  return `\n\n[magpie-tasks] This task's worktree was removed when the task finished. If this message asks for changes to ${task.project.root}, call mcp__magpie-tasks__open_project again first; it gives you a working directory of the project as it is now.`
+  if (task.kind !== 'daily') return null
+  const gone = workspaces(task).filter(w => pathOf(w) === null).map(w => w.project.root)
+  if (gone.length === 0) return null
+  return gone.length === 1
+    ? `\n\n[magpie-tasks] This task's worktree was removed when the task finished. If this message asks for changes to ${gone[0]}, call mcp__magpie-tasks__open_project again first; it gives you a working directory of the project as it is now.`
+    : `\n\n[magpie-tasks] This task's worktrees were removed when the task finished. If this message asks for changes to ${gone.join(' or ')}, call mcp__magpie-tasks__open_project for that project again first; it gives you a working directory of the project as it is now.`
 }
 
 // The person's words reached a daily task outside a reply to a decision message: a terminal
@@ -585,8 +590,9 @@ async function promoteTool(ctx: Ctx, args: Record<string, unknown>): Promise<str
     t.state = 'running'
     t.pausedByUser = false
     t.architect = { model: candidate.model, recommendation, userChoice: confirmation, confirmedAt: now, source: 'promoted' }
-  }, { type: 'promote', worker, model: candidate.model, confirmation, workspace: workspaceOf(task) })
-  const workspace = task.direct != null ? { mode: 'direct' as const, path: task.direct.dir } : task.worktree !== null ? { mode: 'worktree' as const, path: task.worktree.path } : null
+  }, { type: 'promote', worker, model: candidate.model, confirmation, workspaces: workspacePaths(task) })
+  const first = firstPlaced(task)
+  const workspace = first === null ? null : { mode: first.worktree !== null ? 'worktree' as const : 'direct' as const, path: pathOf(first)! }
   const message = architectFirstMessage(promotionBrief(promoted, { worker, confirmation }), task.id, workspace)
   const cwd = task.project?.root ?? await home(ctx)
   let shortId: string

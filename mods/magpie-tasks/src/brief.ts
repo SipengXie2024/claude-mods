@@ -6,7 +6,9 @@
 // Briefs are English, as the model reads them; the final-line literals (状态：, 验收结论： …) are the
 // Chinese words the plan fixes, and the person's own words stay as written.
 import type { Rules } from './rules'
-import { EFFORTS, type AgentRecord, type AgentRole, type Blocker, type Effort, type TaskRecord } from './types'
+import { integrationParts } from './integrate'
+import { EFFORTS, type AgentRecord, type AgentReport, type AgentRole, type Blocker, type Effort, type TaskRecord } from './types'
+import { directOf, pathOf, workspaces, writeRange } from './workspace'
 
 export interface MarkerInfo { taskId: string; role: AgentRole; ruleId: string | null; rulesVersion: string; model: string; effort: Effort }
 
@@ -99,19 +101,26 @@ export function requestText(prompt: string): string {
 const STATUS_RULES = [
   '- End every answer with the report lines below. When the task is done, first a line `验证：` followed by one line per verification command you actually ran, each with its result. The last line is exactly one of:',
   '  状态：已完成',
+  '  状态：已停止',
   '  状态：需要用户决定',
   '  状态：受阻：<one sentence naming the obstacle>',
   '  状态：进行中：<the background agent or command this answer waits for>',
+  '- Use `状态：已停止` when the person told you to stop, or to drop the rest of the work: the answer hands back what you have at that point, no acceptance check follows, and the changes you leave are the result, so undo the ones the person no longer wants.',
   '- Use `状态：进行中` only while an agent or command you started in the background is still running and the answer depends on its result: its completion notice resumes you, and you finish the task then. Waiting for your own background work is not 受阻.',
 ]
 
 // What the plugin appends to a brief it routes, by the agent's role. `cwd` is the directory the
 // agent works in, or null when it has none yet (a daily executor before open_project, a check of an
 // answer); `direct` says that `cwd` is the project directory of a task that changes it in place, and
-// whether that is a Git repository.
+// whether that is a Git repository; `also` are the working directories of the task's other projects.
 export const TASK_RULES_LINE = '[magpie-tasks task-rules]'
 
-type Placing = { cwd: string | null; daily: boolean; direct: { git: boolean } | null }
+export type Placing = { cwd: string | null; daily: boolean; direct: { git: boolean } | null; also: string[] }
+
+// The placing of an agent of `task` that starts in `cwd`.
+export function placingOf(task: Omit<TaskRecord, 'owner'>, cwd: string | null): Placing {
+  return { cwd, daily: task.kind === 'daily', direct: directOf(task, cwd), also: writeRange(task, { worktree: cwd }).dirs.slice(1) }
+}
 
 function taskRules(m: MarkerInfo, a: Placing): string[] {
   // The first line opens the block briefForJev cuts off: Jev judges the brief as the delegator wrote it.
@@ -135,17 +144,22 @@ function taskRules(m: MarkerInfo, a: Placing): string[] {
   if (m.role === 'acceptance' || m.role === 'diagnosis') {
     out.push('- Do not edit files; you check and report. Run commands only to inspect or verify.')
     if (a.cwd !== null) out.push(a.direct !== null ? `- The task changed the project directory \`${a.cwd}\` in place (your working directory); run the checks there.` : `- The task worktree is \`${a.cwd}\` (your working directory); run the checks there.`)
+    if (a.also.length > 0) out.push(`- The task works in these directories as well: ${a.also.map(d => `\`${d}\``).join(', ')}.`)
     out.push(noGit)
     return out
   }
+  const another = 'To change another project as well, call `mcp__magpie-tasks__open_project` with its absolute path first and change it in the directory that returns.'
+  const others = a.also.length > 0 ? [`- The task changes these directories as well, each project in its own: ${a.also.map(d => `\`${d}\``).join(', ')}.`] : []
   if (a.cwd !== null && a.direct !== null) {
-    out.push(`- Work in the project directory \`${a.cwd}\` itself: change files there and \`cd\` there before Bash commands that touch the project. Writes to any other path inside a Git repository are refused.`)
+    out.push(`- Work in the project directory \`${a.cwd}\` itself: change files there and \`cd\` there before Bash commands that touch the project. Writes into a Git repository the task has not opened are refused. ${another}`)
     if (!a.direct.git) out.push('- It is not a Git repository, so the plugin keeps no diff: name every file you change in your report.')
+    out.push(...others)
   } else if (a.cwd !== null) {
-    out.push(`- Work only in the task worktree \`${a.cwd}\`: change files there and \`cd\` there before Bash commands that touch the project. Writes to any other path inside a Git repository are refused.`)
+    out.push(`- Work in the task worktree \`${a.cwd}\`: change the project's files there, never in its main directory, and \`cd\` there before Bash commands that touch the project. Writes into a Git repository the task has not opened are refused. ${another}`)
     out.push('- Files Git ignores (node_modules, build output) are not in the worktree; install dependencies there when the work needs them.')
+    out.push(...others)
   } else if (a.daily) {
-    out.push('- If the task changes a project, first call `mcp__magpie-tasks__open_project` with `project` set to the project\'s absolute path, then change files only in the directory it returns (`cd` there before Bash commands): the project directory itself while no other task changes that project in place, or a Git worktree of it when one does. A task that changes no project needs no call.')
+    out.push('- If the task changes a project, first call `mcp__magpie-tasks__open_project` with `project` set to the project\'s absolute path, then change files only in the directory it returns (`cd` there before Bash commands): the project directory itself while no other task changes that project in place, or a Git worktree of it when one does. A task that changes several projects calls it once for each of them; a task that changes no project needs no call.')
   }
   out.push(gitWhenAsked, noRecords, otherAgents, ...STATUS_RULES)
   return out
@@ -260,9 +274,23 @@ function verificationBlock(executor: AgentRecord): string {
   return v.length === 0 ? '(the executor reported no verification command)' : v.map(x => `- ${x}`).join('\n')
 }
 
+// One project's change in a daily task: `path` is the working directory that holds it (`direct`: the
+// project directory itself), `patchPath` the full patch (null outside Git, where `files` are the
+// files the agents edited with the file tools).
+export interface ProjectChange { path: string; direct: boolean; patchPath: string | null; diffStat: string; files: string[] }
+
+// The diff summary of a task's changes for a judge: the one project's as it is, several under
+// their directories; null without a change.
+export function diffStatOf(changes: ProjectChange[]): string | null {
+  if (changes.length === 0) return null
+  return changes.length === 1 ? changes[0]!.diffStat : changes.map(c => `${c.path}:\n${c.diffStat}`).join('')
+}
+
+const IN_PLACE_DIFF = 'Its diff against the task\'s base, taken when the task started or last recorded a result (edits the person made there since show in it too):'
+
 // The acceptance brief: one independent check of a daily task's result (plan section 9.11).
-// `change` is null for a task that changed no project files.
-export function acceptanceBrief(task: TaskRecord, executor: AgentRecord, change: { patchPath: string | null; diffStat: string } | null): string {
+// `changes` is empty for a task that changed no project files.
+export function acceptanceBrief(task: TaskRecord, executor: AgentRecord, changes: ProjectChange[]): string {
   const lines = [
     `You are the acceptance reviewer for a daily task (${task.title}). Check the executor's result once, independently, against the person's request. Do not fix anything.`,
     '',
@@ -275,19 +303,28 @@ export function acceptanceBrief(task: TaskRecord, executor: AgentRecord, change:
     verificationBlock(executor),
     '',
   ]
-  if (change !== null) {
-    const direct = task.direct ?? null
-    if (direct === null && task.worktree === null) throw new Error(`acceptanceBrief: task ${task.id} has a change but no working directory`)
-    if (direct !== null) {
-      lines.push(
-        `The executor changed the project directory \`${direct.dir}\` in place; it is your working directory. ${change.patchPath === null ? 'The change:' : 'Its diff against the task\'s base, taken when the task started or last recorded a result (edits the person made there since show in it too):'}`,
-        change.diffStat.trimEnd(),
-      )
+  const patch = (c: ProjectChange) => (c.patchPath === null ? [] : [`The full patch is \`${c.patchPath}\`.`])
+  if (changes.length === 1) {
+    const c = changes[0]!
+    if (c.direct) {
+      lines.push(`The executor changed the project directory \`${c.path}\` in place; it is your working directory. ${c.patchPath === null ? 'The change:' : IN_PLACE_DIFF}`, c.diffStat.trimEnd())
     } else {
-      lines.push(`The change is in the task worktree \`${task.worktree!.path}\`, your working directory. Its diff against the task's base:`, change.diffStat.trimEnd())
+      lines.push(`The change is in the task worktree \`${c.path}\`, your working directory. Its diff against the task's base:`, c.diffStat.trimEnd())
     }
-    if (change.patchPath !== null) lines.push(`The full patch is \`${change.patchPath}\`.`)
-    lines.push('Rerun the reported verification commands there, check that the result does what the request asks, and check that the change stays within what the request asks for.')
+    lines.push(...patch(c), 'Rerun the reported verification commands there, check that the result does what the request asks, and check that the change stays within what the request asks for.')
+  } else if (changes.length > 1) {
+    lines.push(`The executor changed ${changes.length} projects. The first directory below is your working directory.`)
+    for (const c of changes) {
+      lines.push(
+        '',
+        c.direct
+          ? `The project directory \`${c.path}\`, changed in place. ${c.patchPath === null ? 'The change:' : IN_PLACE_DIFF}`
+          : `The task worktree \`${c.path}\`. Its diff against the task's base:`,
+        c.diffStat.trimEnd(),
+        ...patch(c),
+      )
+    }
+    lines.push('', 'Rerun the reported verification commands in the directories they belong to, check that the result does what the request asks in every project, and check that each change stays within what the request asks for.')
   } else {
     lines.push(
       'There is no change to integrate: the task changed no project files.',
@@ -304,14 +341,18 @@ export function acceptanceBrief(task: TaskRecord, executor: AgentRecord, change:
 }
 
 // The diagnosis brief: an independent look at why the executor is blocked (plan section 9.11).
-export function diagnosisBrief(task: TaskRecord, executor: AgentRecord, blocker: Blocker, diffStat: string | null): string {
+export function diagnosisBrief(task: TaskRecord, executor: AgentRecord, blocker: Blocker, changes: ProjectChange[]): string {
   const reports = executor.reports.length === 0
     ? ['(none)']
     : executor.reports.map((r, i) => `Report ${i + 1} (${r.status}):\n${r.text}`)
-  const ws = task.worktree?.path ?? task.direct?.dir ?? null
-  const where = ws === null
+  const placed = workspaces(task).filter(w => pathOf(w) !== null)
+  const where = placed.length === 0
     ? 'The task has no working directory: the executor changed no project files.'
-    : `${task.worktree !== null ? 'The task worktree is' : 'The executor works directly in the project directory'} \`${ws}\`. Its change since the task's base:\n${diffStat === null ? '(no change)' : diffStat.trimEnd()}`
+    : placed.map(w => {
+        const ws = pathOf(w)!
+        const diffStat = changes.find(c => c.path === ws)?.diffStat
+        return `${w.worktree !== null ? 'The task worktree is' : 'The executor works directly in the project directory'} \`${ws}\`. Its change since the task's base:\n${diffStat === undefined ? '(no change)' : diffStat.trimEnd()}`
+      }).join('\n\n')
   return [
     `You are an independent diagnosis for a daily task (${task.title}) whose executor reports that it is blocked. Find out why, from the evidence; do not do the task yourself.`,
     '',
@@ -339,11 +380,12 @@ export function handoffBrief(task: TaskRecord, a: { reason: string; previous: Ag
   const reports = p.reports.length === 0
     ? ['(none)']
     : p.reports.map((r, i) => `Report ${i + 1} (${r.status}):\n${r.text}`)
-  const where = task.worktree !== null
-    ? `The task worktree \`${task.worktree.path}\` holds the previous agent's changes so far; continue there.`
-    : task.direct != null
-      ? `The previous agent worked directly in the project directory \`${task.direct.dir}\`; its changes so far are there. Continue there.`
-      : 'The task has no working directory yet.'
+  const placed = workspaces(task).filter(w => pathOf(w) !== null)
+  const where = placed.length === 0
+    ? 'The task has no working directory yet.'
+    : placed.map(w => (w.worktree !== null
+        ? `The task worktree \`${w.worktree.path}\` holds the previous agent's changes so far; continue there.`
+        : `The previous agent worked directly in the project directory \`${w.direct!.dir}\`; its changes so far are there. Continue there.`)).join('\n')
   return [
     `You take over a daily task (${task.title}) from agent ${p.name ?? p.agentId} (${p.model} at effort ${p.effort}): ${a.reason}`,
     '',
@@ -375,15 +417,16 @@ const STATUS_LINE = new RegExp(`^\\s*[*_\`]*状态\\s*${COLON}\\s*(.+?)[*_\`]*\\
 const VERIFY_LINE = new RegExp(`^\\s*[*_\`]*验证\\s*${COLON}[*_\`]*\\s*(.*?)\\s*$`)
 
 // The executor's status line, and the verification lines of the `验证：` block before it.
-export function parseStatus(answer: string): { status: 'done' | 'needs-user' | 'blocked' | 'working'; blocker?: string; verification: string[] } | null {
+export function parseStatus(answer: string): { status: Exclude<AgentReport['status'], 'missing'>; blocker?: string; verification: string[] } | null {
   const lines = answer.split(/\r?\n/)
   for (let i = lines.length - 1; i >= 0; i--) {
     const m = STATUS_LINE.exec(lines[i]!)
     if (!m) continue
     const value = m[1]!.trim()
-    let status: 'done' | 'needs-user' | 'blocked' | 'working'
+    let status: Exclude<AgentReport['status'], 'missing'>
     let blocker: string | undefined
     if (value === '已完成') status = 'done'
+    else if (value === '已停止') status = 'stopped'
     else if (value === '需要用户决定') status = 'needs-user'
     else if (new RegExp(`^进行中\\s*${COLON}\\s*\\S`).test(value)) status = 'working'
     else {
@@ -420,29 +463,67 @@ export const OUTCOME_NOTE = '[magpie-tasks note]'
 // What became of the executor's last result, when it has not been told of that yet: `key` names the
 // outcome, `text` is the line. Null when there is nothing to tell: no result, a failed acceptance
 // the executor was woken with, or an answer that needed no check and left no change.
-export function outcomeNote(task: Pick<TaskRecord, 'deliverables' | 'decisions' | 'project'>): { key: string; text: string } | null {
+export function outcomeNote(task: Pick<TaskRecord, 'deliverables' | 'decisions' | 'project' | 'more'>): { key: string; text: string } | null {
   const d = task.deliverables[task.deliverables.length - 1]
   if (d === undefined) return null
-  const root = task.project?.root ?? 'the project main directory'
   const a = d.acceptance
   const i = d.integration === undefined || d.integration.status === 'empty' ? undefined : d.integration
-  const how = a === undefined ? 'needed no acceptance check' : a.pass ? 'passed the acceptance check' : i?.status === 'in-place' ? 'failed the acceptance check, and your fix was not checked again' : 'failed the acceptance check, and the person approved your fix'
+  const parts = integrationParts(task, i).filter(p => p.status !== 'empty')
+  const how = a === undefined ? (d.stopped === true ? 'was not checked, since you stopped at the person\'s word' : 'needed no acceptance check') : a.pass ? 'passed the acceptance check' : i?.status === 'in-place' ? 'failed the acceptance check, and your fix was not checked again' : 'failed the acceptance check, and the person approved your fix'
   let out: { key: string; text: string } | null = null
-  if (i?.status === 'in-place') {
-    out = { key: 'in-place', text: `Your last result ${how}; its change stays in ${root}, where you made it: ${i.files.join(', ')}. Commit or push there only when the person asks.` }
-  } else if (i?.status === 'applied') {
-    out = { key: 'applied', text: `Your last result ${how}, and its change was applied to ${root}: ${i.files.join(', ')}. Commit or push there only when the person asks.` }
-  } else if (i?.status === 'conflict') {
-    out = { key: 'conflict', text: `Your last result ${how}, but its change could not be applied to ${root}: it conflicts with the project's current files (${i.files.join(', ')}). The person has been asked what to do; the change stays in the task worktree.` }
+  if (parts.length === 1) {
+    const { root, status, files } = parts[0]!
+    if (status === 'in-place') {
+      out = { key: 'in-place', text: `Your last result ${how}; its change stays in ${root}, where you made it: ${files.join(', ')}. Commit or push there only when the person asks.` }
+    } else if (status === 'applied') {
+      out = { key: 'applied', text: `Your last result ${how}, and its change was applied to ${root}: ${files.join(', ')}. Commit or push there only when the person asks.` }
+    } else {
+      out = { key: 'conflict', text: `Your last result ${how}, but its change could not be applied to ${root}: it conflicts with the project's current files (${files.join(', ')}). The person has been asked what to do; the change stays in the task worktree.` }
+    }
+  } else if (parts.length > 1) {
+    // The projects whose part ended one way, each with its files.
+    const where = (status: string) => parts.filter(p => p.status === status).map(p => `${p.root} (${p.files.join(', ')})`).join('; ')
+    const reached = [
+      ...(where('in-place') !== '' ? [`its change stays where you made it in ${where('in-place')}`] : []),
+      ...(where('applied') !== '' ? [`its change was applied to ${where('applied')}`] : []),
+    ].join(', and ')
+    out = i!.status === 'conflict'
+      ? { key: 'conflict', text: `Your last result ${how}, but its change could not be applied to ${where('conflict')}: it conflicts with the current files there. The person has been asked what to do; that change stays in the task worktree.${reached !== '' ? ` Elsewhere ${reached}.` : ''}` }
+      : { key: i!.status, text: `Your last result ${how}; ${reached}. Commit or push there only when the person asks.` }
   } else if (a?.pass === true) {
     out = { key: 'passed', text: 'Your last result passed the acceptance check. It left no change to apply.' }
   } else if (a?.fixed?.decisionId !== undefined) {
     const q = task.decisions[a.fixed.decisionId]
-    if (q?.resolvedAt === undefined) out = { key: 'fix-asked', text: `Your fixed change is not applied yet: the person has been asked whether to integrate it into ${root}. It stays in the task worktree until they answer.` }
+    const roots = [task.project, ...(task.more ?? []).map(w => w.project)].flatMap(p => (p === null ? [] : [p.root])).join(', ') || 'the project main directory'
+    if (q?.resolvedAt === undefined) out = { key: 'fix-asked', text: `Your fixed change is not applied yet: the person has been asked whether to integrate it into ${roots}. It stays in the task worktree until they answer.` }
     else if (q.answer?.startsWith('reject') === true) out = { key: 'fix-declined', text: 'The person declined to integrate your fixed change; it stays in the task worktree.' }
   }
   if (out === null || out.key === d.told) return null
   return { key: out.key, text: `${OUTCOME_NOTE} ${out.text} This line is from the task plugin, not from the person, and needs no reply.` }
+}
+
+// Whether an executor of the task went back to work after the result recorded at `at`: a message
+// reached it (the person wrote to it, told it to stop, or interrupted the turn that message started),
+// or another executor took the task over.
+export function resumedSince(task: Pick<TaskRecord, 'agents'>, at: number): boolean {
+  return Object.values(task.agents).some(a => a.role === 'executor' && Math.max(a.turnAt ?? 0, a.startedAt) > at)
+}
+
+// Where the result recorded at `at` stands: its place among the task's deliverables, and whether the
+// task has moved past it (a later result, or an executor that went back to work after it). Whatever
+// was started for a superseded result (the judgment whether to check it, its acceptance) acts on
+// nothing: the person has already acted on that result.
+export function resultStanding(task: Pick<TaskRecord, 'id' | 'deliverables' | 'agents'>, at: number): { index: number; superseded: boolean } {
+  const index = task.deliverables.findIndex(d => d.at === at)
+  if (index < 0) throw new Error(`task ${task.id}: no result at ${at} is on record`)
+  return { index, superseded: index < task.deliverables.length - 1 || resumedSince(task, at) }
+}
+
+// The deliverable an acceptance agent checks, the one its brief was written from (`checks`), and
+// where it stands.
+export function checkedDeliverable(task: Pick<TaskRecord, 'id' | 'deliverables' | 'agents'>, acceptance: Pick<AgentRecord, 'agentId' | 'checks'>): { index: number; superseded: boolean } {
+  if (acceptance.checks === undefined) throw new Error(`task ${task.id}: acceptance ${acceptance.agentId} names no result it checks`)
+  return resultStanding(task, acceptance.checks)
 }
 
 // A message without the note withOutcome added to it.

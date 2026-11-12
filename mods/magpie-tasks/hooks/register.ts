@@ -232,7 +232,7 @@ export const register: Register = (on, options) => {
       ).then(async () => {
         if (role === 'router') {
           await recoverRouter(c).then(
-            res => io.log(`router recovery: checks rerun ${res.rerun.join(',') || '-'}; asked ${res.asked.join(',') || '-'}`),
+            res => io.log(`router recovery: checks rerun ${res.rerun.join(',') || '-'}; integrated ${res.integrated.join(',') || '-'}; asked ${res.asked.join(',') || '-'}`),
             (err: unknown) => reportFlowError(c, null, errorLine(err), 'Router restart recovery'),
           )
         }

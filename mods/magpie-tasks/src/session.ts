@@ -14,8 +14,8 @@ import { projectTrusted, trustProject } from './trust'
 import type { Ctx, PromptResult } from './state'
 import { defaultChat, send } from './telegram'
 import { registerTools } from './tools'
-import type { Role, SessionState, TaskRecord } from './types'
-import { placementLine, placeTask, previewPlacement, projectDir } from './workspace'
+import type { Role, SessionState, TaskRecord, Workspace } from './types'
+import { placementLine, placeTask, previewPlacement, projectDir, workspaces } from './workspace'
 
 const TAKEOVER_CLAIM_MS = 2 * 60_000
 const EXIT_DELAY_MS = 1500
@@ -529,20 +529,27 @@ export async function claimTakeover(ctx: Ctx): Promise<TaskRecord | 'failed' | n
 
 export function architectContext(task: TaskRecord, opts: { worktreeDir: string }): string {
   const root = task.project?.root ?? '(none)'
-  const direct = task.direct ?? null
-  const wt = task.worktree?.path ?? null
-  const where = direct !== null
-    ? `Implementation subagents work directly in the project directory ${direct.dir}${direct.baseRef === null ? ' (not a Git repository: the plugin keeps no diff, only the files they edit with the file tools)' : `; their change since the last record is git -C ${direct.dir} diff ${direct.baseRef}`}.`
-    : wt !== null
-      ? `Task worktree: ${wt} (another task changes the project directory in place); implementation subagents work there, and you read their changes there by absolute path (for example git -C ${wt} diff).`
-      : `The task has no working directory yet (worktrees go under ${opts.worktreeDir}).`
+  const whereOf = (w: Workspace): string | null => {
+    const direct = w.direct ?? null
+    const wt = w.worktree?.path ?? null
+    return direct !== null
+      ? `Implementation subagents work directly in the project directory ${direct.dir}${direct.baseRef === null ? ' (not a Git repository: the plugin keeps no diff, only the files they edit with the file tools)' : `; their change since the last record is git -C ${direct.dir} diff ${direct.baseRef}`}.`
+      : wt !== null
+        ? `Task worktree: ${wt} (another task changes the project directory in place); implementation subagents work there, and you read their changes there by absolute path (for example git -C ${wt} diff).`
+        : null
+  }
+  const [first, ...more] = workspaces(task)
   const lines = [
-    `[magpie-tasks] You are the architect of long task ${task.id} "${task.title}". Project main directory: ${root}. ${where}`,
+    `[magpie-tasks] You are the architect of long task ${task.id} "${task.title}". Project main directory: ${root}. ${(first === undefined ? null : whereOf(first)) ?? `The task has no working directory yet (worktrees go under ${opts.worktreeDir}).`}`,
   ]
+  for (const w of more) {
+    const where = whereOf(w)
+    if (where !== null) lines.push(`The task also changes the project ${w.project.root}. ${where}`)
+  }
   const extra = Object.entries(task.extraWorktrees)
   if (extra.length > 0) lines.push(`Separate worktrees: ${extra.map(([agentId, x]) => `${agentId}: ${x.path}`).join('; ')}.`)
   lines.push(
-    'You write only .planning/findings.md, CONTEXT.md, .planning/plan-*.md and .planning/*.html in the project main directory, and Bash runs only read-only commands and the html-plan pack and publish-plan commands. Delegate implementation, builds and tests to subagents with the Agent tool. After you accept a result, mcp__magpie-tasks__integrate applies a task worktree\'s changes to the project main directory, or records the change subagents made there directly; when the person asks for a commit or a push, run git add, git commit and git push there yourself, never in a task worktree.',
+    'You write only .planning/findings.md, CONTEXT.md, .planning/plan-*.md and .planning/*.html in the project main directory, and Bash runs only read-only commands and the html-plan pack and publish-plan commands. Delegate implementation, builds and tests to subagents with the Agent tool; a subagent whose work changes another project as well opens it with mcp__magpie-tasks__open_project, and the task then changes that project too. After you accept a result, mcp__magpie-tasks__integrate brings the change of every project of the task into its project directory: a task worktree\'s changes are applied there, and a change subagents made there directly is recorded; when the person asks for a commit or a push, run git add, git commit and git push there yourself, never in a task worktree.',
     'Delegation: delegate each piece of work with mcp__magpie-tasks__model_route (description, and the full brief as prompt). Jev judges which routing rule fits and whether the work needs deep reasoning, and the routing table gives the model and effort. When you think another model suits the work better, add recommended_model (a Magpie model ID), reason (the concrete evidence) and, if you like, recommended_effort; Jev weighs your recommendation against the table\'s choice and its notes on both models, and the table\'s choice stands unless Jev prefers yours. The subagent starts in the task\'s working directory and runs in the background. When the person names a model, delegate with the Agent tool and put "[model <Magpie model ID>]" and "[model-reason user: <the person\'s words>]" on their own lines in the brief, with "[effort <low|medium|high|xhigh|max>]" when no rule gives its effort. For a second review by a different model, put "[review-of agent=<agentId>]" or "[review-of model=<id>,<id>]" in the brief.',
     'After checking a subagent\'s result, call mcp__magpie-tasks__report_outcome: accepted, or rejected (it goes back for fixes). Report diagnosis, diagnosis-redelegate and model-change too, with blocker_id: the ID of an existing blocker (mcp__magpie-tasks__task_status lists them) for the same problem, or new with a one-sentence blocker only for a different problem. The plugin raises that subagent\'s effort on its next run and counts diagnoses and model changes per blocker; a second one for the same blocker is refused, and you then pause that work and discuss it with the person.',
     'mcp__magpie-tasks__notify_user reaches the person on Telegram: kind decision for what they must decide, result for a finished part, done when the whole task is finished (the task closes; this session is stopped after ten idle minutes and the worktree removed; their next message reopens it); ordinary progress is not sent. mcp__magpie-tasks__resolve_conflict answers a file-conflict question (separate or wait). Keep progress in context-memory\'s notes_write and lasting findings in .planning/findings.md.',

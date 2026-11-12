@@ -63,7 +63,7 @@ test('repoOfWith finds the repository of existing and new paths, and none outsid
 test('a subagent write is judged at the real path, through links and missing directories', async () => {
   const place = placeWith(p => io.realPath(p), outside)
   const repoOf = repoOfWith(io)
-  const sub = (e: { tool: string; [k: string]: unknown }, worktree: string | null) => subagentWriteDeny(e, { worktree, place, repoOf })
+  const sub = (e: { tool: string; [k: string]: unknown }, worktree: string | null) => subagentWriteDeny(e, { dirs: worktree === null ? [] : [worktree], copies: worktree === null ? {} : { [project]: worktree }, place, repoOf })
   // No working directory yet: a write into the project asks for open_project, naming the project.
   const before = await sub({ tool: 'Write', file_path: join(project, 'src', 'b.ts') }, null)
   expect(before).toContain('mcp__magpie-tasks__open_project')

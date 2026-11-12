@@ -65,13 +65,13 @@ const info: MarkerInfo = { taskId: 'd-20261109-k3x9q2', role: 'executor', ruleId
 
 test('the marker round-trips, matches the JEV skip pattern, and briefForJev strips it', () => {
   const m = marker(info)
-  expect(m).toBe('[magpie-tasks task=d-20261109-k3x9q2 role=executor rule=code-change rules=routing-rules.v7 model=claude/claude-opus-5-5 effort=xhigh]')
+  expect(m).toBe('[magpie-tasks task=d-20261109-k3x9q2 role=executor rule=code-change rules=routing-rules.v8 model=claude/claude-opus-5-5 effort=xhigh]')
   expect(parseMarker(m)).toEqual(info)
   expect(parseMarker(marker({ ...info, ruleId: null }))!.ruleId).toBe(null)
   // JEV's MAGPIE_TASKS_MARKER (plan section 10.2)
   expect(/^\[magpie-tasks task=[^\]\s]+[^\]\n]*\]/.test(m)).toBe(true)
   const brief = jevSpawnScheduler.request.input[0]!.content
-  const routed = withRouting(brief, info, { cwd: '/home/ubuntu/.local/share/magpie-tasks/worktrees/d-20261109-k3x9q2', daily: false, direct: null })
+  const routed = withRouting(brief, info, { cwd: '/home/ubuntu/.local/share/magpie-tasks/worktrees/d-20261109-k3x9q2', daily: false, direct: null, also: [] })
   expect(routed.split('\n')[0]).toBe(m)
   expect(parseMarker(routed)).toEqual(info)
   // Jev reads the brief as delegated: no marker, no appended task rules.
@@ -81,34 +81,42 @@ test('the marker round-trips, matches the JEV skip pattern, and briefForJev stri
 
 test('withRouting replaces a marker already at the start and keeps the brief whole', () => {
   const brief = jevSpawnScheduler.request.input[0]!.content
-  const once = withRouting(brief, info, { cwd: null, daily: true, direct: null })
-  const twice = withRouting(once, { ...info, effort: 'max' }, { cwd: null, daily: true, direct: null })
+  const once = withRouting(brief, info, { cwd: null, daily: true, direct: null, also: [] })
+  const twice = withRouting(once, { ...info, effort: 'max' }, { cwd: null, daily: true, direct: null, also: [] })
   expect(twice.split('\n')[0]).toBe(marker({ ...info, effort: 'max' }))
   expect(twice.match(/\[magpie-tasks task=/g)!.length).toBe(1)
   expect(twice.includes(brief)).toBe(true)
   expect(once.includes('mcp__magpie-tasks__open_project')).toBe(true)
   expect(once.includes('If open_project gave you a worktree, never commit there')).toBe(true)
-  const long = withRouting(brief, info, { cwd: '/w/l-1', daily: false, direct: null })
+  const long = withRouting(brief, info, { cwd: '/w/l-1', daily: false, direct: null, also: [] })
   // Every agent that works on a task is told to ask for the other agents' state before speaking of it.
   for (const routed of [once, long]) expect(routed.includes('- Before an answer says that another task, worker or check of this session is running, has finished, or would be cut off (by a restart, for one), call `mcp__magpie-tasks__session_agents`')).toBe(true)
-  expect(withRouting(brief, { ...info, role: 'acceptance' }, { cwd: '/w/l-1', daily: true, direct: null }).includes('session_agents')).toBe(false)
-  expect(long.includes('mcp__magpie-tasks__open_project')).toBe(false)
+  expect(withRouting(brief, { ...info, role: 'acceptance' }, { cwd: '/w/l-1', daily: true, direct: null, also: [] }).includes('session_agents')).toBe(false)
+  // An agent that starts in a working directory opens a further project the same way.
+  expect(long.includes('To change another project as well, call `mcp__magpie-tasks__open_project` with its absolute path first')).toBe(true)
+  expect(once.includes('A task that changes several projects calls it once for each of them')).toBe(true)
   expect(long.includes('`/w/l-1`')).toBe(true)
   expect(long.includes('- Commit and push when the person asks for it, in the project main directory and never in the task worktree')).toBe(true)
   // A task that changes the project directory in place works there and commits there when asked.
-  const direct = withRouting(brief, info, { cwd: '/home/u/repo', daily: true, direct: { git: true } })
+  const direct = withRouting(brief, info, { cwd: '/home/u/repo', daily: true, direct: { git: true }, also: [] })
   expect(direct.includes('- Work in the project directory `/home/u/repo` itself')).toBe(true)
   expect(direct.includes('- Commit and push only when the person asks for it, in the project directory.')).toBe(true)
   expect(direct.includes('worktree')).toBe(false)
-  const plain = withRouting(brief, info, { cwd: '/home/u/notes', daily: true, direct: { git: false } })
+  expect(direct.includes('To change another project as well, call `mcp__magpie-tasks__open_project` with its absolute path first')).toBe(true)
+  // An agent of a task that changes several projects is told the other working directories.
+  const several = withRouting(brief, info, { cwd: '/home/u/repo', daily: true, direct: { git: true }, also: ['/w/d-1-p2', '/home/u/notes'] })
+  expect(several.includes('- The task changes these directories as well, each project in its own: `/w/d-1-p2`, `/home/u/notes`.')).toBe(true)
+  expect(direct.includes('The task changes these directories as well')).toBe(false)
+  expect(withRouting(brief, { ...info, role: 'acceptance' }, { cwd: '/w/l-1', daily: true, direct: null, also: ['/home/u/notes'] }).includes('- The task works in these directories as well: `/home/u/notes`.')).toBe(true)
+  const plain = withRouting(brief, info, { cwd: '/home/u/notes', daily: true, direct: { git: false }, also: [] })
   expect(plain.includes('It is not a Git repository, so the plugin keeps no diff: name every file you change in your report.')).toBe(true)
   for (const routed of [once, long, direct, plain]) for (const line of ['状态：已完成', '状态：需要用户决定', '状态：进行中：', '验证：']) expect(routed.includes(line)).toBe(true)
   for (const routed of [once, long, direct, plain]) expect(routed.includes('Do not commit')).toBe(false)
-  const check = withRouting(brief, { ...info, role: 'acceptance' }, { cwd: '/w/l-1', daily: false, direct: null })
+  const check = withRouting(brief, { ...info, role: 'acceptance' }, { cwd: '/w/l-1', daily: false, direct: null, also: [] })
   expect(check.includes('- Do not commit, push, create branches, stash or reset; you only check.')).toBe(true)
-  const checkDirect = withRouting(brief, { ...info, role: 'acceptance' }, { cwd: '/home/u/repo', daily: true, direct: { git: true } })
+  const checkDirect = withRouting(brief, { ...info, role: 'acceptance' }, { cwd: '/home/u/repo', daily: true, direct: { git: true }, also: [] })
   expect(checkDirect.includes('- The task changed the project directory `/home/u/repo` in place (your working directory); run the checks there.')).toBe(true)
-  const assess = withRouting(brief, { ...info, role: 'assessment' }, { cwd: null, daily: true, direct: null })
+  const assess = withRouting(brief, { ...info, role: 'assessment' }, { cwd: null, daily: true, direct: null, also: [] })
   expect(assess.includes('状态：已完成')).toBe(false)
 })
 
@@ -153,6 +161,9 @@ test('status lines: done with its verification block, blocked with its reason', 
   expect(blocked.verification).toEqual(['`python3 -m pytest -q /tmp/f-gen/work` → 失败：`No module named pytest`', '`ls -a /tmp/f-gen/work` → 只有 `greet.py`，没有测试文件'])
   expect(parseStatus(asciiColons(text('executorBlocked')))!.blocker).toBe('系统 Python 没有安装 pytest，而且 `/tmp/f-gen/work` 里没有任何测试文件。')
   expect(parseStatus(text('executorDone').replace('状态：已完成', '状态：需要用户决定'))).toEqual({ ...done, status: 'needs-user' })
+  // Stopped at the person's word: the answer is the result, and no acceptance check follows.
+  expect(parseStatus(text('executorDone').replace('状态：已完成', '状态：已停止'))).toEqual({ ...done, status: 'stopped' })
+  expect(parseStatus(asciiColons(text('executorDone')).replace('已完成', '已停止'))!.status).toBe('stopped')
   expect(parseStatus(text('acceptancePass'))).toBe(null)
   expect(parseStatus(text('executorDone').replace('状态：已完成', '状态：受阻：'))).toBe(null)
   // An executor waiting for its own background agent: no acceptance, no diagnosis.
@@ -261,4 +272,13 @@ test('the note comes off a message it was added to, and nothing else does', () =
   expect(stripOutcomeNote(`提交吧\n\n${note}`)).toBe('提交吧')
   expect(stripOutcomeNote('提交吧')).toBe('提交吧')
   expect(stripOutcomeNote(`${OUTCOME_NOTE} 是什么意思？\n\n第二段`)).toBe(`${OUTCOME_NOTE} 是什么意思？\n\n第二段`)
+})
+
+test('a stopped result is told as unchecked because the person stopped it, and the stop status is in the task rules', () => {
+  const applied = { status: 'applied' as const, files: ['greet.py'], at: 3 }
+  expect(told({ ...result, stopped: true, integration: applied })!.text).toContain('Your last result was not checked, since you stopped at the person\'s word, and its change was applied to /home/u/repo: greet.py.')
+  expect(told({ ...result, stopped: true })).toBeNull()
+  const brief = withRouting('统计行数', { taskId: 'd-1', role: 'executor', ruleId: null, rulesVersion: 'v', model: 'm', effort: 'low' } satisfies MarkerInfo, { cwd: null, daily: true, direct: null, also: [] })
+  expect(brief.includes('  状态：已停止\n')).toBe(true)
+  expect(brief.includes('- Use `状态：已停止` when the person told you to stop')).toBe(true)
 })

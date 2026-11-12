@@ -1,6 +1,6 @@
 # 模型路由表
 
-资料日期：2026-11-10。规则日期：2026-11-11。适用于通过 Magpie 使用 Claude 与 Codex 模型的任务设计。
+资料日期：2026-11-10，Gemini 4 Carbon 的资料 2026-11-12。规则日期：2026-11-12。适用于通过 Magpie 使用 Claude、Codex 与 Gemini 模型的任务设计。
 
 这份表格给出模型选择建议、适用条件和验收方式。magpie-tasks 按它的规则文件 `mods/magpie-tasks/rules/routing-rules.json` 为子代理选择模型与思考强度。目标是优先保证任务完成质量；质量相近时，再考虑等待与额度消耗。
 
@@ -53,9 +53,9 @@
 | `daily-default` | 日常请求没有匹配的执行规则 | 执行子代理 | **Opus 5.5 / medium** | 按任务说明完成，报告实际运行的验证及结果 | 用户决定（2026-11-10）：没有匹配规则的日常请求多为一次性查询与简单操作，直接由一般任务的默认模型执行，不再评估与确认；起步 medium 与 JEV 给 Opus 5.5 操作类任务的起步档位一致；没有针对这类任务的评测 |
 | `review-second` | 委派说明写明要用不同模型复核或诊断，并用 [review-of …] 给出被复核的代理或模型 | 审查或诊断子代理 | 原模型为 **Sol 6.1** 时推荐 **Opus 5.5 / medium**；其他情况推荐 **Sol 6.1 / medium** | 先排除原模型，再检查候选是否适合任务；直接核查原始材料与证据 | [E4]；模型组合的额外收益仍需个人任务证据，普通任务不自动增加复核代理 |
 
-`review-second` 的候选依次为首选（见上表）、Opus 5.5、Sol 6.1、Argon，强度都是 medium；CodePanel 以 medium 测试每个模型，Argon 的缺陷捕获率 82%（71–92%）与 Opus 5.5 的 90%（81–97%）区间重叠，误报更少（[E4]、[E15]）。`review-second` 比较解析后的具体模型标识；别名和 effort 的变化仍视为同一模型。推荐候选必须满足任务能力与接口要求，并且当前可用。候选不满足要求时，按已有替代规则选择符合条件的其他模型；没有符合条件的候选时向用户报告并等待决定。涉及多个原模型时，排除本次明确要求独立复核的模型集合。
+`review-second` 的候选依次为首选（见上表）、Opus 5.5、Sol 6.1、Argon，强度都是 medium，Argon 用 medium 档的模型 `hakimi/gemini-4-argon-medium`；CodePanel 以 medium 测试每个模型，Argon 的缺陷捕获率 82%（71–92%）与 Opus 5.5 的 90%（81–97%）区间重叠，误报更少（[E4]、[E15]）。`review-second` 比较的是模型本身：别名、effort、模型 ID 末尾的档位和接入它的供应商都不区分，例如 `hakimi/gemini-4-argon-high` 与 `hakimi/gemini-4-argon-medium` 是同一个模型，`antigravity/gemini-4-argon` 与它们也是同一个模型。推荐候选必须满足任务能力与接口要求，并且当前可用。候选不满足要求时，按已有替代规则选择符合条件的其他模型；没有符合条件的候选时向用户报告并等待决定。涉及多个原模型时，排除本次明确要求独立复核的模型集合。
 
-日常任务的验收子代理不固定使用 `review` 规则的 Opus 5.5：每次开始验收时，插件从 Magpie 读取各订阅的额度，选每周额度剩余比例最高的订阅，再用这个订阅中审查最合适的模型，强度仍按 `review` 规则。Claude 订阅用 Opus 5.5，Codex 订阅用 Sol 6.1，CodePanel 召回率分别为 90% 与 89%（[E4]）。某个订阅的 5 小时窗口或每周窗口已经用完时排在最后，比例相同时 Claude 订阅在前。这是用户的决定（2026-11-12），目的是减少 Anthropic 订阅的消耗。Antigravity 不在其中：2026-11-12 实测它对 Claude Code 的请求一律回答 Resource has been exhausted，Opus 5.5 与 Argon 都是如此，Magpie 说明这与剩余额度无关，验收子代理无法在上面运行。规则文件中对应 `acceptance` 一节。
+日常任务的验收子代理不固定使用 `review` 规则的 Opus 5.5：每次开始验收时，插件从 Magpie 读取各订阅的额度，选每周额度剩余比例最高的订阅，再用这个订阅中审查最合适的模型，强度仍按 `review` 规则。Claude 订阅用 Opus 5.5，Codex 订阅用 Sol 6.1，CodePanel 召回率分别为 90% 与 89%（[E4]）。某个订阅的 5 小时窗口或每周窗口已经用完时排在最后，比例相同时 Claude 订阅在前。这是用户的决定（2026-11-12），目的是减少 Anthropic 订阅的消耗。Argon 与 Carbon 不在其中：它们经 sub2api 的 `hakimi` 分组接入，Magpie 的额度接口没有这个账号的额度窗口，无法参与比较；Magpie 自己登录的 Antigravity 订阅对 Claude Code 的请求一律回答 Resource has been exhausted（2026-11-12 实测，Opus 5.5 与 Argon 都是如此，Magpie 说明这与剩余额度无关），验收子代理无法在上面运行。规则文件中对应 `acceptance` 一节。
 
 ### 2.2 常见工作
 
@@ -70,7 +70,7 @@
 | `web-research` | 上网收集资料、数据或测评成绩，并标明出处 | 研究子代理 | **Opus 5.5 / medium** | 每项资料有可访问的出处与访问日期，数字与原文一致 | [E16]、[E2]；待校准：LiveBench research Astra 85.2、Opus 5.5 85.0、Sonnet 5.5 83.6、Sol 6.1 83.5，前四名相差不到 2 分；BrowseComp 只有 OpenAI 自家模型的成绩；AA-Briefcase 知识交付 Sonnet 5.5 max 1813、Opus 1800 |
 | `machine-ops` | 在机器上查询状态、配置环境、修复构建或运行测量实验 | 执行子代理 | **Sonnet 5.5 / max** | 命令实际成功，最终环境或程序状态符合要求；测量保留命令与原始输出 | [E2]、[E12]；AA Terminal-Bench 4.0 Sonnet 5.5 max 63.6%（xhigh 57.1%、high 43.9%），Opus 5.5 high 56.6%、max 59.6%，Fable 5.2 xhigh 61.6%；Sonnet 5.5 只在 max 领先 |
 | `batch-judge` | 按同一套标准逐条判断、标注、评分或选择参数 | 执行子代理 | **Opus 5.5 / medium** | 每条结果符合给定标准，抽查结果一致；标准不清的条目单独列出 | 待校准：没有对应测评；用默认模型起步，按评分调整 |
-| `explain-write` | 依据已有材料写笔记、讲解、说明或报告 | 写作子代理 | **Argon / high** | 用户能理解，结论忠于材料，关键条件与数字保留 | [E3]、[E15]；Arena Text 总榜 Argon high 1522±5（Opus 5.5 1506±6），中文与专家分榜分数更高但在误差范围内；Argon 只有 low、medium、high 三档；主对话已有固定模型时保持原模型 |
+| `explain-write` | 依据已有材料写笔记、讲解、说明或报告 | 写作子代理 | **Argon high / high** | 用户能理解，结论忠于材料，关键条件与数字保留 | [E3]、[E15]、[E18]；Arena Text 总榜 Argon high 1522±5（Opus 5.5 1506±6），中文与专家分榜分数更高但在误差范围内；Carbon high 1526±10，三项都与 Argon 区间重叠；Argon 经 sub2api 接入，档位由模型名决定，规则用 high 档，不再提升；主对话已有固定模型时保持原模型 |
 | `document-analysis` | 阅读论文、PDF、多份材料或表格，核对数字与论断的出处 | 研究子代理 | **Sol 6.1 / high** | 关键结论能追溯原文，数字与引用经过核对，冲突来源得到说明 | [E2]；文档推理直接相关；开放网络搜索质量需要另外验证 |
 | `visual-build` | 制作网页、幻灯片、动画或视频画面等需要视觉呈现的成果 | 实施子代理 | **Opus 5.5 / high** | 检查真实页面或渲染结果，同时验证内容、布局和功能 | [E8]；设计偏好测评，用户使用的具体制作工具可能不同 |
 | `translation` | 按术语表和翻译规范批量翻译文本 | 执行子代理 | **Opus 5.5 / medium** | 术语与格式符合规范，抽查译文忠实原文；无法翻译的条目单独列出 | 待校准：没有翻译测评；这类工作此前由 DeepSeek-V4.1-Flash 运行，没有经过 Magpie |
@@ -94,7 +94,7 @@ Mythos 5.2 与 Fable 5.2 是同一个模型，区别只在安全限制（[E13]�
 
 ### 2.4 起步、深入与提升的档位
 
-每条规则写明三项：起步档位；Jev 判断需要深入推理时的起步档位；验收不通过或诊断后重新委派时依次提升的档位。Opus 5.5 与 Mythos 5.2 判为需要深入推理时也从 high 起步，xhigh、max 只在验收不通过、诊断后重新委派，或用户与架构师指定时使用：high 之后提升很小或下降，Opus 5.5 在 Terminal-Bench 4.0 上 high 56.6%、xhigh 59.6%、max 59.6%，Fable 5.2（与 Mythos 5.2 同一模型，[E13]）在 FrontierCode 2.0 上 high 49.1%、xhigh 47.6%、max 48.8%（[E12]）；本仓库的运行记录中，同一次运行从 high 提到 xhigh 后每条回复长约 1.3 倍，同一概率段里用 xhigh 的运行耗时中位数是 high 的 2 到 4.6 倍（[E17]）。`code-change` 按 Jev 的深入推理概率分模型：达到规则文件的 `thresholds.hardYes`（0.95）时交给 Mythos 5.2，其余交给 Opus 5.5，两者都从 high 起步。短的编程题 Opus 5.5 更好，长时间、大仓库的工作 Mythos 5.2 更好（[E9]、[E13]、[E14]）；概率达到 0.95 的委派运行规模最大，判为 code-change 的委派中同样如此（[E17]）。其他规则没有按任务大小区分模型的测评，不按概率分模型。Jev 调用失败、由评估模型代为判断时没有概率，`code-change` 交给 Opus 5.5。提升顺序只列有证据表明有用的档位。Mythos 5.2 的科学计算提升时跳过 xhigh：Terminal-Bench-Science 上 high 70.0%、xhigh 67.6%、max 73.3%（[E12]）。Sol 6.1 的文档材料核对深入时不提高：GDP.pdf 上 high 32.0%、xhigh 31.8%、max 31.0%（[E12]）。Sonnet 5.5 的机器操作只用 max：Terminal-Bench 4.0 上 high 43.9%、xhigh 57.1%、max 63.6%（[E12]）。Argon 只有 low、medium、high 三档，写作规则停在 high。其他规则没有逐档证据，按相邻档位依次提升。判断“需要深入推理”的门槛与 JEV 共用一个值，即 JEV 配置中的 `JEV_OPUS_DEEP_YES`。
+每条规则写明三项：起步档位；Jev 判断需要深入推理时的起步档位；验收不通过或诊断后重新委派时依次提升的档位。Opus 5.5 与 Mythos 5.2 判为需要深入推理时也从 high 起步，xhigh、max 只在验收不通过、诊断后重新委派，或用户与架构师指定时使用：high 之后提升很小或下降，Opus 5.5 在 Terminal-Bench 4.0 上 high 56.6%、xhigh 59.6%、max 59.6%，Fable 5.2（与 Mythos 5.2 同一模型，[E13]）在 FrontierCode 2.0 上 high 49.1%、xhigh 47.6%、max 48.8%（[E12]）；本仓库的运行记录中，同一次运行从 high 提到 xhigh 后每条回复长约 1.3 倍，同一概率段里用 xhigh 的运行耗时中位数是 high 的 2 到 4.6 倍（[E17]）。`code-change` 按 Jev 的深入推理概率分模型：达到规则文件的 `thresholds.hardYes`（0.95）时交给 Mythos 5.2，其余交给 Opus 5.5，两者都从 high 起步。短的编程题 Opus 5.5 更好，长时间、大仓库的工作 Mythos 5.2 更好（[E9]、[E13]、[E14]）；概率达到 0.95 的委派运行规模最大，判为 code-change 的委派中同样如此（[E17]）。其他规则没有按任务大小区分模型的测评，不按概率分模型。Jev 调用失败、由评估模型代为判断时没有概率，`code-change` 交给 Opus 5.5。提升顺序只列有证据表明有用的档位。Mythos 5.2 的科学计算提升时跳过 xhigh：Terminal-Bench-Science 上 high 70.0%、xhigh 67.6%、max 73.3%（[E12]）。Sol 6.1 的文档材料核对深入时不提高：GDP.pdf 上 high 32.0%、xhigh 31.8%、max 31.0%（[E12]）。Sonnet 5.5 的机器操作只用 max：Terminal-Bench 4.0 上 high 43.9%、xhigh 57.1%、max 63.6%（[E12]）。经 sub2api 接入的 Argon 与 Carbon 由模型 ID 末尾的档位决定强度（如 `hakimi/gemini-4-carbon-medium`），请求里的强度不起作用：这类模型的子代理从这一档起步，深入推理、续接、验收不通过和诊断后重新委派都不改变它；后两种情况照常记下原因，记录里的强度保持这一档。规则文件给这类模型配的强度只能是 ID 里的档位，插件加载规则时检查。写作规则因此停在 high。其他规则没有逐档证据，按相邻档位依次提升。判断“需要深入推理”的门槛与 JEV 共用一个值，即 JEV 配置中的 `JEV_OPUS_DEEP_YES`。
 
 | 规则 | 起步 | 深入时 | 提升顺序 |
 | --- | --- | --- | --- |
@@ -123,10 +123,12 @@ Mythos 5.2 与 Fable 5.2 是同一个模型，区别只在安全限制（[E13]�
 
 | 情况 | 可考虑的模型 | 使用条件 |
 | --- | --- | --- |
-| 仓库实施（`code-change`）的模型需要替代 | 先换同一规则的另一个模型（Opus 5.5 与 Mythos 5.2 互为替代），其次 Astra xhigh / max | 规则写明的两个模型可以自动互换，取规则提升顺序中不低于起步与当前档位的一档；Astra 同样具备真实仓库修改测评支持（[E1]），取不低于当前档位的一档，由架构师依据任务和失败证据调整 |
-| Mythos 5.2 的科学计算需要替代模型 | Astra high / max | Terminal-Bench-Science high 59.5%、max 63.3%（[E2]）；取不低于当前档位的一档 |
-| 选模评估需要替代模型 | Opus 5.5 xhigh | 综合分析能力的间接依据（[E1]、[E3]） |
-| Argon 的写作讲解需要替代模型 | Opus 5.5 high / xhigh / max | Arena Text 中文与专家分榜与 Argon 在误差范围内（[E3]、[E15]）；Argon 不可用或 Google AI Pro 额度用完时自动接手，取不低于当前档位的一档 |
+| 仓库实施（`code-change`）的模型需要替代 | 先换同一规则的另一个模型（Opus 5.5 与 Mythos 5.2 互为替代），其次 Astra xhigh / max，再次 Carbon medium | 规则写明的两个模型可以自动互换，取规则提升顺序中不低于起步与当前档位的一档；Astra 同样具备真实仓库修改测评支持（[E1]），取不低于当前档位的一档，由架构师依据任务和失败证据调整；Carbon 的 AA FrontierCode 2.0 medium 39.5%、high 40.6%（Astra xhigh 41.4%），Cognition 榜 medium 40.00% 高于 high 37.48%，所以用 medium（[E18]） |
+| Mythos 5.2 的科学计算需要替代模型 | Astra high / max，其次 Carbon high | Terminal-Bench-Science Astra high 59.5%、max 63.3%（[E2]），取不低于当前档位的一档；Carbon high 64.8%，CritPt hard 69.0%（Astra high 71.5%）（[E18]） |
+| 选模评估需要替代模型 | Carbon high，其次 Opus 5.5 xhigh | 与首选 Mythos 5.2 同一依据：AA Intelligence Index Carbon high 60、Opus 5.5 xhigh 57（[E12]、[E18]） |
+| Sonnet 5.5 的机器操作需要替代模型 | Carbon high | Terminal-Bench 4.0 Carbon high 65.2%、Sonnet 5.5 max 63.6%、Opus 5.5 max 59.6%；66 题，差距在 1 题左右，不足以替换首选（[E12]、[E18]） |
+| Sol 6.1 的文档材料核对需要替代模型 | Carbon medium | GDP.pdf Carbon medium 29.6%（high 28.4%），Sol 6.1 high 32.0%，Fable 5.2 high 21.8%（[E12]、[E18]） |
+| Argon 的写作讲解需要替代模型 | Opus 5.5 high / xhigh / max | Arena Text 中文与专家分榜与 Argon 在误差范围内（[E3]、[E15]）；Argon 不可用或 hakimi 账号的额度用完时自动接手，取不低于当前档位的一档；Carbon 与 Argon 用同一个账号的额度，不作为写作替代 |
 | 数学求解需要替代模型 | Astra max 或 Sol 6.1 | 重新核对是数学答案求解还是其他工作；Sol 6.1 档位依照数学规则 |
 | 普通独立审查需要另一名实施者 | Opus 5.5 medium 或 Sol 6.1 medium | 两者都有直接审查证据；不把更换模型等同于问题已经解决 |
 | 长时间自主执行、目标包含连续变化的子问题 | Mythos 5.2 high | 保留为专门候选；LiveBench long-agentic 82.9（Opus 5.5 72.8，[E14]），官方 Remote Labor Index high 41.3%（[E13]）；官方建议长时间无人值守任务用 high |
@@ -143,7 +145,7 @@ Telegram Router 使用 Opus 5.5，思考强度由 JEV 逐条判断。公开测�
 3. **选能完成整个委派的模型。** 实现与验证通常留在同一子代理中；能够独立验收的调查、资料核对等成果才单独委派。
 4. **记录匹配理由。** 一项任务可以同时需要代码、数学、文档理解；Jev 的判断应保留这些需求，而非只留下一个大类名称。
 5. **信息不足时补充任务说明。** 能从代码或任务记录核实的事实直接核实；缺少用户目标或关键约束时再询问用户。长期任务没有适用规则时，架构师补充任务条件后重新委派，或通过 `model_route` 推荐模型、effort 与理由，由 Jev 判断推荐是否适合这项任务。日常请求没有适用规则时，按 `daily-default` 交给 Opus 5.5 执行。
-6. **落在两条规则边界上的工作随机交给综合能力最强的三个模型。** Jev 的首选规则置信度低于 `ruleConfidence`，而概率最高的两项都是规则、两条规则给出的模型不同时，这项工作横跨两类，专项测评定不了谁更合适。插件从 Mythos 5.2 high、Opus 5.5 xhigh、Astra max 中均匀随机选一个（规则文件的 `ambiguous`；依据 AA Intelligence Index v5.0.1：Mythos 5.2 high 62、Opus 5.5 xhigh 57、Astra max 57，其后 Sol 6.1 与 Sonnet 5.5 55、Argon high 50），记录为 `ambiguous`，以便用评分比较三个模型在这类工作上的表现（用户决定，2026-11-11）。两项中有一项是“无规则”、或两条规则用同一个模型时，仍按上一条处理。
+6. **落在两条规则边界上的工作随机交给综合能力排前三的模型（并列的都收）。** Jev 的首选规则置信度低于 `ruleConfidence`，而概率最高的两项都是规则、两条规则给出的模型不同时，这项工作横跨两类，专项测评定不了谁更合适。插件从 Mythos 5.2 high、Carbon high、Opus 5.5 xhigh、Astra max 中均匀随机选一个（规则文件的 `ambiguous`；依据 AA Intelligence Index v5.0.1：Mythos 5.2 high 62、Carbon high 60，Opus 5.5 xhigh 57 与 Astra max 57 并列第三，其后 Sol 6.1 与 Sonnet 5.5 55、Argon high 50），记录为 `ambiguous`，以便用评分比较这几个模型在这类工作上的表现（用户决定，2026-11-11）。两项中有一项是“无规则”、或两条规则用同一个模型时，仍按上一条处理。
 
 ## 5. 所有规则共同遵循的约定
 
@@ -177,7 +179,7 @@ Telegram Router 使用 Opus 5.5，思考强度由 JEV 逐条判断。公开测�
 | 可取得的 token、缓存、耗时和订阅用量信息 | 分别观察消耗，保留各自计量口径 |
 | 关键设计决定与模型更换原因 | 检查架构师是否遵守约束，避免把整体结果简单归给某个子代理 |
 
-每两周检查时，还按 Jev 的深入推理概率分三段（低于 0.85、0.85–0.95、0.95 以上），按规则、模型和起步档位统计任务数、验收不通过或诊断后提高强度的次数和更换模型的次数。同一格 14 天内有 3 个任务需要提高或换模型时，提醒用户考虑把这一段的起步提高一档；`code-change` 交给 Opus 5.5 的 0.85–0.95 段出现这种情况时，提醒用户考虑把 `hardYes` 往下调。提醒同时列出每一格的计数，零次提高的格子供用户判断起步是否偏高。规则文件的 `ratingPriority` 列出结果还没有在用户任务上比较过的设置：`code-change` 交给 Opus 5.5 的任务，以及 Opus 5.5、Mythos 5.2 判为需要深入推理、起步限在 high 的任务；每天的评分邀请先从这些任务中选；按第 4 节第 6 条随机分配的边界工作也优先邀请评分。每次检查还累计列出边界工作中每个被选模型的任务数、评分数与平均分、提高强度次数和更换模型次数；三个模型都有至少 3 个评过分的任务时，即使没有其他发现也提醒用户比较。
+每两周检查时，还按 Jev 的深入推理概率分三段（低于 0.85、0.85–0.95、0.95 以上），按规则、模型和起步档位统计任务数、验收不通过或诊断后提高强度的次数和更换模型的次数。同一格 14 天内有 3 个任务需要提高或换模型时，提醒用户考虑把这一段的起步提高一档；`code-change` 交给 Opus 5.5 的 0.85–0.95 段出现这种情况时，提醒用户考虑把 `hardYes` 往下调。提醒同时列出每一格的计数，零次提高的格子供用户判断起步是否偏高。规则文件的 `ratingPriority` 列出结果还没有在用户任务上比较过的设置：`code-change` 交给 Opus 5.5 的任务，以及 Opus 5.5、Mythos 5.2 判为需要深入推理、起步限在 high 的任务；每天的评分邀请先从这些任务中选；按第 4 节第 6 条随机分配的边界工作也优先邀请评分。每次检查还累计列出边界工作中每个被选模型的任务数、评分数与平均分、提高强度次数和更换模型次数；每个被选模型都有至少 3 个评过分的任务时，即使没有其他发现也提醒用户比较。
 
 每两周检查一次记录。有具体任务证据支持调整讨论时，通过 Telegram 提醒用户并展示案例；用户可以随时主动发起校准。规则调整由用户参与确认。缺少评价的任务保留为“用户尚未评价”。额外模型对比实验需要单独确定执行范围。
 
@@ -198,10 +200,11 @@ Telegram Router 使用 Opus 5.5，思考强度由 JEV 逐条判断。公开测�
 | [E11] | Terra 6.1 官方 Agents’ Last Exam medium 表现接近 Astra，并有视觉与电脑操作改进。 | 厂商测评；文字说明没有提供足以在用户环境中复现优势的全部条件。 |
 | [E12] | AA v5.0.1 Fable 5.2 逐档（low / medium / high / xhigh / max）：Intelligence Index 54 / 56 / 62 / 62 / 65；FrontierCode 2.0 38.4 / 41.3 / 49.1 / 47.6 / 48.8；Terminal-Bench 4.0 54.5 / 55.1 / 59.6 / 61.6 / 59.6；Terminal-Bench-Science 53.8 / 60.5 / 70.0 / 67.6 / 73.3；CritPt hard 60.0 / 61.5 / 73.0 / 73.5 / 76.5；AA-Briefcase 1563 / 1622 / 1677 / 1738 / 1785；GDP.pdf 26.8 / 23.8 / 21.8 / 21.4 / 24.2。对照：Opus 5.5 FrontierCode xhigh 43.8、max 46.4；Astra Terminal-Bench-Science high 59.5、max 63.3；Sonnet 5.5 Terminal-Bench max 63.6、Briefcase max 1813；Sol 6.1 GDP.pdf high 32.0。Terminal-Bench 4.0 逐档：Sonnet 5.5 high 43.9 / xhigh 57.1 / max 63.6，Opus 5.5 high 56.6 / xhigh 59.6 / max 59.6。 | AA 统一测试环境；AA 没有测 Mythos 5.2。只有 Briefcase 与 GDPval 给出置信区间。每题成本 Fable 5.2 high 约为 Opus 5.5 xhigh 的 1.5 倍（FrontierCode 9.64 对 6.49 美元）。 |
 | [E13] | Anthropic Fable/Mythos 5.2 发布资料与系统卡：两者“share the same underlying model and differ only in the safeguards”；FrontierCode 2.0 xhigh 49.1%（Opus 5.5 45.5%）；FrontierSWE v2 69.9%（Opus 62.3%）；Terminal-Bench-Science 74.6%（Mythos 75.3%，Astra 68.1%）；OSWorld 2.1 89.3%（Opus 87.2%）；Remote Labor Index high 41.3%（Opus 21.3%）；ProgramBench 不显示剩余上下文时 Opus 5.5 91.2%、Fable 5.2 85.6%，显示后 91.1%、91.6%。 | 厂商测评，Fable 5.2、Opus 5.5 带安全限制运行；对照模型的分数与公开榜单不完全一致（Opus Terminal-Bench-Science 58.7% 对公开榜 63.3%）。 |
-| [E15] | Gemini 4 Argon（high）：Arena Text 总榜 1522±5（Opus 5.5 1506±6），中文 1584±16（Opus 1567±17），专家 1548±14（Opus 1544±16）；CodePanel 捕获率 82%（71–92%），误报每个干净 PR 1.1（Opus 1.7）；AA Intelligence Index 50；FrontierCode 2.0 low / medium / high 21.5% / 23.5% / 26.3%（Cognition）；DesignArena 胜率 43.9%（Opus 74.0%）；MathArena ArXivMath 8–10 月 84.39%±4.65%。 | Argon 经 Google AI Pro 的 Antigravity 接入（Magpie 返回 `gemini-4-argon-trial`），只有 low、medium、high 三档；逐档数据只有 FrontierCode 与 AutomationBench；同系列的 Gemini 4 Carbon 只开放给少数网络安全机构，本账号请求返回 404。 |
+| [E15] | Gemini 4 Argon（high）：Arena Text 总榜 1522±5（Opus 5.5 1506±6），中文 1584±16（Opus 1567±17），专家 1548±14（Opus 1544±16）；CodePanel 捕获率 82%（71–92%），误报每个干净 PR 1.1（Opus 1.7）；AA Intelligence Index 50；FrontierCode 2.0 low / medium / high 21.5% / 23.5% / 26.3%（Cognition）；DesignArena 胜率 43.9%（Opus 74.0%）；MathArena ArXivMath 8–10 月 84.39%±4.65%。 | Argon 只有 low、medium、high 三档，逐档数据只有 FrontierCode 与 AutomationBench。规则经 sub2api 的 `hakimi` 分组（Google AI Ultra 账号）使用 Argon：sub2api 按模型名定档位，Magpie 里每一档是一个模型 ID（`hakimi/gemini-4-argon-high` 等）。 |
 | [E14] | LiveBench 2026-11-06 版 coding：Opus 5.5 87.1、Fable 5.2 79.2；long-agentic 见 [E9]。 | 没有置信区间与档位信息；coding 分项为较短的编程题，不等同于真实仓库修改。 |
 | [E16] | LiveBench 2026-10-25 版 research：Astra 85.2、Opus 5.5 85.0、Sonnet 5.5 83.6、Sol 6.1 83.5；data_analysis：Astra 83.0、Sol 6.1 82.7、Terra 6.1 82.3、Fable 5.1 80.3、Opus 5.5 80.3。 | 单次运行的分项均分，没有置信区间与档位信息；research 分项不等同于开放网络的资料收集。 |
 | [E17] | 本仓库 2026-11-10 统计 2026-10-10 至 11-10 的 233 件子代理委派的运行记录（`findings.md`，同日的 Measurement 条目）：Jev 深入推理概率低于 0.5 的委派中位数产出 3k token、运行 6.0 分钟，0.95 以上为 28k token、12.3 分钟；概率与产出量的等级相关 0.33，与每条回复长度 0.33（委派说明字数分别为 0.39、0.26）；同一次运行从 high 提到 xhigh 后每条回复长约 1.3 倍（19 次运行的中位数）；Opus 5.5 在概率 0.5–0.95 与 0.95 以上两段，用 xhigh 的运行耗时中位数为 23.4、25.8 分钟，用 high 的为 5.1、12.5 分钟；判为 code-change 的 20 件中，概率达到 0.95 的 10 件中位数产出 142k token、运行 84 分钟，其余 10 件为 21k token、31 分钟。 | 只有运行规模与耗时，没有结果质量；强度由当时的委派者选择，较难的任务更可能被给了 xhigh。 |
+| [E18] | Gemini 4 Carbon，AA v5.0.1 逐档（low / medium / high）：Intelligence Index 54 / 58 / 60；FrontierCode 2.0 29.6 / 39.5 / 40.6；Terminal-Bench 4.0 62.6 / 60.6 / 65.2；Terminal-Bench-Science 61.9 / 62.4 / 64.8；CritPt hard 65.0 / 69.0 / 69.0；GDP.pdf 28.6 / 29.6 / 28.4。Cognition FrontierCode 2.0 low / medium / high 31.88% / 40.00% / 37.48%。Arena Text（High）总榜 1526±10、中文 1585±30、专家 1568±30。DesignArena Overall Agentic 1303（Opus 5.5 high 1440）。LiveBench 2026-11-06 版 browser 80.0（Terra 6.1 93.1）、coding 91.0（Opus 5.5 87.1）。 | 2026-11-10 起向 Google AI Ultra 订阅开放（Antigravity），Gemini API 推荐的默认档位是 medium；规则经 sub2api 的 `hakimi` 分组使用，每一档是一个 Magpie 模型 ID。AA 的这些分项没有区间；CodePanel 与 MathArena 没有收录 Carbon。Google 的网络安全测评成绩只在 Fairwind 渠道取得，其他渠道加强了网络安全滥用防护。AA、Cognition 与 Arena 的数值取自 `research/model-routing-2026-11-10/gemini/`，其余为 2026-11-12 访问的页面。 |
 
 本表保留实际测评中的小差距和不确定性，不把公开排名直接写成用户任务上的成功保证。API 标价、benchmark 每任务费用和订阅额度分别记录。
 
@@ -218,7 +221,10 @@ Telegram Router 使用 Opus 5.5，思考强度由 JEV 逐条判断。公开测�
 | Terra 6.1 | `codex/gpt-6.1-terra` |
 | Luna 6 | `codex/gpt-6-luna` |
 | Sol 6 | `codex/gpt-6-sol` |
-| Argon | `antigravity/gemini-4-argon` |
+| Argon high | `hakimi/gemini-4-argon-high` |
+| Argon medium | `hakimi/gemini-4-argon-medium` |
+| Carbon high | `hakimi/gemini-4-carbon-high` |
+| Carbon medium | `hakimi/gemini-4-carbon-medium` |
 
 [E1]: https://artificialanalysis.ai/models/releases/comparisons/claude-opus-5-5-vs-gpt-6-astra
 [E2]: model-routing-benchmark-report.md
@@ -237,3 +243,4 @@ Telegram Router 使用 Opus 5.5，思考强度由 JEV 逐条判断。公开测�
 [E15]: https://arena.ai/leaderboard/chat/text
 [E16]: https://livebench.ai/
 [E17]: findings.md
+[E18]: https://artificialanalysis.ai/models/gemini-4-carbon

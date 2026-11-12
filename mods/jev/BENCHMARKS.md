@@ -87,4 +87,6 @@ Argon 只有 low、medium、high 三档，Google 的默认档位是 medium；请
 
 Arena Text（总榜 1522±5，高于 Opus 5.5 的 1506±6）与 Artificial Analysis 只测了 high。据此的任务表：解释、写作、设计、代码 medium 起步，深入时 high；研究 high 起步；操作 low 起步，深入时 medium；聊天 low。数据很少，需要用评分校准。
 
+经 sub2api 的 Antigravity 网关接入的模型（Magpie 的 `hakimi` 供应商）由模型名决定档位，请求里的强度不起作用，Magpie 把每一档登记成一个模型，如 `hakimi/gemini-4-argon-high`、`hakimi/gemini-4-carbon-medium`、`hakimi/claude-opus-5-5-low`。名字以 `-minimal`、`-low`、`-medium`、`-high`、`-xhigh` 或 `-max` 结尾的模型，JEV 不设置强度。
+
 来源：仓库 `.planning/research/model-routing-2026-11-10/gemini/`

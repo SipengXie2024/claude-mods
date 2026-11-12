@@ -2,18 +2,18 @@
 // subagent a managed session starts, the resume check at turn.start and the effort of each request
 // at turn.step.
 import type { AgentSpawnInput, AgentSpawnResult, Next, TurnStartInput, TurnStepInput } from 'claude-code'
-import { parseEffortLine, parseMarker, parseModelLine, parseModelReason, parseRequestHeader, parseReviewOf, requestText, withRouting, assessmentBrief, type MarkerInfo } from './brief'
+import { parseEffortLine, parseMarker, parseModelLine, parseModelReason, parseRequestHeader, parseReviewOf, placingOf, requestText, withRouting, assessmentBrief, type MarkerInfo } from './brief'
 import { subagentDialogue, type ApiMessage } from './dialogue'
 import { newId } from './io'
 import { delegationInput } from './delegation'
 import { decideRule, judgeDeep, judgeSpawn, type JudgeCtx } from './judge'
-import { canonical, clampEffort, displayName, isAvailable, requestId, sameModel, type ModelCatalog } from './model'
+import { canonical, clampEffort, displayName, isAvailable, nameLevel, requestId, sameModelAnyProvider, type ModelCatalog } from './model'
 import { borderPair, isHardWork, raise, raiseOnRule, reviewSecondTarget, ruleById, ruleModel, startEffort, type Rule, type Rules } from './rules'
 import type { Ctx } from './state'
 import { EFFORTS, type AgentRecord, type AgentRole, type Effort, type EffortChange, type JevJudgment, type RaiseReason, type SelectionKind, type SessionState, type TaskRecord } from './types'
-import { tell } from './daily'
+import { noteExecutorTurn, tell } from './daily'
 import { parseChannelTag } from './telegram'
-import { directOf, workspaceOf } from './workspace'
+import { workspaceOf } from './workspace'
 
 export type SpawnDecision =
   | { action: 'pass' }
@@ -103,7 +103,8 @@ export function decideSpawn(a: { e: AgentSpawnInput; origin: string; task: Route
   const daily = task.kind === 'daily'
   const parent = e.parentAgentId !== undefined ? task.agents[e.parentAgentId] : undefined
   const role: AgentRole = e.parentAgentId !== undefined ? 'helper' : daily ? 'executor' : 'implementer'
-  const same = (x: string, y: string) => sameModel(x, y, catalog)
+  // An independent review needs another model, whichever provider serves the reviewed one.
+  const sameAnyProvider = (x: string, y: string) => sameModelAnyProvider(x, y, catalog)
   const available = (id: string) => isAvailable(id, catalog)
   const decided = decideRule(judgment, rules)
   const border = 'none' in decided ? borderPair(judgment, rules) : null
@@ -157,7 +158,7 @@ export function decideSpawn(a: { e: AgentSpawnInput; origin: string; task: Route
     }
     return {
       action: 'assess',
-      rewrite: { prompt: withRouting(assessmentBrief(task, rules, chosen), m, { cwd: null, daily: true, direct: null }), model: requestId(model, catalog), description: `${e.description} · ${displayName(model, rules)}/${effort}` },
+      rewrite: { prompt: withRouting(assessmentBrief(task, rules, chosen), m, { cwd: null, daily: true, direct: null, also: [] }), model: requestId(model, catalog), description: `${e.description} · ${displayName(model, rules)}/${effort}` },
       agent,
       ...(chosen !== undefined ? { requestedModel: chosen } : {}),
       notice: chosen === undefined
@@ -186,7 +187,9 @@ export function decideSpawn(a: { e: AgentSpawnInput; origin: string; task: Route
     model = canonical(chosen, catalog)
     ruleId = 'ruleId' in decided ? decided.ruleId : null
     const rule = ruleId === null ? null : ruleById(rules, ruleId)
+    const level = nameLevel(model)
     if (effortLine !== null) efforts = [{ from: null, to: effortLine, reason: 'explicit' }]
+    else if (level !== null) efforts = [{ from: null, to: level, reason: 'explicit', note: atLevel(level) }]
     else if (rule !== null && rule.effort !== null) efforts = ruleChanges(rule, deep)
     else return refuse(`An explicit model with no matching routing rule needs its effort: add "[effort <low|medium|high|xhigh|max>]" to the brief (${'none' in decided ? decided.none : `rule ${ruleId} has no start effort`}).`, kind === 'user' ? { model, reason: reason.text } : undefined)
     selection = { kind, reason: reason.text, ...(kind === 'user' ? { userConfirmation: reason.text } : {}) }
@@ -199,7 +202,7 @@ export function decideSpawn(a: { e: AgentSpawnInput; origin: string; task: Route
       originals.push(canonical(m, catalog))
     }
     if (originals.length === 0) return refuse('The [review-of …] line names no agent or model.')
-    const target = reviewSecondTarget(rules, originals, available, same)
+    const target = reviewSecondTarget(rules, originals, available, sameAnyProvider)
     if ('none' in target) return refuse(`No model is left for an independent second review: ${target.none}. Tell the person and ask how to proceed.`)
     model = target.model
     ruleId = 'review-second'
@@ -238,6 +241,7 @@ export function decideSpawn(a: { e: AgentSpawnInput; origin: string; task: Route
     return refuse(`No routing rule fits this brief (${decided.none}). Add the task's conditions (deliverable, acceptance, capabilities) and delegate again, or recommend a model and its effort with mcp__magpie-tasks__model_route, where Jev judges whether the recommendation suits the task.`)
   }
 
+  efforts = startAtLevel(model, efforts)
   const effort = efforts[efforts.length - 1]!.to
   const m: MarkerInfo = { taskId: task.id, role, ruleId, rulesVersion: rules.version, model, effort }
   const agent: Omit<AgentRecord, 'agentId' | 'startedAt'> = {
@@ -268,7 +272,7 @@ export function decideSpawn(a: { e: AgentSpawnInput; origin: string; task: Route
     : `magpie-tasks routed the subagent "${e.description}" (${role}) to ${name} (${model}) at effort ${effort}; rule ${ruleId ?? 'none'} (${rules.version}); selection ${selection.kind}: ${selection.reason}. ${jevText(judgment)}.`
   return {
     action: 'route',
-    rewrite: { prompt: withRouting(e.prompt, m, { cwd: worktree, daily, direct: directOf(task, worktree) }), model: requestId(model, catalog), ...(worktree !== null ? { cwd: worktree } : {}), description: `${e.description} · ${name}/${effort}` },
+    rewrite: { prompt: withRouting(e.prompt, m, placingOf(task, worktree)), model: requestId(model, catalog), ...(worktree !== null ? { cwd: worktree } : {}), description: `${e.description} · ${name}/${effort}` },
     agent,
     notice,
   }
@@ -419,27 +423,53 @@ export function startedMarker(agentId: string): MarkerInfo | undefined {
 // Plan section 9.7: a routed agent's turn that did not start right after its spawn is a resume. An
 // agent this process has not registered yet whose run begins with the task marker is a routed agent
 // whose spawn has not resolved: this is its first turn.
-export function turnStarted(st: SessionState, agentId: string, text: string): void {
+// Returns whether the turn is a resume.
+export function turnStarted(st: SessionState, agentId: string, text: string): boolean {
   if (!st.agents.has(agentId)) {
     const m = parseMarker(text)
-    if (m === null) return
+    if (m === null) return false
     st.agents.set(agentId, m.taskId)
     unrecorded.set(agentId, m)
     firstTurnSeen.add(agentId)
-    return
+    return false
   }
-  if (st.freshSpawn.delete(agentId)) return
+  if (st.freshSpawn.delete(agentId)) return false
   st.pendingReask.set(agentId, text)
+  return true
 }
 
 export async function onTurnStart(ctx: Ctx, e: TurnStartInput): Promise<void> {
-  if (e.agentId !== undefined) turnStarted(ctx.st, e.agentId, e.text)
+  if (e.agentId !== undefined && turnStarted(ctx.st, e.agentId, e.text)) await noteExecutorTurn(ctx, e.agentId)
+}
+
+const atLevel = (level: Effort) => `the model runs at ${level}, the level its ID names`
+
+function withNote(c: Omit<EffortChange, 'at'>, note: string): Omit<EffortChange, 'at'> {
+  return { ...c, note: c.note === undefined ? note : `${c.note}; ${note}` }
+}
+
+// A model whose ID names its level (nameLevel) runs at that level whatever effort it is given: the
+// start is the level, noting another one asked for; a deep start changes nothing and is left out; a
+// raise stays on record from and to the level, so calibration still counts the failure behind it.
+export function startAtLevel(model: string, changes: Omit<EffortChange, 'at'>[]): Omit<EffortChange, 'at'>[] {
+  if (changes.length === 0) throw new Error(`no start effort for ${model}`)
+  const level = nameLevel(model)
+  if (level === null) return changes
+  const [first, ...rest] = changes as [Omit<EffortChange, 'at'>, ...Omit<EffortChange, 'at'>[]]
+  const start = first.to === level ? first : withNote({ ...first, to: level }, `${first.to} asked; ${atLevel(level)}`)
+  return [start, ...rest.filter(c => c.reason !== 'deep' && c.reason !== 'resume-deep').map(c => withNote({ ...c, from: level, to: level }, atLevel(level)))]
 }
 
 // Plan section 5. The resume step: max(current, startEffort(rule, new deep judgment)) for an agent
 // with a rule that has a start effort; an agent without one keeps its explicit start effort or its
 // current one as the base. A resume never lowers the effort. Each raise then adds one level, max at most.
-export function nextEffort(a: { rule: Rule | null; current: Effort; deep: boolean | null; raises: RaiseReason[]; explicit?: Effort }): { effort: Effort; changes: Omit<EffortChange, 'at'>[] } {
+// `level`: the level the agent's model ID names, which neither a resume nor a raise changes.
+export function nextEffort(a: { rule: Rule | null; current: Effort; deep: boolean | null; raises: RaiseReason[]; explicit?: Effort; level?: Effort | null }): { effort: Effort; changes: Omit<EffortChange, 'at'>[] } {
+  const level = a.level ?? null
+  if (level !== null) {
+    if (a.current !== level) throw new Error(`an agent on a model that runs at ${level} is recorded at ${a.current}`)
+    return { effort: level, changes: a.raises.map(reason => ({ from: level, to: level, reason, note: atLevel(level) })) }
+  }
   const changes: Omit<EffortChange, 'at'>[] = []
   let effort = a.current
   if (a.deep !== null) {
@@ -500,7 +530,7 @@ export async function onTurnStep(ctx: Ctx, e: TurnStepInput): Promise<Effort | u
   }
   const explicit = agent.efforts.find(c => c.reason === 'explicit')?.to
   const rule = agent.ruleId === null ? null : ruleById(ctx.rules, agent.ruleId)
-  const next = nextEffort({ rule, current: agent.effort, deep: deep?.deep ?? null, raises, ...(explicit !== undefined ? { explicit } : {}) })
+  const next = nextEffort({ rule, current: agent.effort, deep: deep?.deep ?? null, raises, level: nameLevel(agent.model), ...(explicit !== undefined ? { explicit } : {}) })
   if (next.changes.length > 0 || agent.pendingRaises.length > 0 || deep !== null) {
     const at = await ctx.io.now()
     await ctx.reg.update(task.id, t => {

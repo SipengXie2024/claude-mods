@@ -121,7 +121,8 @@ test('architectDeny lets the plan commands, read-only Bash and git add/commit/pu
 test('a routed subagent writes inside its working directory, outside every repository, and nowhere else', async () => {
   // The two repositories of this layout: the project and the task worktree.
   const repoOf = async (p: string) => (p.startsWith(`${WT}/`) ? WT : p.startsWith(`${ROOT}/`) ? ROOT : null)
-  const sub = (e: { tool: string; [k: string]: unknown }, worktree: string | null) => subagentWriteDeny(e, { worktree, place, repoOf })
+  // An agent with one working directory; in the worktree, the project main directory is the one it leaves alone.
+  const sub = (e: { tool: string; [k: string]: unknown }, worktree: string | null) => subagentWriteDeny(e, { dirs: worktree === null ? [] : [worktree], copies: worktree === WT ? { [ROOT]: WT } : {}, place, repoOf })
   expect(await sub({ tool: 'Edit', file_path: `${WT}/mods/jev/src/a.ts` }, WT)).toBeNull()
   expect(await sub({ tool: 'Write', file_path: '/tmp/scratch.txt' }, WT)).toBeNull()
   expect(await sub({ tool: 'Edit', file_path: `${ROOT}/mods/jev/src/a.ts` }, WT)).toContain('outside it')
@@ -136,6 +137,26 @@ test('a routed subagent writes inside its working directory, outside every repos
   // A task that changes the project in place writes in the project directory itself; the
   // architect's records stay refused there.
   expect(await sub({ tool: 'Edit', file_path: `${ROOT}/mods/jev/src/a.ts` }, ROOT)).toBeNull()
-  expect(await sub({ tool: 'Edit', file_path: `${WT}/mods/jev/src/a.ts` }, ROOT)).toContain('outside it')
+  const unopened = await sub({ tool: 'Edit', file_path: `${WT}/mods/jev/src/a.ts` }, ROOT)
+  expect(unopened).toContain('which this task has not opened')
+  expect(unopened).toContain(`"project": "${WT}"`)
   expect(await sub({ tool: 'Write', file_path: `${ROOT}/CONTEXT.md` }, ROOT)).toContain('architect writes')
+})
+
+test('a routed subagent of a task with several projects writes in each of their working directories', async () => {
+  // Three repositories: the first project (changed in a worktree), its worktree, and a second project changed in place.
+  const OTHER = '/home/ubuntu/sipeng/mhot-vm'
+  const repoOf = async (p: string) => [WT, ROOT, OTHER, '/home/ubuntu/sipeng/plans'].find(r => p.startsWith(`${r}/`)) ?? null
+  const sub = (e: { tool: string; [k: string]: unknown }) => subagentWriteDeny(e, { dirs: [WT, OTHER], copies: { [ROOT]: WT }, place, repoOf })
+  expect(await sub({ tool: 'Edit', file_path: `${WT}/mods/jev/src/a.ts` })).toBeNull()
+  expect(await sub({ tool: 'Edit', file_path: `${OTHER}/src/vm.rs` })).toBeNull()
+  expect(await sub({ tool: 'Write', file_path: `${OTHER}/CONTEXT.md` })).toContain('architect writes')
+  // The main directory of the project it changes in a worktree: the copy is named.
+  const main = await sub({ tool: 'Edit', file_path: `${ROOT}/mods/jev/src/a.ts` })
+  expect(main).toContain(`Write only inside your working directory ${WT}`)
+  expect(main).not.toContain('open_project')
+  // A repository the task has not opened: open_project is named, with the working directories it has.
+  const third = await sub({ tool: 'Edit', file_path: '/home/ubuntu/sipeng/plans/publish-plan' })
+  expect(third).toContain('"project": "/home/ubuntu/sipeng/plans"')
+  expect(third).toContain(`its working directories are ${WT}, ${OTHER}`)
 })

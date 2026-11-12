@@ -5,9 +5,11 @@
 // reply answer. The shapes follow the task records of 2026-11-11 (ydz2kl: an acceptance failed at
 // 05:57, then ten fix-confirm questions while the person kept working with the executor).
 import { expect, test } from 'claude-code/testing'
+import { checkedDeliverable, resultStanding } from '../src/brief'
 import { fixPending, openDailyDecision } from '../src/daily'
 import { parseAgents } from '../src/launch'
 import { ARCHITECT_GRACE_MS, architectToStop, worktreeReclaimable } from '../src/reclaim'
+import { directOf, workspaceOf, workspacePaths, writeRange } from '../src/workspace'
 import { stalledDaily } from '../src/recovery'
 import { followUpBody, worktreeGoneNote } from '../src/router'
 import type { AgentRecord, Decision, TaskRecord } from '../src/types'
@@ -77,14 +79,39 @@ test('a Router restart cut off a running task whose agents are all gone: checks 
   expect(stalledDaily(cutAcceptance, ROUTER, new Set(['ac8e1b35a39748750']))).toBeNull()
   // the executor reported done, and the acceptance never started
   expect(stalledDaily(task('daily', 'running', { deliverables: delivered, agents: { e: executor(doneReport) } }), ROUTER, none)).toBe('rerun-acceptance')
-  const diagnosing = task('daily', 'running', { agents: { e: executor([]), d: agent('d1', 'diagnosis', { startedAt: NOW - 100_000 }) } })
+  const blockers = { b1: { id: 'b1', description: '测试机连不上', diagnoses: 1, modelChanges: 0, history: [{ at: NOW - 120_000, step: 'diagnosis' as const, agentId: 'a1beb54a1ecb3dec9', note: 'blocked report: 测试机连不上' }] } }
+  const blockedReport = [{ at: NOW - 120_000, status: 'blocked' as const, text: '受阻', verification: [] }]
+  const diagnosing = task('daily', 'running', { blockers, agents: { e: executor(blockedReport), d: agent('d1', 'diagnosis', { startedAt: NOW - 100_000 }) } })
   expect(stalledDaily(diagnosing, ROUTER, none)).toBe('rerun-diagnosis')
   // an executor cut off mid-run, or waiting for its own background command that the restart ended
   const working = [{ at: NOW - 600_000, status: 'working' as const, text: '等测试跑完', verification: [] }]
   expect(stalledDaily(task('daily', 'running', { agents: { e: executor(working) } }), ROUTER, none)).toBe('ask-person')
+  // the person wrote to the executor after its result and the restart cut both off: a new check of
+  // that result would be superseded, so the person is asked
+  expect(stalledDaily(task('daily', 'running', { deliverables: delivered, agents: { e: executor(doneReport), c: agent('ac8e1b35a39748750', 'acceptance', { startedAt: NOW - 500_000 }) } }), ROUTER, none)).toBe('rerun-acceptance')
+  const resumed = agent('a1beb54a1ecb3dec9', 'executor', { startedAt: NOW - 7200_000, reports: doneReport, turnAt: NOW - 300_000 })
+  expect(stalledDaily(task('daily', 'running', { deliverables: delivered, agents: { e: resumed, c: agent('ac8e1b35a39748750', 'acceptance', { startedAt: NOW - 500_000 }) } }), ROUTER, none)).toBe('ask-person')
   // a finished acceptance: the executor is fixing what it found
   const failed = [{ at: NOW - 600_000, summary: 'ok', verification: [], acceptance: { agentId: 'c', pass: false, notes: 'n' } }]
   expect(stalledDaily(task('daily', 'running', { deliverables: failed, agents: { e: executor(doneReport), c: agent('c', 'acceptance', { state: 'done', startedAt: NOW - 500_000 }) } }), ROUTER, none)).toBe('ask-person')
+  // The person stopped the executor while its acceptance ran, and the restart cut off the
+  // integration of the stopped result: it is integrated, and the result is never checked.
+  const stoppedAt = NOW - 200_000
+  const stopTurn = { turnAt: NOW - 250_000, startedAt: NOW - 7200_000 }
+  const stopReports = [...doneReport, { at: stoppedAt, status: 'stopped' as const, text: '已停止', verification: [] }]
+  const stoppedResult = [...delivered, { at: stoppedAt, summary: '已停止', verification: [], stopped: true as const }]
+  const cutStop = task('daily', 'running', { deliverables: stoppedResult, agents: { e: agent('a1beb54a1ecb3dec9', 'executor', { ...stopTurn, reports: stopReports }), c: agent('ac8e1b35a39748750', 'acceptance', { startedAt: NOW - 500_000, checks: NOW - 600_000 }) } })
+  expect(stalledDaily(cutStop, ROUTER, none)).toBe('integrate')
+  // the same with no acceptance on record, and a result judged to need no check
+  expect(stalledDaily(task('daily', 'running', { deliverables: stoppedResult, agents: { e: agent('a1beb54a1ecb3dec9', 'executor', { ...stopTurn, reports: stopReports }) } }), ROUTER, none)).toBe('integrate')
+  const unneeded = [{ ...delivered[0]!, check: { needed: false, p: 0.1, provider: 'jev' as const } }]
+  expect(stalledDaily(task('daily', 'running', { deliverables: unneeded, agents: { e: executor(doneReport) } }), ROUTER, none)).toBe('integrate')
+  // the person stopped the executor during a diagnosis of its blocked report: the stopped result is
+  // integrated and the diagnosis is not run again
+  const stopDuringDiagnosis = task('daily', 'running', { blockers, deliverables: [{ at: NOW - 50_000, summary: '已停止', verification: [], stopped: true }], agents: { e: agent('a1beb54a1ecb3dec9', 'executor', { startedAt: NOW - 7200_000, turnAt: NOW - 60_000, reports: [...blockedReport, { at: NOW - 50_000, status: 'stopped', text: '已停止', verification: [] }] }), d: agent('d1', 'diagnosis', { startedAt: NOW - 100_000 }) } })
+  expect(stalledDaily(stopDuringDiagnosis, ROUTER, none)).toBe('integrate')
+  // a message reached the executor after the stopped result, and the restart cut that turn off too
+  expect(stalledDaily(task('daily', 'running', { deliverables: stoppedResult, agents: { e: agent('a1beb54a1ecb3dec9', 'executor', { startedAt: NOW - 7200_000, turnAt: NOW - 100_000, reports: stopReports }) } }), ROUTER, none)).toBe('ask-person')
   // tasks that wait for the person, are finished, or belong to another Router are left alone
   for (const s of ['waiting-user', 'paused', 'done', 'error'] as const) expect(stalledDaily(task('daily', s, { agents: { e: executor([]) } }), ROUTER, none)).toBeNull()
   expect(stalledDaily(task('daily', 'running', { agents: { e: executor([]) } }), 'another-router', none)).toBeNull()
@@ -128,4 +155,66 @@ test('a terminal follow-up is read like a Telegram one, and a finished task\'s f
   expect(worktreeGoneNote(task('long', 'running', { worktree: null }))).toBeNull()
   // a task that changed the project directory in place never had a worktree to lose
   expect(worktreeGoneNote(task('daily', 'running', { worktree: null, direct: { dir: '/home/ubuntu/sipeng/claude-mods', baseRef: null, baseCommit: null } }))).toBeNull()
+  // a task with several projects names the ones whose worktree went; a project changed in place is not one of them
+  const more = [
+    { project: { root: '/home/ubuntu/sipeng/plans' }, worktree: null, direct: { dir: '/home/ubuntu/sipeng/plans', baseRef: 'refs/magpie-tasks/d-20261111-ydz2kl/p2/base', baseCommit: '1'.repeat(40) } },
+    { project: { root: '/home/ubuntu/sipeng/mhot-vm' }, worktree: null, direct: null },
+  ]
+  expect(worktreeGoneNote(task('daily', 'running', { more }))).toContain('If this message asks for changes to /home/ubuntu/sipeng/mhot-vm, call')
+  expect(worktreeGoneNote(task('daily', 'running', { worktree: null, more }))).toContain('changes to /home/ubuntu/sipeng/claude-mods or /home/ubuntu/sipeng/mhot-vm, call mcp__magpie-tasks__open_project for that project again first')
+})
+
+test('a task\'s working directories are those of its projects, and an agent writes in its own and the other projects\'', () => {
+  const wt = '/home/ubuntu/.local/share/magpie-tasks/worktrees/l-20261111-a1b2c3'
+  const plans = '/home/ubuntu/sipeng/plans'
+  const more = [
+    { project: { root: plans }, worktree: null, direct: { dir: plans, baseRef: 'refs/magpie-tasks/l-20261111-a1b2c3/p2/base', baseCommit: '1'.repeat(40) } },
+    { project: { root: '/home/ubuntu/sipeng/mhot-vm' }, worktree: null, direct: null },
+  ]
+  const t = task('long', 'running', { more })
+  expect(workspaceOf(t)).toBe(wt)
+  expect(workspacePaths(t)).toEqual([wt, plans])
+  expect(workspaceOf(task('long', 'running', { worktree: null, more }))).toBe(plans)
+  expect(directOf(t, plans)).toEqual({ git: true })
+  expect(directOf(t, wt)).toBeNull()
+  // The project main directory is left to the task worktree of it.
+  expect(writeRange(t, { worktree: wt })).toEqual({ dirs: [wt, plans], copies: { '/home/ubuntu/sipeng/claude-mods': wt } })
+  expect(writeRange(t, { worktree: null })).toEqual({ dirs: [], copies: {} })
+  // An agent with a separate copy of the first working directory, and a helper working in that copy:
+  // the copy stands in for the shared worktree, the other projects stay shared.
+  const copy = `${wt}-a83b0057bf058d018`
+  const separate = task('long', 'running', { more, extraWorktrees: { a83b0057bf058d018: { path: copy, baseRef: 'refs/magpie-tasks/l-20261111-a1b2c3/a83b0057bf058d018/base', forAgent: 'a83b0057bf058d018' } } })
+  expect(writeRange(separate, { worktree: copy })).toEqual({ dirs: [copy, plans], copies: { [wt]: copy, '/home/ubuntu/sipeng/claude-mods': copy } })
+  expect(writeRange(separate, { worktree: wt })).toEqual({ dirs: [wt, plans], copies: { '/home/ubuntu/sipeng/claude-mods': wt } })
+})
+
+// The times of d-20261112-yvg26j: the executor answered at 1794470188902, its acceptance was
+// recorded as started at 1794470190300, and the person interrupted the executor at 1794470389718.
+test('an acceptance verdict acts only while no executor has gone back to work after the result it checks', () => {
+  const RESULT = 1794470188902
+  const first = { at: RESULT, summary: '没有打满', verification: [] }
+  const exec = (over: Partial<AgentRecord> = {}) => agent('a2b424d131b6fc71e', 'executor', { startedAt: 1794469178740, ...over })
+  const acc = agent('a7e2daf9cb8040eb7', 'acceptance', { startedAt: 1794470190300, checks: RESULT })
+  const of = (deliverables: TaskRecord['deliverables'], e: AgentRecord) => task('daily', 'running', { deliverables, agents: { e, c: acc } })
+  // Nothing reached the executor since its result: the verdict acts.
+  expect(checkedDeliverable(of([first], exec()), acc)).toEqual({ index: 0, superseded: false })
+  // The person's stop reached it while the check was still starting, and it answered 状态：已停止
+  // before the acceptance was recorded: the verdict is about the result its brief was written from.
+  const stopped = { at: 1794470190000, summary: '已停止', verification: [], stopped: true as const }
+  expect(checkedDeliverable(of([first, stopped], exec({ turnAt: 1794470189500 })), acc)).toEqual({ index: 0, superseded: true })
+  // A message reached it during the check and the person interrupted that turn: no new result, the
+  // verdict is still superseded.
+  expect(checkedDeliverable(of([first], exec({ turnAt: 1794470363723 })), acc)).toEqual({ index: 0, superseded: true })
+  // Another executor took the task over after the result.
+  const handed = task('daily', 'running', { deliverables: [first], agents: { e: exec(), x: agent('ax2', 'executor', { startedAt: RESULT + 60_000 }), c: acc } })
+  expect(checkedDeliverable(handed, acc)).toEqual({ index: 0, superseded: true })
+  // A check started after a Router restart is bound to the latest result; the executor's earlier turn does not supersede it.
+  const later = { at: 1794470400000, summary: '修正后的结论', verification: [] }
+  expect(checkedDeliverable(of([first, later], exec({ turnAt: 1794470300000 })), { ...acc, checks: later.at })).toEqual({ index: 1, superseded: false })
+  expect(() => checkedDeliverable(of([first], exec()), { ...acc, checks: undefined })).toThrow()
+  // Whether to check a result is judged after the turn that produced it; the person stopped the
+  // executor while Jev was asked, and its stopped result came in: the judgment starts nothing.
+  expect(resultStanding(of([first, stopped], exec({ turnAt: 1794470189500 })), RESULT)).toEqual({ index: 0, superseded: true })
+  expect(resultStanding(of([first], exec()), RESULT)).toEqual({ index: 0, superseded: false })
+  expect(() => checkedDeliverable(of([first], exec()), { ...acc, checks: RESULT + 1 })).toThrow()
 })

@@ -8,9 +8,9 @@ import { expect, test } from 'claude-code/testing'
 import { acceptanceBrief, parseMarker, parseStatus, parseVerdict } from '../src/brief'
 import { parseResponse } from '../src/jev'
 import { spawnJudgment } from '../src/judge'
-import { catalogFrom, isAvailable, sameModel, withRuleModels, type ModelCatalog } from '../src/model'
+import { catalogFrom, isAvailable, nameLevel, sameModel, withRuleModels, type ModelCatalog } from '../src/model'
 import { borderPair, parseRules, ruleById } from '../src/rules'
-import { dailyTaskDraft, decideSpawn, ROUTE_ORIGIN, markerFor, markRecorded, nextEffort, registerStarted, spawnPrecheck, startedMarker, turnStarted, type RoutedTask, type SpawnDecision } from '../src/spawn'
+import { dailyTaskDraft, decideSpawn, ROUTE_ORIGIN, markerFor, markRecorded, nextEffort, registerStarted, spawnPrecheck, startAtLevel, startedMarker, turnStarted, type RoutedTask, type SpawnDecision } from '../src/spawn'
 import { freshState } from '../src/state'
 import type { AgentRecord, JevJudgment } from '../src/types'
 import { unavailableAction } from '../src/unavailable'
@@ -273,11 +273,11 @@ test('review-second excludes the reviewed models; with none left the architect i
   expect(unknown.action).toBe('deny')
   // Opus and Sol both reviewed: Argon, the third candidate, at the same medium.
   const both = routed(decide(spawn(`${SCHEDULER}\n[review-of model=codex/gpt-6.1-sol,opus]`), long(), j))
-  expect(both.agent).toMatchObject({ ruleId: 'review-second', model: 'antigravity/gemini-4-argon', effort: 'medium' })
-  const all = `${SCHEDULER}\n[review-of model=codex/gpt-6.1-sol,opus,antigravity/gemini-4-argon]`
+  expect(both.agent).toMatchObject({ ruleId: 'review-second', model: 'hakimi/gemini-4-argon-medium', effort: 'medium' })
+  const all = `${SCHEDULER}\n[review-of model=codex/gpt-6.1-sol,opus,hakimi/gemini-4-argon-medium]`
   const none = decide(spawn(all), long(), j)
   expect(none.action === 'deny' && none.reason.startsWith('No model is left for an independent second review')).toBe(true)
-  const dailyNone = routed(decide(spawn(`${HEADER}\n${WORKER_BRIEFS.telegram}\n[review-of model=codex/gpt-6.1-sol,claude/claude-opus-5-5[1m],antigravity/gemini-4-argon]`), daily(), j))
+  const dailyNone = routed(decide(spawn(`${HEADER}\n${WORKER_BRIEFS.telegram}\n[review-of model=codex/gpt-6.1-sol,claude/claude-opus-5-5[1m],hakimi/gemini-4-argon-medium]`), daily(), j))
   expect(dailyNone.action).toBe('assess')
 })
 
@@ -307,19 +307,20 @@ test('work on the border of two rules whose models differ: a model drawn from ru
   const j = judged(jevSpawnBorder)
   expect(j.confidence).toBeLessThan(rules.thresholds.ruleConfidence)
   expect(borderPair(j, rules)).toEqual({ first: { ruleId: 'math', p: 0.41 }, second: { ruleId: 'explain-write', p: 0.16 } })
-  const draws = [0, 0.34, 0.99].map(r => routed(decide(spawn(briefBorderFormalize), long(), j, {}, 'engine', () => r)))
+  const draws = [0, 0.3, 0.6, 0.99].map(r => routed(decide(spawn(briefBorderFormalize), long(), j, {}, 'engine', () => r)))
   expect(draws.map(d => [d.agent.model, d.agent.effort, d.agent.ruleId, d.agent.selection.kind])).toEqual([
     ['claude/claude-mythos-5-2', 'high', null, 'ambiguous'],
+    ['hakimi/gemini-4-carbon-high', 'high', null, 'ambiguous'],
     ['claude/claude-opus-5-5', 'xhigh', null, 'ambiguous'],
     ['codex/gpt-6-astra', 'max', null, 'ambiguous'],
   ])
   expect(draws[0]!.agent.selection.reason).toContain('between rule math (0.41) and rule explain-write (0.16), whose models differ')
-  expect(draws[2]!.agent.efforts).toEqual([{ from: null, to: 'max', reason: 'rule' }])
-  expect(parseMarker(draws[2]!.rewrite.prompt)).toMatchObject({ role: 'implementer', ruleId: null, model: 'codex/gpt-6-astra', effort: 'max' })
+  expect(draws[3]!.agent.efforts).toEqual([{ from: null, to: 'max', reason: 'rule' }])
+  expect(parseMarker(draws[3]!.rewrite.prompt)).toMatchObject({ role: 'implementer', ruleId: null, model: 'codex/gpt-6-astra', effort: 'max' })
   // A daily task's executor is drawn the same way; the Telegram line names the two rules.
   const d = routed(decide(spawn(briefBorderFormalize, { name: 'tg-7051661301-953' }), daily(), j, {}, 'engine', () => 0.5))
   expect(d.agent).toMatchObject({ role: 'executor', model: 'claude/claude-opus-5-5', effort: 'xhigh', ruleId: null })
-  expect(d.notice).toBe('模型：Opus 5.5 · xhigh · 规则拿不准（Jev 在 math 0.41 与 explain-write 0.16 之间，两条规则用的模型不同），从 Mythos 5.2、Opus 5.5、Astra 中随机选取')
+  expect(d.notice).toBe('模型：Opus 5.5 · xhigh · 规则拿不准（Jev 在 math 0.41 与 explain-write 0.16 之间，两条规则用的模型不同），从 Mythos 5.2、Carbon high、Opus 5.5、Astra 中随机选取')
   // The substitute evaluator gives one choice and no second option: no border, the usual no-rule path.
   expect(borderPair({ ...j, provider: 'substitute' }, rules)).toBeNull()
   // A border agent raised after a failed acceptance steps one level up, as an agent without a rule.
@@ -421,6 +422,66 @@ test('nextEffort follows section 5: the rule\'s deep effort and raise order', ()
   expect(nextEffort({ rule: null, current: 'high', deep: null, raises: ['acceptance-failed'] })).toEqual({ effort: 'xhigh', changes: [{ from: 'high', to: 'xhigh', reason: 'acceptance-failed' }] })
 })
 
+test('a model whose ID names its level runs at that level: its start, a resume and a raise keep it, and the record says so', () => {
+  const at = (level: string) => `the model runs at ${level}, the level its ID names`
+  const j = judged(jevSpawnScheduler)
+  // review-second's third candidate on a brief judged deep: Argon medium starts at medium, and the
+  // deep start (high) is not recorded, since the model cannot run at it.
+  const review = routed(decide(spawn(`${SCHEDULER}\n[review-of model=codex/gpt-6.1-sol,opus]`), long(), { ...j, deep: true }))
+  expect(review.agent).toMatchObject({ model: 'hakimi/gemini-4-argon-medium', effort: 'medium', efforts: [{ from: null, to: 'medium', reason: 'rule' }] })
+  expect(parseMarker(review.rewrite.prompt)).toMatchObject({ model: 'hakimi/gemini-4-argon-medium', effort: 'medium' })
+  // The person's model with no matching rule needs no effort line; an effort line asking for another
+  // level is kept in the note.
+  const noRule = judged(jevSpawnNoRule)
+  const chosen = routed(decide(spawn(`${NO_RULE}\n[model-reason user: 用 Carbon high]`, { model: 'hakimi/gemini-4-carbon-high' }), long(), noRule))
+  expect(chosen.agent).toMatchObject({ model: 'hakimi/gemini-4-carbon-high', effort: 'high', efforts: [{ from: null, to: 'high', reason: 'explicit', note: at('high') }] })
+  const asked = routed(decide(spawn(`${NO_RULE}\n[model-reason user: 用 Carbon high]\n[effort xhigh]`, { model: 'hakimi/gemini-4-carbon-high' }), long(), noRule))
+  expect(asked.agent).toMatchObject({ effort: 'high', efforts: [{ from: null, to: 'high', reason: 'explicit', note: `xhigh asked; ${at('high')}` }] })
+  const tg = `${NO_RULE_HEADER}\n${briefDeeperQuestion}\n[model-reason user: 用 Carbon high]`
+  const { header: _h, ...task } = dailyTaskDraft({ prompt: tg, id: 'd-20261112-c4rb0n', now: NOW })
+  const executor = routed(decide(spawn(tg, { name: 'tg-7051661301-1181', model: 'hakimi/gemini-4-carbon-high' }), task, noRule))
+  expect([executor.action, executor.agent.model, executor.agent.effort]).toEqual(['route', 'hakimi/gemini-4-carbon-high', 'high'])
+
+  // A takeover's start list (spawnAgent) and a diagnosis redelegation: the start is the level, the raise
+  // is recorded from and to it.
+  expect(startAtLevel('hakimi/gemini-4-carbon-medium', [{ from: null, to: 'medium', reason: 'explicit', note: 'diagnosis suggestion' }, { from: 'medium', to: 'high', reason: 'diagnosis-redelegate' }]))
+    .toEqual([{ from: null, to: 'medium', reason: 'explicit', note: 'diagnosis suggestion' }, { from: 'medium', to: 'medium', reason: 'diagnosis-redelegate', note: at('medium') }])
+  const plain = [{ from: null, to: 'high' as const, reason: 'rule' as const }, { from: 'high' as const, to: 'xhigh' as const, reason: 'deep' as const }]
+  expect(startAtLevel('claude/claude-opus-5-5', plain)).toEqual(plain)
+
+  // Carbon medium takes over document-analysis from Sol 6.1 (document-alt) and Carbon high
+  // machine-ops from Sonnet 5.5 (ops-alt), each at its level ...
+  const available = (id: string) => isAvailable(id, cat)
+  const same = (x: string, y: string) => sameModel(x, y, cat)
+  const base = agentOf(decide(spawn(SCHEDULER), long(), j), 'a1')
+  const docs = { ...base, ruleId: 'document-analysis', model: 'codex/gpt-6.1-sol', effort: 'high' as const, selection: { kind: 'rule' as const, reason: 'rule document-analysis' } }
+  const noSol = (id: string) => available(id) && !same(id, 'codex/gpt-6.1-sol')
+  expect(unavailableAction({ agent: docs, rules, available: noSol, same })).toEqual({ action: 'substitute', model: 'hakimi/gemini-4-carbon-medium', effort: 'medium', substituteId: 'document-alt' })
+  const ops = { ...base, ruleId: 'machine-ops', model: 'claude/claude-sonnet-5-5', effort: 'max' as const, selection: { kind: 'rule' as const, reason: 'rule machine-ops' } }
+  const noSonnet = (id: string) => available(id) && !same(id, 'claude/claude-sonnet-5-5')
+  expect(unavailableAction({ agent: ops, rules, available: noSonnet, same })).toEqual({ action: 'substitute', model: 'hakimi/gemini-4-carbon-high', effort: 'high', substituteId: 'ops-alt' })
+  // ... and stays there on a resume below its rule's start, and on a raise after a failed acceptance.
+  const document = ruleById(rules, 'document-analysis')
+  expect(nextEffort({ rule: document, current: 'medium', deep: true, raises: [], level: nameLevel('hakimi/gemini-4-carbon-medium') })).toEqual({ effort: 'medium', changes: [] })
+  expect(nextEffort({ rule: ruleById(rules, 'machine-ops'), current: 'high', deep: false, raises: [], level: nameLevel('hakimi/gemini-4-carbon-high') })).toEqual({ effort: 'high', changes: [] })
+  expect(nextEffort({ rule: document, current: 'medium', deep: null, raises: ['acceptance-failed'], level: 'medium' }))
+    .toEqual({ effort: 'medium', changes: [{ from: 'medium', to: 'medium', reason: 'acceptance-failed', note: at('medium') }] })
+  // Border work drawn onto Carbon high: a failed acceptance does not step it to xhigh.
+  expect(nextEffort({ rule: null, current: 'high', deep: null, raises: ['acceptance-failed'], level: 'high' }))
+    .toEqual({ effort: 'high', changes: [{ from: 'high', to: 'high', reason: 'acceptance-failed', note: at('high') }] })
+  expect(() => nextEffort({ rule: null, current: 'xhigh', deep: null, raises: [], level: 'high' })).toThrow('recorded at xhigh')
+})
+
+test('review-second takes the levels an ID names and the provider serving a model for one model', () => {
+  const j = judged(jevSpawnScheduler)
+  for (const argon of ['hakimi/gemini-4-argon-high', 'antigravity/gemini-4-argon']) {
+    const none = decide(spawn(`${SCHEDULER}\n[review-of model=codex/gpt-6.1-sol,opus,${argon}]`), long(), j)
+    expect(none.action === 'deny' && none.reason.startsWith('No model is left for an independent second review')).toBe(true)
+  }
+  // Opus 5.5 served through the hakimi provider is still Opus: Sol 6.1 reviews it.
+  expect(routed(decide(spawn(`${SCHEDULER}\n[review-of model=hakimi/claude-opus-5-5-high]`), long(), j)).agent.model).toBe('codex/gpt-6.1-sol')
+})
+
 function agentOf(d: SpawnDecision, agentId: string): AgentRecord {
   const r = routed(d)
   return { ...r.agent, agentId, startedAt: NOW }
@@ -434,7 +495,7 @@ test('unavailableAction: the person\'s model is theirs to replace; code-change\'
   const user = agentOf(decide(spawn(`${SCHEDULER}\n[model-reason user: 测试不可用模型]`, { model: 'codex/gpt-6-magpie-missing' }), long(), j), 'a1')
   const u = unavailableAction({ agent: user, rules, available, same })
   expect(u.action === 'ask-user' && u.reason).toBe('user-chosen')
-  expect(u.action === 'ask-user' && u.candidates).toEqual(['claude/claude-opus-5-5', 'claude/claude-mythos-5-2', 'codex/gpt-6-astra', 'claude/claude-haiku-5-5', 'codex/gpt-6-luna'])
+  expect(u.action === 'ask-user' && u.candidates).toEqual(['claude/claude-opus-5-5', 'claude/claude-mythos-5-2', 'codex/gpt-6-astra', 'hakimi/gemini-4-carbon-medium', 'claude/claude-haiku-5-5', 'codex/gpt-6-luna'])
 
   // code-change on Opus 5.5: Mythos 5.2, the rule's other model, at the lowest level of the raise order
   // not below its start or the current effort; Astra (repo-alt) when Mythos is out too.
@@ -478,12 +539,19 @@ test('the acceptance brief teaches the lines parseVerdict reads, and names the p
     reports: [{ at, status: 'done' as const, text: EXECUTOR_DONE, verification: parseStatus(EXECUTOR_DONE)!.verification }], startedAt: at,
   }
   const full = { ...task, owner: { kind: 'agent' as const, agentId: executor.agentId, workerName: 'tg-7051661301-878', routerSessionId: 's' } }
-  const none = acceptanceBrief(full, executor, null)
+  const none = acceptanceBrief(full, executor, [])
   expect(parseVerdict(none)!.pass).toBe(false)
   expect(none.includes(EXECUTOR_DONE)).toBe(true)
-  expect(() => acceptanceBrief(full, executor, { patchPath: '/p', diffStat: ' greet.py | 2 +-' })).toThrow()
-  const withWt = { ...full, worktree: { path: '/w/d-1', baseRef: 'refs/magpie-tasks/d-1/base', baseCommit: 'c' } }
-  const changed = acceptanceBrief(withWt, executor, { patchPath: '/s/tasks/d-1.patch', diffStat: ' greet.py | 2 +-' })
+  const inWorktree = { path: '/w/d-1', direct: false, patchPath: '/s/tasks/d-1.patch', diffStat: ' greet.py | 2 +-\n', files: ['greet.py'] }
+  const changed = acceptanceBrief(full, executor, [inWorktree])
   expect(changed.includes('`/s/tasks/d-1.patch`')).toBe(true)
-  expect(changed.includes('`/w/d-1`')).toBe(true)
+  expect(changed.includes('The change is in the task worktree `/w/d-1`, your working directory.')).toBe(true)
+  // A task that changed several projects: every directory with its diff and patch, the first one the reviewer's own.
+  const inPlace = { path: '/home/u/notes', direct: true, patchPath: '/s/tasks/d-1.p2.patch', diffStat: ' todo.md | 1 +\n', files: ['todo.md'] }
+  const several = acceptanceBrief(full, executor, [inWorktree, inPlace])
+  expect(several.includes('The executor changed 2 projects. The first directory below is your working directory.')).toBe(true)
+  expect(several.includes('The task worktree `/w/d-1`. Its diff against the task\'s base:\n greet.py | 2 +-\nThe full patch is `/s/tasks/d-1.patch`.')).toBe(true)
+  expect(several.includes('The project directory `/home/u/notes`, changed in place.')).toBe(true)
+  expect(several.includes(' todo.md | 1 +\nThe full patch is `/s/tasks/d-1.p2.patch`.')).toBe(true)
+  expect(parseVerdict(several)!.pass).toBe(false)
 })

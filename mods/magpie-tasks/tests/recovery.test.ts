@@ -94,6 +94,10 @@ test('an integration-start without an integration of the same tree is unfinished
   expect(unfinishedIntegrations(cut)).toEqual([{ tree: 't2', target: '/tmp/mt/proj', files: ['greet.py'], at: NOW }])
   expect(unfinishedIntegrations(cut + entry('integration', 't2', { status: 'conflict', detail: 'x' }) + '\n')).toEqual([])
   expect(unfinishedIntegrations('')).toEqual([])
+  // A change recorded where a direct task made it applied no tree: it has no start entry and closes none.
+  const inPlace = JSON.stringify({ at: NOW, session: BG_DONE, type: 'integration', status: 'in-place', target: '/tmp/mt/proj', files: ['greet.py'] }) + '\n'
+  expect(unfinishedIntegrations(done + inPlace)).toEqual([])
+  expect(unfinishedIntegrations(cut + inPlace).map(u => u.tree)).toEqual(['t2'])
   expect(() => unfinishedIntegrations(JSON.stringify({ type: 'integration-start' }))).toThrow('without a tree')
 })
 

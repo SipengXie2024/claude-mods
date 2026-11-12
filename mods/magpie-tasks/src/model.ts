@@ -66,8 +66,35 @@ export function canonical(id: string, cat: ModelCatalog): string {
   return bare
 }
 
+// A model ID ending in a reasoning level names one level of a model Magpie lists once per level:
+// sub2api's Antigravity gateway (Magpie's `hakimi` provider) runs `hakimi/gemini-4-carbon-medium` at
+// medium whatever effort the request carries.
+const NAME_LEVEL = /-(low|medium|high|xhigh|max)$/i
+
+// The level the model's ID names, or null for a model whose effort the request sets.
+export function nameLevel(id: string): Effort | null {
+  const m = NAME_LEVEL.exec(id.trim().replace(ONE_M, ''))
+  return m === null ? null : m[1]!.toLowerCase() as Effort
+}
+
+function withoutLevel(id: string, cat: ModelCatalog): string {
+  return canonical(id, cat).replace(NAME_LEVEL, '')
+}
+
+// One model: aliases and the 1M variant resolved, and the level an ID names left out, as an effort
+// is (`hakimi/gemini-4-argon-high` and `hakimi/gemini-4-argon-medium` are one model).
 export function sameModel(a: string, b: string, cat: ModelCatalog): boolean {
-  return canonical(a, cat) === canonical(b, cat)
+  return withoutLevel(a, cat) === withoutLevel(b, cat)
+}
+
+// One model whichever provider serves it, for an independent review (section 2.1 of the routing
+// table): `hakimi/gemini-4-argon-medium` does not review work `antigravity/gemini-4-argon` did.
+export function sameModelAnyProvider(a: string, b: string, cat: ModelCatalog): boolean {
+  const bare = (id: string) => {
+    const m = withoutLevel(id, cat)
+    return m.slice(m.indexOf('/') + 1)
+  }
+  return bare(a) === bare(b)
 }
 
 // The ID sent to the engine: the picker's 1M context variant when it lists one.

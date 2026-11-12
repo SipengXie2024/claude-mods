@@ -3,20 +3,21 @@
 // integration, the open_project tool, and the person's answers to a daily task's decisions.
 // Daily tasks run in the Router session; their subagents are the Router's.
 import type { PromptSubmitInput, TurnCompleteInput } from 'claude-code'
-import { acceptanceBrief, diagnosisBrief, handoffBrief, outcomeNote, parseDiagnosis, parseRouteConfirm, parseStatus, parseVerdict, stripOutcomeNote, withRouting, assessmentBrief } from './brief'
+import { acceptanceBrief, checkedDeliverable, diagnosisBrief, diffStatOf, handoffBrief, outcomeNote, placingOf, parseDiagnosis, parseRouteConfirm, parseStatus, parseVerdict, resultStanding, resumedSince, stripOutcomeNote, withRouting, assessmentBrief, type ProjectChange } from './brief'
 import { briefForJev, endedTurn, subagentDialogue, type ApiMessage } from './dialogue'
 import { diffToFile, git, scratchPath } from './git'
+import { integrateTask, type ProjectOutcome } from './integrate'
 import { integrate, settleDirect, touchedFiles } from './integrate'
 import { newId } from './io'
 import { checkInput, choose, judgeBlocker, judgeCheck, judgeDeep } from './judge'
-import { agentLabel, canonical, displayName, isAvailable, requestId, roleName } from './model'
+import { agentLabel, canonical, displayName, isAvailable, nameLevel, requestId, roleName, sameModel } from './model'
 import { acceptancePick, readQuotas } from './quota'
 import { raise, ruleById, startEffort, substituteAllowed } from './rules'
-import { judgeCtx, markerFor, markRecorded, registerStarted } from './spawn'
+import { judgeCtx, markerFor, markRecorded, registerStarted, startAtLevel } from './spawn'
 import type { Ctx, PromptResult } from './state'
 import { clip, send } from './telegram'
 import type { AgentRecord, AgentRole, Blocker, Decision, Effort, EffortChange, RaiseReason, RelayRequest, SelectionKind, TaskRecord } from './types'
-import { directOf, leaveIfTaken, placeTask, placementLine, projectDir, workspaceOf } from './workspace'
+import { leaveIfTaken, patchPathOf, pathOf, placeLocked, placementLine, placing, projectDir, workspaceAt, workspaceOf, workspaces, writeRange } from './workspace'
 
 
 
@@ -166,10 +167,12 @@ export async function spawnAgent(ctx: Ctx, task: TaskRecord, a: {
   description: string
   worktree: string | null
   reviewOf?: string[]
+  checks?: number
 }): Promise<void> {
   const now = await ctx.io.now()
   const model = canonical(a.model, ctx.catalog)
-  const effort = a.efforts[a.efforts.length - 1]!.to
+  const efforts = startAtLevel(model, a.efforts)
+  const effort = efforts[efforts.length - 1]!.to
   const agent: Omit<AgentRecord, 'agentId' | 'startedAt'> = {
     name: a.name,
     description: a.description,
@@ -181,8 +184,9 @@ export async function spawnAgent(ctx: Ctx, task: TaskRecord, a: {
     judgment: null,
     model,
     effort,
-    efforts: a.efforts.map(c => ({ ...c, at: now })),
+    efforts: efforts.map(c => ({ ...c, at: now })),
     ...(a.reviewOf !== undefined ? { reviewOf: a.reviewOf } : {}),
+    ...(a.checks !== undefined ? { checks: a.checks } : {}),
     contextSource: 'brief',
     cwd: a.worktree ?? ctx.st.cwd,
     worktree: a.worktree,
@@ -191,7 +195,7 @@ export async function spawnAgent(ctx: Ctx, task: TaskRecord, a: {
     filesTouched: [],
     reports: [],
   }
-  const prompt = withRouting(a.brief, markerFor(task.id, agent), { cwd: a.worktree, daily: task.kind === 'daily', direct: directOf(task, a.worktree) })
+  const prompt = withRouting(a.brief, markerFor(task.id, agent), placingOf(task, a.worktree))
   await relay(ctx, {
     id: newId('r', now), taskId: task.id, createdAt: now, kind: 'spawn', role: a.role,
     args: { prompt, description: `${a.description} · ${displayName(model, ctx.rules)}/${effort}`, name: a.name, model: requestId(model, ctx.catalog), cwd: a.worktree ?? ctx.st.cwd },
@@ -213,32 +217,35 @@ async function reviewEfforts(ctx: Ctx, brief: string): Promise<Omit<EffortChange
 
 // ---- changes in the task workspace -------------------------------------------------------------
 
-// `patchPath` is null outside Git, where `files` are the files the agents edited with the file tools.
-export interface Change { patchPath: string | null; diffStat: string; files: string[] }
-
-// The task's change since its base, its patch written to <stateDir>/tasks/<id>.patch; null when the
-// task has no workspace or the workspace holds no change. A direct task's diff compares the project
+// The task's change since its base in each project that holds one, in the order of its projects;
+// each patch is written under <stateDir>/tasks/. A direct project's diff compares the project
 // directory with its base, so it also holds what the person and other tasks changed there meanwhile;
-// the files other tasks changed are named after the diff (alsoChanged).
-export async function changeOf(ctx: Ctx, task: TaskRecord): Promise<Change | null> {
-  const direct = task.direct ?? null
-  if (direct !== null && direct.baseRef === null) {
-    const files = touchedFiles(task, direct.dir)
-    if (files.length === 0) return null
-    return { patchPath: null, files, diffStat: [`${direct.dir} is not a Git repository, so there is no diff. Files the agents edited with the file tools (changes made by shell commands are not listed):`, ...files.map(f => ` ${f}`)].join('\n') + '\n' }
+// the files other tasks changed are named after the diff (alsoChanged). Outside Git there is no
+// patch, and the change is the files the agents edited with the file tools.
+export async function changesOf(ctx: Ctx, task: TaskRecord): Promise<ProjectChange[]> {
+  const out: ProjectChange[] = []
+  for (const [i, w] of workspaces(task).entries()) {
+    const path = pathOf(w)
+    if (path === null) continue
+    const direct = w.worktree === null
+    const baseRef = w.worktree?.baseRef ?? w.direct!.baseRef
+    if (baseRef === null) {
+      const files = touchedFiles(task, path)
+      if (files.length > 0) out.push({ path, direct, patchPath: null, files, diffStat: [`${path} is not a Git repository, so there is no diff. Files the agents edited with the file tools (changes made by shell commands are not listed):`, ...files.map(f => ` ${f}`)].join('\n') + '\n' })
+      continue
+    }
+    const patchPath = patchPathOf(ctx.opts, task.id, i + 1)
+    const { tree, files } = await diffToFile(ctx.io, path, baseRef, await scratchPath(ctx.io, path, 'index'), patchPath)
+    if (files.length === 0) continue
+    const base = (await git(ctx.io, ['-C', path, 'rev-parse', '--verify', `${baseRef}^{commit}`])).trim()
+    let diffStat = await git(ctx.io, ['-C', path, 'diff-tree', '-r', '--no-renames', '--stat', base, tree])
+    const others = direct ? (w.alsoChanged ?? []).filter(o => o.files.some(f => files.includes(f))) : []
+    if (others.length > 0) {
+      diffStat += `Other tasks changed some of these files in ${path} meanwhile; those changes are theirs:\n${others.map(o => ` 「${o.title}」(${o.taskId}): ${o.files.filter(f => files.includes(f)).join(', ')}`).join('\n')}\n`
+    }
+    out.push({ path, direct, patchPath, diffStat, files })
   }
-  const at = task.worktree ?? (direct === null ? null : { path: direct.dir, baseRef: direct.baseRef! })
-  if (at === null) return null
-  const patchPath = `${ctx.opts.stateDir}/tasks/${task.id}.patch`
-  const { tree, files } = await diffToFile(ctx.io, at.path, at.baseRef, await scratchPath(ctx.io, at.path, 'index'), patchPath)
-  if (files.length === 0) return null
-  const base = (await git(ctx.io, ['-C', at.path, 'rev-parse', '--verify', `${at.baseRef}^{commit}`])).trim()
-  let diffStat = await git(ctx.io, ['-C', at.path, 'diff-tree', '-r', '--no-renames', '--stat', base, tree])
-  const others = direct === null ? [] : (task.alsoChanged ?? []).filter(o => o.files.some(f => files.includes(f)))
-  if (others.length > 0) {
-    diffStat += `Other tasks changed some of these files in ${direct!.dir} meanwhile; those changes are theirs:\n${others.map(o => ` 「${o.title}」(${o.taskId}): ${o.files.filter(f => files.includes(f)).join(', ')}`).join('\n')}\n`
-  }
-  return { patchPath, diffStat, files }
+  return out
 }
 
 // ---- the end of a daily agent's turn ---------------------------------------------------------
@@ -251,6 +258,23 @@ const ACCEPTANCE_WAKE = 'The acceptance review (agent '
 const DIAGNOSIS_WAKE = 'An independent diagnosis (agent '
 const STATUS_ASK = 'Your last answer ended without the report lines. Add them now, in a short answer: the `验证：` block with each verification command you ran and its result, then the last line `状态：已完成`, `状态：需要用户决定`, `状态：受阻：<one sentence>` or `状态：进行中：<what it waits for>`.'
 export const OWN_WAKES = [STATUS_ASK, ACCEPTANCE_WAKE, DIAGNOSIS_WAKE]
+
+// A daily executor's resumed turn has started: a message reached it after it had answered. The time
+// supersedes an acceptance of its earlier result (brief.ts checkedDeliverable), whatever the turn
+// ends with, an interruption included.
+export async function noteExecutorTurn(ctx: Ctx, agentId: string): Promise<void> {
+  const taskId = ctx.st.agents.get(agentId)
+  if (taskId === undefined) return
+  const task = await ctx.reg.get(taskId)
+  if (task === undefined) throw new Error(`task ${taskId} of agent ${agentId} is missing`)
+  if (task.kind !== 'daily' || task.agents[agentId]?.role !== 'executor') return
+  const now = await ctx.io.now()
+  await ctx.reg.update(taskId, t => {
+    const a = t.agents[agentId]!
+    a.turnAt = now
+    a.state = 'running'
+  }, { type: 'turn-start', agentId })
+}
 
 export async function onDailyComplete(ctx: Ctx, e: TurnCompleteInput): Promise<void> {
   const id = e.agentId
@@ -291,8 +315,8 @@ async function executorDone(ctx: Ctx, task: TaskRecord, agent: AgentRecord, answ
   const id = agent.agentId
   let status = parseStatus(answer)
   if (status === null) {
-    const change = await changeOf(ctx, task)
-    if (change !== null && !statusAsked.has(id)) {
+    const changes = await changesOf(ctx, task)
+    if (changes.length > 0 && !statusAsked.has(id)) {
       statusAsked.add(id)
       await ctx.reg.update(task.id, t => {
         const a = t.agents[id]!
@@ -333,11 +357,13 @@ async function executorDone(ctx: Ctx, task: TaskRecord, agent: AgentRecord, answ
     return blocked(ctx, (await ctx.reg.get(task.id))!, id, status.blocker!)
   }
 
-  // Done. A fix after a failed acceptance is not checked again: an answer ends the task, a change
-  // goes to the person in one fix-confirm question (a later report of the same fix replaces it), and
-  // again with each later result once they declined to integrate it. Once the person has spoken to
-  // the task after the fix, the next 'done' is new work and is checked like a first result. A failed
-  // result the person had integrated is settled.
+  // Done, or stopped at the person's word. A fix after a failed acceptance is not checked again: an
+  // answer ends the task, a change goes to the person in one fix-confirm question (a later report of
+  // the same fix replaces it), and again with each later result once they declined to integrate it.
+  // A fix the person stopped takes the same way. Once the person has spoken to the task after the
+  // fix, the next 'done' is new work and is checked like a first result. A failed result the person
+  // had integrated is settled.
+  const stopped = status.status === 'stopped'
   const last = task.deliverables[task.deliverables.length - 1]
   const failed = last?.acceptance !== undefined && !last.acceptance.pass && last.integration === undefined ? last.acceptance : undefined
   const pending = fixPending(task)
@@ -351,21 +377,21 @@ async function executorDone(ctx: Ctx, task: TaskRecord, agent: AgentRecord, answ
       d.verification = status!.verification
       d.acceptance!.fixed = { at: now }
       supersedeFixConfirms(t, now)
-    }, { type: 'report', agentId: id, status: 'done', fix: true })
+    }, { type: 'report', agentId: id, status: status.status, fix: true })
     const fresh = (await ctx.reg.get(task.id))!
-    // A direct task's fix is already in the project directory: it is recorded and the task ends.
-    if (fresh.direct != null) {
+    // A fix made in the project directories themselves is already there: it is recorded and the
+    // task ends. A fix in a task worktree waits for the person.
+    const waiting = (await changesOf(ctx, fresh)).filter(c => !c.direct)
+    if (waiting.length === 0) {
       await integrateDaily(ctx, fresh)
       return
     }
-    const change = await changeOf(ctx, fresh)
-    if (change === null) {
-      await ctx.reg.update(task.id, t => { t.state = 'done'; t.completedAt = now }, { type: 'state', state: 'done', reason: 'fixed after a failed acceptance, no change to integrate' })
-      return
-    }
+    const several = waiting.length > 1
+    const files = waiting.flatMap(c => c.files.map(f => (several ? `${c.path}/${f}` : f)))
+    const roots = workspaces(fresh).filter(w => waiting.some(c => c.path === w.worktree?.path)).map(w => w.project.root)
     const decision = await askDecision(ctx, fresh, {
       kind: 'fix-confirm',
-      question: `「${fresh.title}」的改动在检查后返工过一次，执行者已经修复，说明见它刚才的回答。改动了 ${change.files.length} 个文件（${change.files.slice(0, 8).join('、')}${change.files.length > 8 ? ' 等' : ''}）。回复是否把改动整合到 ${fresh.project?.root ?? '项目'}。`,
+      question: `「${fresh.title}」的改动在检查后返工过一次，${stopped ? '执行者按你的要求停止了返工' : '执行者已经修复'}，说明见它刚才的回答。改动了 ${files.length} 个文件（${files.slice(0, 8).join('、')}${files.length > 8 ? ' 等' : ''}）。回复是否把改动整合到 ${roots.join('、')}。`,
       options: ['整合', '不整合'],
       data: { agentId: id, change: 'yes' },
     }, 'waiting-user')
@@ -378,7 +404,7 @@ async function executorDone(ctx: Ctx, task: TaskRecord, agent: AgentRecord, answ
     await ctx.reg.update(task.id, t => {
       t.agents[id]!.reports.push(report)
       t.agents[id]!.state = 'idle'
-    }, { type: 'report', agentId: id, status: 'done', held: asked.id })
+    }, { type: 'report', agentId: id, status: status.status, held: asked.id })
     return
   }
 
@@ -386,22 +412,33 @@ async function executorDone(ctx: Ctx, task: TaskRecord, agent: AgentRecord, answ
   await ctx.reg.update(task.id, t => {
     t.agents[id]!.reports.push(report)
     t.agents[id]!.state = 'idle'
-    t.deliverables.push({ at: now, summary: answer, verification: status!.verification })
+    t.deliverables.push({ at: now, summary: answer, verification: status!.verification, ...(stopped ? { stopped: true as const } : {}) })
     supersedeFixConfirms(t, now)
-  }, { type: 'report', agentId: id, status: 'done' })
+  }, { type: 'report', agentId: id, status: status.status })
   const fresh = (await ctx.reg.get(task.id))!
-  const change = await changeOf(ctx, fresh)
+  // The person told the executor to stop: its answer is what they chose to have, and a reviewer
+  // would only ask it to resume the work they ended.
+  if (stopped) {
+    await integrateDaily(ctx, fresh)
+    return
+  }
+  const changes = await changesOf(ctx, fresh)
   // An answer that only added the report lines is judged together with the answer they belong to.
   const judged = previous?.status === 'missing' ? `${previous.text}\n\n${answer}` : answer
   const api = await ctx.host.session.messages({ agentId: id, as: 'api' })
   if (!Array.isArray(api)) throw new Error(`messages of agent ${id}: ${api.deny}`)
   const turn = endedTurn(api as ApiMessage[], OWN_WAKES)
-  const c = await judgeCheck(judgeCtx(ctx), checkInput({ asked: stripOutcomeNote(turn.asked), tools: turn.tools, answer: judged, diffStat: change?.diffStat ?? null }))
-  await ctx.reg.update(task.id, t => {
-    t.deliverables[t.deliverables.length - 1]!.check = { needed: c.check, p: c.p, provider: c.provider }
-  }, { type: 'check', agentId: id, needed: c.check, p: c.p, provider: c.provider, tools: turn.tools })
-  if (c.check) await startAcceptance(ctx, (await ctx.reg.get(task.id))!, fresh.agents[id]!, change)
-  else await integrateDaily(ctx, (await ctx.reg.get(task.id))!)
+  const c = await judgeCheck(judgeCtx(ctx), checkInput({ asked: stripOutcomeNote(turn.asked), tools: turn.tools, answer: judged, diffStat: diffStatOf(changes) }))
+  // The judgment belongs to this result (`now`). The executor may have gone back to work while it
+  // was asked (the person wrote to it, stopped it or interrupted it): then the judgment is recorded
+  // and nothing starts; a stopped result was integrated by its own report.
+  const superseded = resultStanding((await ctx.reg.get(task.id))!, now).superseded
+  const judgedTask = await ctx.reg.update(task.id, t => {
+    t.deliverables[resultStanding(t, now).index]!.check = { needed: c.check, p: c.p, provider: c.provider }
+  }, { type: 'check', agentId: id, needed: c.check, p: c.p, provider: c.provider, tools: turn.tools, ...(superseded ? { superseded: true } : {}) })
+  if (superseded) return
+  if (c.check) await startAcceptance(ctx, judgedTask, fresh.agents[id]!, changes, now)
+  else await integrateDaily(ctx, judgedTask)
 }
 
 // Whether the task's latest deliverable failed its acceptance, is not integrated, and the person has
@@ -426,10 +463,10 @@ export async function rerunCheck(ctx: Ctx, task: TaskRecord, role: 'acceptance' 
   if (task.owner.kind !== 'agent') throw new Error(`daily task ${task.id} has no executor`)
   const executor = task.agents[task.owner.agentId]
   if (executor === undefined) throw new Error(`task ${task.id}: executor ${task.owner.agentId} is not recorded`)
-  const change = await changeOf(ctx, task)
-  if (role === 'acceptance') return startAcceptance(ctx, task, executor, change)
+  const changes = await changesOf(ctx, task)
+  if (role === 'acceptance') return startAcceptance(ctx, task, executor, changes, latestResult(task).at)
   const blocker = blockerOfDiagnosis(task)
-  const brief = diagnosisBrief(task, executor, blocker, change?.diffStat ?? null)
+  const brief = diagnosisBrief(task, executor, blocker, changes)
   const rule = ruleById(ctx.rules, 'review')
   await spawnAgent(ctx, task, {
     role: 'diagnosis',
@@ -445,9 +482,10 @@ export async function rerunCheck(ctx: Ctx, task: TaskRecord, role: 'acceptance' 
 }
 
 // The acceptance runs under the `review` rule on the model of the subscription with the most of its
-// week left (routing rules, `acceptance`), read from Magpie each time a check starts.
-async function startAcceptance(ctx: Ctx, task: TaskRecord, executor: AgentRecord, change: Change | null): Promise<void> {
-  const brief = acceptanceBrief(task, executor, change === null ? null : { patchPath: change.patchPath, diffStat: change.diffStat })
+// week left (routing rules, `acceptance`), read from Magpie each time a check starts. It checks the
+// result recorded at `checks` and stays bound to it while its start waits on quotas, Jev and the spawn.
+async function startAcceptance(ctx: Ctx, task: TaskRecord, executor: AgentRecord, changes: ProjectChange[], checks: number): Promise<void> {
+  const brief = acceptanceBrief(task, executor, changes)
   const rule = ruleById(ctx.rules, 'review')
   const pick = acceptancePick(ctx.rules, await readQuotas(ctx.io, ctx.opts.gatewayUrl))
   await spawnAgent(ctx, task, {
@@ -459,8 +497,16 @@ async function startAcceptance(ctx: Ctx, task: TaskRecord, executor: AgentRecord
     brief,
     name: nextName(task, workerOf(task), 'acc'),
     description: `验收：${task.title}`,
-    worktree: change === null ? null : workspaceOf(task),
+    worktree: changes[0]?.path ?? null,
+    checks,
   })
+}
+
+// The task's latest deliverable: the result a check a Router restart cut off is started again for.
+function latestResult(task: TaskRecord): TaskRecord['deliverables'][number] {
+  const d = task.deliverables[task.deliverables.length - 1]
+  if (d === undefined) throw new Error(`task ${task.id}: an acceptance needs a result on record`)
+  return d
 }
 
 function firstSentence(text: string): string {
@@ -474,14 +520,17 @@ async function acceptanceDone(ctx: Ctx, task: TaskRecord, agent: AgentRecord, an
   const executorId = task.owner.kind === 'agent' ? task.owner.agentId : null
   if (executorId === null) throw new Error(`daily task ${task.id} has no executor`)
   const now = await ctx.io.now()
+  const checked = checkedDeliverable(task, agent)
+  // The executor went back to work after the checked result (the person wrote to it, stopped it or
+  // interrupted it): the verdict stays in this agent's report and the log, and wakes and applies
+  // nothing. It is not written to the result, so a later answer is not taken for its fix.
   await ctx.reg.update(task.id, t => {
     const a = t.agents[agent.agentId]!
     a.state = 'done'
     a.reports.push({ at: now, status: 'done', text: answer, verification: [] })
-    const d = t.deliverables[t.deliverables.length - 1]
-    if (d === undefined) throw new Error(`task ${t.id}: an acceptance finished with no deliverable on record`)
-    d.acceptance = { agentId: agent.agentId, pass: verdict.pass, notes: verdict.notes }
-  }, { type: 'acceptance', agentId: agent.agentId, pass: verdict.pass })
+    if (!checked.superseded) t.deliverables[checked.index]!.acceptance = { agentId: agent.agentId, pass: verdict.pass, notes: verdict.notes }
+  }, { type: 'acceptance', agentId: agent.agentId, pass: verdict.pass, ...(checked.superseded ? { superseded: true } : {}) })
+  if (checked.superseded) return
 
   if (!verdict.pass) {
     await ctx.reg.update(task.id, t => { t.state = 'running' }, { type: 'state', state: 'running', reason: 'acceptance failed' })
@@ -491,41 +540,41 @@ async function acceptanceDone(ctx: Ctx, task: TaskRecord, agent: AgentRecord, an
   await integrateDaily(ctx, (await ctx.reg.get(task.id))!)
 }
 
-// Applies a daily task's change to the project main directory and ends the task. `applied` holds
-// the files it applied; a task without a workspace, or whose workspace holds nothing new, has none.
-// A direct task's change is already there: it is recorded as the result (settleDirect).
-// On a conflict the task waits for the person instead (plan section 9.11). The person is not told
-// of an acceptance that passed or of an integration: the executor is, with the next message that
-// reaches it (withOutcome).
-async function integrateDaily(ctx: Ctx, task: TaskRecord): Promise<{ status: 'done'; applied: string[] } | { status: 'conflict' }> {
-  const finish = async () => {
-    const now = await ctx.io.now()
-    await ctx.reg.update(task.id, t => {
-      t.state = 'done'
-      t.completedAt = now
-    }, { type: 'state', state: 'done' })
-  }
-  if (task.direct != null) {
-    const settled = await settleDirect(ctx.io, ctx.reg, task.id)
-    await finish()
-    return { status: 'done', applied: settled.status === 'in-place' ? settled.files : [] }
-  }
-  if (task.worktree === null || task.project === null) {
-    await finish()
-    return { status: 'done', applied: [] }
-  }
-  const result = await integrate(ctx.io, ctx.reg, { taskId: task.id, repo: task.project.root, source: task.worktree.path, target: task.project.root, baseRef: task.worktree.baseRef })
-  if (result.status === 'conflict') {
+// Brings a daily task's change into its projects and ends the task: a worktree's change is applied
+// to the project main directory, a change made in a project directory itself is recorded as the
+// result (integrateTask). `brought` holds the projects that got a change; a task without a working
+// directory, or whose working directories hold nothing new, has none. On a conflict the task waits
+// for the person instead (plan section 9.11); the projects without a conflict are applied all the
+// same. The person is not told of an acceptance that passed or of an integration: the executor is,
+// with the next message that reaches it (withOutcome).
+export async function integrateDaily(ctx: Ctx, task: TaskRecord): Promise<{ status: 'done'; brought: ProjectOutcome[] } | { status: 'conflict' }> {
+  const outcomes = await integrateTask(ctx.io, ctx.reg, task.id)
+  const brought = outcomes.filter(o => o.status === 'applied' || o.status === 'in-place')
+  const conflicts = outcomes.filter(o => o.status === 'conflict')
+  if (conflicts.length > 0) {
+    const one = (o: ProjectOutcome) => `涉及文件：${o.files.join('、')}\n${firstSentence(o.conflict!.detail)}\n工作副本保留在 ${o.conflict!.source}。`
+    const question = outcomes.length === 1
+      ? `「${task.title}」的改动不能直接整合到 ${conflicts[0]!.root}：与项目当前的文件冲突。\n${one(conflicts[0]!)}处理好冲突后回复“整合”重试，或回复“不整合”。`
+      : [
+          `「${task.title}」的改动有 ${conflicts.length} 个项目不能直接整合：与项目当前的文件冲突。`,
+          ...conflicts.map(o => `${o.root}：\n${one(o)}`),
+          ...(brought.length > 0 ? [`其余项目的改动已经在项目目录中：${brought.map(o => o.root).join('、')}。`] : []),
+          '处理好冲突后回复“整合”重试，或回复“不整合”。',
+        ].join('\n')
     await askDecision(ctx, task, {
       kind: 'integration-conflict',
-      question: `「${task.title}」的改动不能直接整合到 ${task.project.root}：与项目当前的文件冲突。\n涉及文件：${result.files.join('、')}\n${firstSentence(result.detail)}\n工作副本保留在 ${task.worktree.path}。处理好冲突后回复“整合”重试，或回复“不整合”。`,
+      question,
       options: ['整合', '不整合'],
-      data: { files: result.files.join('\n'), detail: result.detail },
+      data: { files: conflicts.flatMap(o => o.files.map(f => (conflicts.length > 1 ? `${o.root}/${f}` : f))).join('\n'), detail: conflicts.map(o => o.conflict!.detail).join('\n') },
     }, 'waiting-user')
     return { status: 'conflict' }
   }
-  await finish()
-  return { status: 'done', applied: result.status === 'applied' ? result.files : [] }
+  const now = await ctx.io.now()
+  await ctx.reg.update(task.id, t => {
+    t.state = 'done'
+    t.completedAt = now
+  }, { type: 'state', state: 'done' })
+  return { status: 'done', brought }
 }
 
 // A message on its way to a daily task's executor, with the note on what became of its last result
@@ -583,8 +632,7 @@ async function blocked(ctx: Ctx, task: TaskRecord, executorId: string, descripti
     b.history.push({ at: now, step: 'diagnosis', agentId: executorId, note: `blocked report: ${description}`, ...(match ? { match } : {}) })
   }, { type: 'blocker', blockerId: id, new: existing === undefined, ...(match ? { match } : {}) })
   const fresh = (await ctx.reg.get(task.id))!
-  const change = await changeOf(ctx, fresh)
-  const brief = diagnosisBrief(fresh, fresh.agents[executorId]!, fresh.blockers[id]!, change?.diffStat ?? null)
+  const brief = diagnosisBrief(fresh, fresh.agents[executorId]!, fresh.blockers[id]!, await changesOf(ctx, fresh))
   const rule = ruleById(ctx.rules, 'review')
   await spawnAgent(ctx, fresh, {
     role: 'diagnosis',
@@ -612,13 +660,19 @@ async function noProgress(ctx: Ctx, task: TaskRecord, blockerId: string, why: st
 
 // The blocker a diagnosis agent was started for: the latest diagnosis entry (one diagnosis runs at a
 // time in a daily task; its executor waits for it).
-function blockerOfDiagnosis(task: TaskRecord): Blocker {
-  let best: { b: Blocker; at: number } | null = null
+// The blocker the latest diagnosis looks at, and when the executor's blocked report that started it
+// was taken up (the diagnosis entry blocked() wrote).
+export function diagnosedBlocker(task: TaskRecord): { blocker: Blocker; at: number } {
+  let best: { blocker: Blocker; at: number } | null = null
   for (const b of Object.values(task.blockers)) {
-    for (const h of b.history) if (h.step === 'diagnosis' && (best === null || h.at >= best.at)) best = { b, at: h.at }
+    for (const h of b.history) if (h.step === 'diagnosis' && (best === null || h.at >= best.at)) best = { blocker: b, at: h.at }
   }
-  if (best === null) throw new Error(`task ${task.id}: a diagnosis finished with no blocker on record`)
-  return best.b
+  if (best === null) throw new Error(`task ${task.id}: a diagnosis has no blocker on record`)
+  return best
+}
+
+function blockerOfDiagnosis(task: TaskRecord): Blocker {
+  return diagnosedBlocker(task).blocker
 }
 
 async function diagnosisDone(ctx: Ctx, task: TaskRecord, agent: AgentRecord, answer: string): Promise<void> {
@@ -626,7 +680,7 @@ async function diagnosisDone(ctx: Ctx, task: TaskRecord, agent: AgentRecord, ans
   if (suggestion === null) throw new Error(`diagnosis agent ${agent.name ?? agent.agentId} ended without a 诊断建议 line`)
   if (task.owner.kind !== 'agent') throw new Error(`daily task ${task.id} has no executor`)
   const executor = task.agents[task.owner.agentId]!
-  const blocker = blockerOfDiagnosis(task)
+  const { blocker, at: reportedAt } = diagnosedBlocker(task)
   const now = await ctx.io.now()
   const line = suggestion.action === 'replace' ? `更换模型 ${suggestion.model} / ${suggestion.effort}` : suggestion.action === 'continue' ? '继续原代理' : '交给用户'
   await ctx.reg.update(task.id, t => {
@@ -638,7 +692,10 @@ async function diagnosisDone(ctx: Ctx, task: TaskRecord, agent: AgentRecord, ans
     const entry = [...t.blockers[blocker.id]!.history].reverse().find(h => h.step === 'diagnosis')!
     entry.note = `${entry.note} → 诊断建议：${line}`
     entry.agentId = agent.agentId
-  }, { type: 'diagnosis', agentId: agent.agentId, blockerId: blocker.id, action: suggestion.action, ...(suggestion.action === 'replace' ? { model: suggestion.model, effort: suggestion.effort } : {}) })
+  }, { type: 'diagnosis', agentId: agent.agentId, blockerId: blocker.id, action: suggestion.action, ...(suggestion.action === 'replace' ? { model: suggestion.model, effort: suggestion.effort } : {}), ...(resumedSince(task, reportedAt) ? { superseded: true } : {}) })
+  // The executor went back to work after the blocked report (the person wrote to it, stopped it or
+  // interrupted it): the suggestion stays in the record and wakes or asks nothing.
+  if (resumedSince(task, reportedAt)) return
 
   if (suggestion.action === 'continue') {
     await ctx.reg.update(task.id, t => { t.state = 'running' }, { type: 'state', state: 'running', reason: 'diagnosis: continue' })
@@ -651,13 +708,15 @@ async function diagnosisDone(ctx: Ctx, task: TaskRecord, agent: AgentRecord, ans
     return
   }
 
-  const same = (x: string, y: string) => canonical(x, ctx.catalog) === canonical(y, ctx.catalog)
+  const same = (x: string, y: string) => sameModel(x, y, ctx.catalog)
+  // A model whose ID names its level runs at that level: the redelegation cannot raise it.
+  const level = nameLevel(suggestion.model)
   if (blocker.modelChanges >= 1) {
     return noProgress(ctx, task, blocker.id, `诊断建议更换为 ${displayName(suggestion.model, ctx.rules)}/${suggestion.effort}，但这个阻碍已经更换过一次模型。`)
   }
   const sub = executor.ruleId === null ? null : substituteAllowed(ctx.rules, executor.ruleId, suggestion.model, suggestion.effort, same)
   if (sub === null || !isAvailable(suggestion.model, ctx.catalog)) {
-    const effort = raise(suggestion.effort)
+    const effort = level ?? raise(suggestion.effort)
     await askDecision(ctx, task, {
       kind: 'model-change-confirm',
       question: `「${task.title}」受阻（${blocker.id}：${blocker.description}）。诊断建议改用 ${displayName(suggestion.model, ctx.rules)}/${suggestion.effort}，这不在规则 ${executor.ruleId ?? 'none'} 的自动替代候选中，需要你确认。\n${answer}`,
@@ -666,7 +725,7 @@ async function diagnosisDone(ctx: Ctx, task: TaskRecord, agent: AgentRecord, ans
     }, 'waiting-user')
     return
   }
-  const effort = raise(suggestion.effort)
+  const effort = level ?? raise(suggestion.effort)
   await ctx.reg.update(task.id, t => {
     const b = t.blockers[blocker.id]!
     b.modelChanges += 1
@@ -696,13 +755,15 @@ export async function handOver(ctx: Ctx, task: TaskRecord, previous: AgentRecord
     await spawnAgent(ctx, task, { ...common, role: 'assessment', ruleId: previous.ruleId, brief: `${a.reasonLine}\n${assessmentBrief(task, ctx.rules, task.requestedModel)}`, name: nextName(task, worker, 'x'), description: task.title, worktree: null })
   } else if (previous.role === 'acceptance') {
     if (task.owner.kind !== 'agent') throw new Error(`daily task ${task.id} has no executor`)
-    const change = await changeOf(ctx, task)
-    const brief = acceptanceBrief(task, task.agents[task.owner.agentId]!, change === null ? null : { patchPath: change.patchPath, diffStat: change.diffStat })
-    await spawnAgent(ctx, task, { ...common, role: 'acceptance', ruleId: previous.ruleId, brief: `${a.reasonLine}\n${brief}`, name: nextName(task, worker, 'acc'), description: `验收：${task.title}`, worktree: change === null ? null : workspaceOf(task) })
+    // The replacement checks the result the previous acceptance was checking.
+    const checks = previous.checks
+    if (checks === undefined) throw new Error(`task ${task.id}: acceptance ${previous.agentId} names no result it checks`)
+    const changes = await changesOf(ctx, task)
+    const brief = acceptanceBrief(task, task.agents[task.owner.agentId]!, changes)
+    await spawnAgent(ctx, task, { ...common, role: 'acceptance', ruleId: previous.ruleId, brief: `${a.reasonLine}\n${brief}`, name: nextName(task, worker, 'acc'), description: `验收：${task.title}`, worktree: changes[0]?.path ?? null, checks })
   } else if (previous.role === 'diagnosis') {
     if (task.owner.kind !== 'agent') throw new Error(`daily task ${task.id} has no executor`)
-    const change = await changeOf(ctx, task)
-    const brief = diagnosisBrief(task, task.agents[task.owner.agentId]!, blockerOfDiagnosis(task), change?.diffStat ?? null)
+    const brief = diagnosisBrief(task, task.agents[task.owner.agentId]!, blockerOfDiagnosis(task), await changesOf(ctx, task))
     await spawnAgent(ctx, task, { ...common, role: 'diagnosis', ruleId: previous.ruleId, brief: `${a.reasonLine}\n${brief}`, name: nextName(task, worker, 'diag'), description: `诊断：${task.title}` })
   } else {
     throw new Error(`no takeover for a ${previous.role} agent: its parent agent decides`)
@@ -772,37 +833,57 @@ async function lastUserWords(ctx: Ctx, agentId: string): Promise<string> {
 
 // ---- open_project ----------------------------------------------------------------------------
 
+// Roles that change files; the others only check and open no project of their own.
+const OPENING_ROLES: readonly AgentRole[] = ['executor', 'implementer', 'helper']
+
 export async function onOpenProject(ctx: Ctx, agentId: string, args: { project?: unknown }): Promise<string> {
   const taskId = ctx.st.agents.get(agentId)
   if (taskId === undefined) throw new Error('open_project is for subagents magpie-tasks routed; this agent is not one of them')
-  const task = await ctx.reg.get(taskId)
-  if (task === undefined) throw new Error(`task ${taskId} is missing`)
   if (typeof args.project !== 'string' || !args.project.startsWith('/')) throw new Error('project must be the absolute path of the project directory')
   const named = args.project.replace(/\/+$/, '') || '/'
   if (!(await ctx.io.exists(named))) throw new Error(`${named} does not exist`)
   const project = (await ctx.io.realPath(named)) ?? named
-  const current = workspaceOf(task)
-  if (current !== null) {
-    const top = task.direct?.dir ?? (await projectDir(ctx.io, task.project!.root)).dir
-    const within = (dir: string) => project === dir || project.startsWith(`${dir}/`)
-    if (!within(current) && (await projectDir(ctx.io, project)).dir !== top) {
-      throw new Error(`this task already works on ${top} (in ${current}); one task changes one project`)
+  // A call reads the task's projects and then adds one or moves one. Calls an agent makes side by
+  // side run one after the other, so each answers from what the one before it recorded.
+  return placing(ctx.reg, taskId, async () => {
+    const task = await ctx.reg.get(taskId)
+    if (task === undefined) throw new Error(`task ${taskId} is missing`)
+    const agent = task.agents[agentId]
+    if (agent === undefined) throw new Error(`agent ${agentId} is not recorded in task ${taskId}`)
+    // A directory inside one of the task's working directories names that project; any other names
+    // the project whose root is its repository top (the directory itself outside Git).
+    const within = workspaces(task).find(w => {
+      const p = pathOf(w)
+      return p !== null && (project === p || project.startsWith(`${p}/`))
+    })
+    const top = within?.project.root ?? (await projectDir(ctx.io, project)).dir
+    const current = workspaceAt(task, top)
+    const before = current === null ? null : pathOf(current.w)
+    // The tasks that change the project in place beside this one, or made it take a worktree.
+    let others: { id: string; title: string }[]
+    if (before !== null) {
+      others = (await leaveIfTaken(ctx.io, ctx.reg, ctx.opts, task.id, top))?.others ?? []
+    } else {
+      if (!OPENING_ROLES.includes(agent.role)) throw new Error(`this task does not change ${top}, and you only check its result: you open no project`)
+      const placed = await placeLocked(ctx.io, ctx.reg, ctx.opts, task.id, top)
+      await ctx.reg.log(task.id, { type: 'placement', line: placementLine(placed) })
+      others = placed.others
     }
-    const moved = await leaveIfTaken(ctx.io, ctx.reg, ctx.opts, task.id)
     const fresh = (await ctx.reg.get(task.id))!
-    const path = workspaceOf(fresh)!
-    await ctx.reg.update(task.id, t => { t.agents[agentId]!.worktree = path; t.agents[agentId]!.cwd = path }, { type: 'workspace-agent', agentId, path, existing: true })
-    const sub = subOf(top, current, project)
-    if (moved !== null) return worktreeText(path, sub, moved.others)
-    return fresh.worktree !== null ? worktreeText(path, sub, []) : directText(path, sub, fresh.direct!.baseRef !== null, [])
-  }
-  // A daily task's project root is the repository top (the directory itself outside Git).
-  const top = (await projectDir(ctx.io, project)).dir
-  const placed = await placeTask(ctx.io, ctx.reg, ctx.opts, task.id, top)
-  await ctx.reg.update(task.id, t => { t.agents[agentId]!.worktree = placed.path; t.agents[agentId]!.cwd = placed.path }, { type: 'workspace-agent', agentId, path: placed.path })
-  await ctx.reg.log(task.id, { type: 'placement', line: placementLine(placed) })
-  const sub = subOf(top, placed.path, project)
-  return placed.mode === 'worktree' ? worktreeText(placed.path, sub, placed.others) : directText(placed.path, sub, placed.git, placed.others)
+    const w = workspaceAt(fresh, top)!.w
+    const shared = pathOf(w)!
+    // The first project an agent opens becomes its working directory; an agent that has one keeps it.
+    if (fresh.agents[agentId]!.worktree === null) {
+      await ctx.reg.update(task.id, t => { t.agents[agentId]!.worktree = shared; t.agents[agentId]!.cwd = shared }, { type: 'workspace-agent', agentId, path: shared, ...(before !== null ? { existing: true } : {}) })
+    }
+    const range = writeRange(fresh, { worktree: fresh.agents[agentId]!.worktree ?? shared })
+    // An agent with a separate copy of this project works in the copy.
+    const path = range.copies[shared] ?? shared
+    const sub = subOf(top, before ?? shared, project)
+    const also = range.dirs.filter(d => d !== path)
+    if (w.worktree !== null || path !== shared) return worktreeText(path, sub, others, also)
+    return directText(path, sub, w.direct!.baseRef !== null, others, also)
+  })
 }
 
 // Where the named directory lies below the project top (or below the workspace, when it names a
@@ -812,7 +893,9 @@ function subOf(top: string, workspace: string, project: string): string {
   return ''
 }
 
-function directText(dir: string, sub: string, git: boolean, others: { id: string; title: string }[]): string {
+const alsoLine = (also: string[]) => `This task also changes ${also.map(d => `\`${d}\``).join(', ')}: those directories stay open, and each project's changes are made in its own directory.`
+
+function directText(dir: string, sub: string, git: boolean, others: { id: string; title: string }[], also: string[]): string {
   const where = sub === '' ? dir : `${dir}/${sub}`
   const lines = [`Work directly in the project directory ${where}: change files there and \`cd ${where}\` before Bash commands. No other task changes this project in place now.`]
   if (!git) {
@@ -820,15 +903,17 @@ function directText(dir: string, sub: string, git: boolean, others: { id: string
     if (others.length > 0) lines.push(`Other tasks also change this directory in place: ${others.map(o => `「${o.title}」 (${o.id})`).join(', ')}. Before editing a file, check that it is not one of theirs in progress, and say in your report which files you changed.`)
   }
   lines.push('Your changes are in the project directory as soon as you make them; an acceptance check, when the result warrants one, comes after. Commit or push only when the person asks.')
+  if (also.length > 0) lines.push(alsoLine(also))
   return lines.join('\n')
 }
 
-function worktreeText(path: string, sub: string, others: { id: string; title: string }[]): string {
+function worktreeText(path: string, sub: string, others: { id: string; title: string }[], also: string[]): string {
   const where = sub === '' ? path : `${path}/${sub}`
   return [
     `Task worktree: ${path}${sub === '' ? '' : ` (the project directory you named is ${where})`}.${others.length > 0 ? ` Another task changes the project directory in place (${others.map(o => `「${o.title}」`).join(', ')}), so this task works in a copy.` : ''}`,
     'It holds a snapshot of the project, including uncommitted and untracked files; files Git ignores (node_modules, build output) are not there, so install dependencies in it when the work needs them.',
-    `Change files only in this worktree; \`cd ${where}\` before Bash commands. Do not commit or push in it: the plugin applies the change to the project main directory after your turn ends, where you commit and push when the person asks.`,
+    `Change this project's files only in this worktree; \`cd ${where}\` before Bash commands. Do not commit or push in it: the plugin applies the change to the project main directory after your turn ends, where you commit and push when the person asks.`,
+    ...(also.length > 0 ? [alsoLine(also)] : []),
   ].join('\n')
 }
 
@@ -901,7 +986,8 @@ export async function applyDailyDecision(ctx: Ctx, task: TaskRecord, decision: D
       if (c.choice === 'reject') {
         await resolve(ctx, task, decision, `reject: ${text}`)
         await ctx.reg.update(task.id, t => { t.state = 'paused'; t.pausedByUser = true }, { type: 'state', state: 'paused', reason: `${decision.kind} rejected` })
-        return task.worktree !== null ? `好的，不整合；改动保留在工作副本 ${task.worktree.path}。` : '好的，不接受这个结果；任务已暂停。'
+        const kept = workspaces(task).flatMap(w => (w.worktree !== null ? [w.worktree.path] : []))
+        return kept.length > 0 ? `好的，不整合；改动保留在工作副本 ${kept.join('、')}。` : '好的，不接受这个结果；任务已暂停。'
       }
       await resolve(ctx, task, decision, `approve: ${text}`)
       // A question about a fixed answer, asked when the task had changed no files, settles the task alone.
@@ -912,7 +998,10 @@ export async function applyDailyDecision(ctx: Ctx, task: TaskRecord, decision: D
       }
       const r = await integrateDaily(ctx, (await ctx.reg.get(task.id))!)
       if (r.status === 'conflict') return '改动与项目当前的文件冲突，处理办法见刚发出的那条消息。'
-      return r.applied.length > 0 ? `好的，已整合到 ${task.project!.root}：${r.applied.join('、')}` : '好的，任务完成；没有需要整合的改动。'
+      if (r.brought.length === 0) return '好的，任务完成；没有需要整合的改动。'
+      return r.brought.length === 1
+        ? `好的，已整合到 ${r.brought[0]!.root}：${r.brought[0]!.files.join('、')}`
+        : `好的，已整合：${r.brought.map(o => `${o.root}（${o.files.join('、')}）`).join('；')}`
     }
     case 'route-confirm': {
       // Words outside a reply reach the assessment agent as its follow-up anyway: it owns the task.

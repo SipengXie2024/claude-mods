@@ -5,7 +5,7 @@ import { expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { canonical, catalogFrom, clampEffort, displayName, isAvailable, requestId, sameModel, withRuleModels } from '../src/model'
+import { canonical, catalogFrom, clampEffort, displayName, isAvailable, nameLevel, requestId, sameModel, sameModelAnyProvider, withRuleModels } from '../src/model'
 import { loadRules } from '../src/rules'
 import { nodeIo } from './node-io'
 
@@ -60,6 +60,24 @@ test('sameModel ignores aliases and the 1M variant', () => {
   expect(sameModel('claude/claude-opus-5-5', 'claude/claude-opus-5-5[1m]', cat)).toBe(true)
   expect(sameModel('claude/claude-opus-5-5', 'codex/gpt-6.1-sol', cat)).toBe(false)
   expect(sameModel('codex/gpt-6.1-sol', 'codex/gpt-6-sol', cat)).toBe(false)
+})
+
+test('a model ID that ends in a level names that level; its levels are one model, its providers one model only for a review', () => {
+  // Magpie lists every level of a model behind sub2api's Antigravity gateway as a model of its own.
+  for (const level of ['low', 'medium', 'high'] as const) expect(cat.picker).toContain(`hakimi/gemini-4-carbon-${level}`)
+  expect(nameLevel('hakimi/gemini-4-carbon-medium')).toBe('medium')
+  expect(nameLevel('hakimi/claude-opus-5-5-high')).toBe('high')
+  expect(nameLevel('claude/claude-opus-5-5[1m]')).toBeNull()
+  expect(nameLevel('codex/gpt-6-astra')).toBeNull()
+  expect(sameModel('hakimi/gemini-4-argon-high', 'hakimi/gemini-4-argon-medium', cat)).toBe(true)
+  expect(sameModel('hakimi/gemini-4-argon-high', 'hakimi/gemini-4-carbon-high', cat)).toBe(false)
+  // Another provider is another route: availability and the rules' substitutes keep them apart.
+  expect(sameModel('antigravity/gemini-4-argon', 'hakimi/gemini-4-argon-medium', cat)).toBe(false)
+  expect(sameModel('opus', 'hakimi/claude-opus-5-5-high', cat)).toBe(false)
+  expect(sameModelAnyProvider('antigravity/gemini-4-argon', 'hakimi/gemini-4-argon-medium', cat)).toBe(true)
+  expect(sameModelAnyProvider('opus', 'hakimi/claude-opus-5-5-high', cat)).toBe(true)
+  expect(sameModelAnyProvider('hakimi/gemini-4-argon-medium', 'hakimi/gemini-4-carbon-medium', cat)).toBe(false)
+  expect(sameModelAnyProvider('codex/gpt-6.1-sol', 'claude/claude-opus-5-5', cat)).toBe(false)
 })
 
 test('requestId gives Claude models their 1M variant and leaves Codex models alone', () => {

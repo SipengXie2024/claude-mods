@@ -4,11 +4,12 @@
 // and may not have finished, hands orphaned daily tasks back to the person, and reloads idle
 // architects after a context-memory update. Also the debug-log check for context-memory archive
 // failures in architect sessions.
-import { rerunCheck, tell } from './daily'
+import { resumedSince } from './brief'
+import { diagnosedBlocker, integrateDaily, rerunCheck, tell } from './daily'
 import { gitRun } from './git'
 import { fnv1a64, newId, type Io } from './io'
 import { claudeConfigDir, debugFile, listAgents, resumeSession, stopSession, type AgentsRow } from './launch'
-import { workspaceOf } from './workspace'
+import { pathOf, workspaces } from './workspace'
 import type { Ctx } from './state'
 import { defaultChat, send } from './telegram'
 import type { Decision, TaskRecord } from './types'
@@ -72,6 +73,8 @@ export function unfinishedIntegrations(logText: string): { target: string; files
     if (line.trim() === '') continue
     const entry = JSON.parse(line) as { type?: unknown; tree?: unknown; target?: unknown; files?: unknown; at?: unknown }
     if (entry.type !== 'integration-start' && entry.type !== 'integration') continue
+    // A change recorded where it was made in place applied no tree and has no start entry.
+    if (entry.type === 'integration' && entry.tree === undefined) continue
     if (typeof entry.tree !== 'string') throw new Error(`task log line ${i + 1}: ${String(entry.type)} without a tree`)
     if (entry.type === 'integration') { open.delete(entry.tree); continue }
     open.set(entry.tree, {
@@ -201,19 +204,21 @@ async function home(ctx: Ctx): Promise<string> {
 async function resumeStopped(ctx: Ctx, task: TaskRecord, result: { resumed: string[]; waiting: string[]; reported: string[] }, reports: Report[]): Promise<void> {
   const { io, reg } = ctx
   if (task.owner.kind !== 'session') return
-  let status = ''
   let problem: string | null = null
-  // The working directory: the task worktree, or the project directory a direct task works in
-  // (git status only in Git).
-  const ws = workspaceOf(task)
-  const name = task.worktree !== null ? '工作副本' : '项目目录'
-  const inGit = task.worktree !== null || (task.direct != null && task.direct.baseRef !== null)
-  if (ws !== null) {
-    if (!(await io.exists(ws))) problem = `${name} ${ws} 不存在`
-    else if (inGit) {
+  // The working directories, one per project: a task worktree, or the project directory the task
+  // changes in place (git status only in Git).
+  const dirs: string[] = []
+  for (const w of workspaces(task)) {
+    const ws = pathOf(w)
+    if (ws === null) continue
+    const name = w.worktree !== null ? '工作副本' : '项目目录'
+    const label = w.worktree !== null ? 'Task worktree' : 'Project directory the subagents work in directly'
+    if (!(await io.exists(ws))) problem ??= `${name} ${ws} 不存在`
+    else if (w.worktree === null && w.direct!.baseRef === null) dirs.push(`${label}: ${ws} (not a Git repository).`)
+    else {
       const r = await gitRun(io, ['-C', ws, 'status', '--short'])
-      if (r.exitCode !== 0) problem = `${name} ${ws} 的 git status 失败：${r.stderr.trim().split('\n')[0]}`
-      else status = r.stdout.trim()
+      if (r.exitCode !== 0) problem ??= `${name} ${ws} 的 git status 失败：${r.stderr.trim().split('\n')[0]}`
+      else dirs.push(`${label} ${ws}, git status --short:\n${r.stdout.trim() === '' ? '(clean)' : r.stdout.trim()}`)
     }
   }
   const logPath = `${ctx.opts.stateDir}/tasks/${task.id}.log.jsonl`
@@ -242,12 +247,8 @@ async function resumeStopped(ctx: Ctx, task: TaskRecord, result: { resumed: stri
     running.length === 0
       ? 'No subagent was running.'
       : `Subagents that were running or paused when it stopped: ${running.map(a => `${a.agentId}${a.name ? ` (${a.name})` : ''} ${a.model}/${a.effort} ${a.state}`).join('; ')}. Their runs ended with the session; delegate again what is unfinished.`,
-    ws === null
-      ? 'The task has no working directory.'
-      : inGit
-        ? `${task.worktree !== null ? 'Task worktree' : 'Project directory the subagents work in directly'} ${ws}, git status --short:\n${status === '' ? '(clean)' : status}`
-        : `Project directory the subagents work in directly: ${ws} (not a Git repository).`,
-    'Check the working directory and the subagents\' reports against the task, then continue.',
+    ...(dirs.length === 0 ? ['The task has no working directory.'] : dirs),
+    `Check the working ${dirs.length > 1 ? 'directories' : 'directory'} and the subagents\' reports against the task, then continue.`,
   ].join('\n')
   await resumeSession(ctx, task.owner.sessionId, message, task.project?.root ?? await home(ctx))
   await reg.log(task.id, { type: 'recovery', action: 'resume', sessionId: task.owner.sessionId })
@@ -282,9 +283,10 @@ async function report(ctx: Ctx, r: Report): Promise<void> {
 
 // `claude-telegram --resume telegram` keeps the Router's session ID, so recoveryAction leaves its daily
 // tasks alone; the restart still ended every subagent the old process ran. A task still running whose
-// agents are all gone was cut off: a check the plugin started (acceptance, diagnosis) runs again, and
-// an executor's or assessment's work waits for the person, whose reply resumes that agent here.
-export type StalledAction = 'rerun-acceptance' | 'rerun-diagnosis' | 'ask-person'
+// agents are all gone was cut off: a check the plugin started (acceptance, diagnosis) runs again, the
+// integration of a result that takes no check is finished, and an executor's or assessment's work
+// waits for the person, whose reply resumes that agent here.
+export type StalledAction = 'rerun-acceptance' | 'rerun-diagnosis' | 'integrate' | 'ask-person'
 
 export function stalledDaily(task: TaskRecord, routerSessionId: string, alive: ReadonlySet<string>): StalledAction | null {
   if (task.kind !== 'daily' || task.owner.kind !== 'agent' || task.owner.routerSessionId !== routerSessionId) return null
@@ -292,11 +294,19 @@ export function stalledDaily(task: TaskRecord, routerSessionId: string, alive: R
   const agents = Object.values(task.agents)
   if (agents.some(a => alive.has(a.agentId))) return null
   const latest = [...agents].sort((a, b) => b.startedAt - a.startedAt)[0]
-  if (latest?.role === 'diagnosis' && latest.state !== 'done') return 'rerun-diagnosis'
+  // A diagnosis cut off runs again unless the executor went back to work after the blocked report.
+  if (latest?.role === 'diagnosis' && latest.state !== 'done' && !resumedSince(task, diagnosedBlocker(task).at)) return 'rerun-diagnosis'
   const d = task.deliverables[task.deliverables.length - 1]
   const unchecked = d !== undefined && d.acceptance === undefined && d.integration === undefined
+  // When an executor went back to work after the latest result, the restart cut that work off too,
+  // and a check or integration of the result would be superseded (brief.ts resultStanding): the
+  // person is asked.
+  const current = unchecked && !resumedSince(task, d.at)
+  // A result the person stopped, or one judged to need no check, was being integrated: an acceptance
+  // cut off with it was checking an earlier result, and the plugin never checks these.
+  if (current && (d.stopped === true || d.check?.needed === false)) return 'integrate'
   // The deliverable waits for an acceptance that was cut off, or that never started.
-  if (unchecked && latest !== undefined && (latest.role === 'acceptance' ? latest.state !== 'done' : latest.reports[latest.reports.length - 1]?.status === 'done')) return 'rerun-acceptance'
+  if (current && latest !== undefined && (latest.role === 'acceptance' ? latest.state !== 'done' : latest.reports[latest.reports.length - 1]?.status === 'done')) return 'rerun-acceptance'
   return 'ask-person'
 }
 
@@ -306,8 +316,8 @@ const ALIVE = new Set(['pending', 'running', 'waiting'])
 // background command (idle, nothing in the agent list) for one the restart cut off.
 let routerRecovered = false
 
-export async function recoverRouter(ctx: Ctx): Promise<{ rerun: string[]; asked: string[] }> {
-  const out = { rerun: [] as string[], asked: [] as string[] }
+export async function recoverRouter(ctx: Ctx): Promise<{ rerun: string[]; integrated: string[]; asked: string[] }> {
+  const out = { rerun: [] as string[], integrated: [] as string[], asked: [] as string[] }
   if (routerRecovered) return out
   routerRecovered = true
   const alive = new Set((await ctx.host.agent.list()).filter(a => ALIVE.has(a.status)).map(a => a.id))
@@ -324,6 +334,10 @@ export async function recoverRouter(ctx: Ctx): Promise<{ rerun: string[]; asked:
       if (action === 'ask-person') {
         await tell(ctx, cut, `Router 重启时「${cut.title}」还在进行，执行者被中断了。回复这条消息（终端里的任务直接说“继续”）它就会接着做。`, { kind: 'magpie', notify: true })
         out.asked.push(task.id)
+      } else if (action === 'integrate') {
+        // As at the end of the turn, the person is told only of a conflict.
+        await integrateDaily(ctx, cut)
+        out.integrated.push(task.id)
       } else {
         const role = action === 'rerun-acceptance' ? 'acceptance' : 'diagnosis'
         await rerunCheck(ctx, cut, role)
