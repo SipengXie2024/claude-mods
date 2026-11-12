@@ -1,8 +1,8 @@
 import type { EngineInterface, Next, PromptSubmitInput, Register, Timer } from 'claude-code'
 import { describeTool, parseChannelTag, renderFinal, renderLive, type EndReason, type Turn } from '../src/card'
 import { CHANNEL_SERVER, DISPATCH, FORWARD, FORWARD_LONG, routerDeny, TERMINAL_CHAT } from '../src/gate'
-import { channelBody, indexPath, MAGPIE_GATEWAY, messageKind, ownerOf, RATING_TEXT, readIndex, terminalHintLine, workerHintLine, workerOfAgent, type MagpieIndex } from '../src/magpie'
-import { answerNotPosted, followUp, handedBack, lostWorker, routerContext, takeOver, terminalAnswer, terminalContext, workerBrief } from '../src/prompts'
+import { channelBody, DECISION_HANDLED, indexPath, MAGPIE_GATEWAY, messageKind, ownerOf, RATING_TEXT, readIndex, terminalHintLine, workerHintLine, workerOfAgent, type MagpieIndex } from '../src/magpie'
+import { answerNotPosted, followUp, handedBack, lostWorker, restoredNotice, routerContext, takeOver, terminalAnswer, terminalContext, workerBrief } from '../src/prompts'
 import * as tasks from '../src/tasks'
 import * as tg from '../src/telegram'
 import type { TgIo } from '../src/telegram'
@@ -43,6 +43,8 @@ const SEND_ATTEMPTS = 3
 const STALE = 6 * 3600_000
 /** Telegram refuses a text over 4096 characters */
 const MAX_TEXT = 4000
+/** a message the Router read but never dispatched or forwarded is forgotten after this */
+const REQUEST_TTL = 24 * 3600_000
 export const WORKER_MODEL = 'opus'
 /** this plugin's name: the origin of the prompts it submits */
 const PLUGIN = 'tg-router'
@@ -52,7 +54,7 @@ type Tracked = Turn & { attempts: number; chain: Promise<void> }
  * A Telegram message that reached the Router and may be dispatched; `replaces`
  * names the task whose worker is gone when the message replied to it.
  */
-type Request = { chatId: string; messageId: number; text: string; replaces?: string }
+type Request = { chatId: string; messageId: number; text: string; at: number; replaces?: string }
 
 /** Router turns by turnId, worker runs by `w:<worker name>` */
 const runs = new Map<string, Tracked>()
@@ -64,6 +66,10 @@ let ticker: Timer | null = null
 /** requests the Router may dispatch, by `chat:message` (message ids count per chat) */
 const requests = new Map<string, Request>()
 const reqKey = (chatId: string, messageId: number) => `${chatId}:${messageId}`
+/** Forgets requests older than REQUEST_TTL: plain chat the Router answered itself is never dispatched. */
+function pruneRequests(now: number): void {
+  for (const [key, r] of requests) if (now - r.at > REQUEST_TTL) requests.delete(key)
+}
 /** workers whose last answer Telegram refused: their completion notice reaches the Router */
 const unposted = new Set<string>()
 /** subagent ids that belong to no task (a worker's own helpers), so they are looked up once */
@@ -257,35 +263,43 @@ async function dispatch($: EngineInterface, a: DispatchArgs): Promise<string> {
 }
 
 /**
- * Sends a follow-up to its task's worker. Answers false when the worker is
- * gone: the task is then lost and the message becomes a request the Router
- * dispatches, carrying the task's original request.
+ * Sends a follow-up to its task's worker. Under claude-magpie, magpie-tasks may instead take the
+ * words as the person's answer to the task's open question, carry it out and tell the person
+ * (`magpie`, with what they were told). When the worker is gone (`lost`) the message becomes a request
+ * the Router dispatches, carrying the task's original request.
  */
-async function deliver($: EngineInterface, owner: tasks.Task, req: Request, now: number): Promise<boolean> {
+type Delivery = { to: 'worker' } | { to: 'magpie'; told: string } | { to: 'lost' }
+async function deliver($: EngineInterface, owner: tasks.Task, req: Request, now: number): Promise<Delivery> {
+  const terminal = req.chatId === TERMINAL_CHAT
   await tasks.addFollowUp(kv($), owner.name, req.messageId, req.text, now)
   // magpie-tasks may have put another executor in the worker's place
   const current = (await magpieActive($)) ? ownerOf(await magpieIndex($), owner.name) : undefined
   const to = current && current.ownerAgentId !== owner.agentId ? { agentId: current.ownerAgentId } : owner.name
-  const sent = await $.session.send({ to, text: followUp(req.messageId, req.text) })
+  const sent = await $.session.send({ to, text: followUp(req.messageId, req.text, terminal) })
   if (sent.isDelivered) {
     requests.delete(reqKey(req.chatId, req.messageId))
     await tasks.setState(kv($), owner.name, 'running', now)
-    if (!runs.has(`w:${owner.name}`)) track($, `w:${owner.name}`, req.chatId, req.messageId, now)
-    return true
+    // a terminal run has no card: its answer reaches the Router as a prompt
+    if (!terminal && !runs.has(`w:${owner.name}`)) track($, `w:${owner.name}`, req.chatId, req.messageId, now)
+    return { to: 'worker' }
+  }
+  if (sent.reason.startsWith(DECISION_HANDLED)) {
+    requests.delete(reqKey(req.chatId, req.messageId))
+    return { to: 'magpie', told: sent.reason.slice(DECISION_HANDLED.length) }
   }
   await tasks.setState(kv($), owner.name, 'lost', now)
   await tasks.removeMessage(kv($), owner.name, req.messageId)
   requests.set(reqKey(req.chatId, req.messageId), { ...req, text: takeOver(owner.request, req.text), replaces: owner.name })
-  return false
+  return { to: 'lost' }
 }
 
 type ForwardArgs = { chat_id?: unknown; message_id?: unknown; worker?: unknown }
 
-/** The Router judged a message that replies to nothing to continue an open task. */
+/** The Router judged a message that replies to nothing (or one typed in the terminal) to continue an open task. */
 async function forward($: EngineInterface, a: ForwardArgs): Promise<string> {
   const key = reqKey(String(a.chat_id), Number(a.message_id))
   const req = requests.get(key)
-  if (!req) throw new Error(`没有等待处理的 Telegram 消息 ${key}`)
+  if (!req) throw new Error(`没有等待处理的消息 ${key}（终端里输入的消息 chat_id 是 "${TERMINAL_CHAT}"）`)
   const owner = typeof a.worker === 'string' ? await tasks.byName(kv($), a.worker.trim()) : undefined
   if (!owner || owner.chatId !== req.chatId || owner.state === 'lost') throw new Error(`这个聊天里没有名为 ${String(a.worker)} 的未结束任务`)
   if (await isLong($, owner.name)) {
@@ -293,12 +307,43 @@ async function forward($: EngineInterface, a: ForwardArgs): Promise<string> {
     throw new Error(`「${owner.title}」已转为长期任务，消息要交给它的架构师：调用 ${FORWARD_LONG}，task 为 ${taskId}`)
   }
   const now = await $.clock.now()
-  if (!(await deliver($, owner, req, now))) {
-    return `${lostWorker(owner.title)} Call ${DISPATCH} with chat_id ${req.chatId} and message_id ${req.messageId}.`
+  const terminal = req.chatId === TERMINAL_CHAT
+  const d = await deliver($, owner, req, now)
+  if (d.to === 'lost') return `${lostWorker(owner.title)} Call ${DISPATCH} with chat_id ${req.chatId} and message_id ${req.messageId}.`
+  if (d.to === 'magpie') {
+    return `magpie-tasks took this message as the person's answer to the open question of "${owner.title}" and carried it out; the person ${terminal ? 'sees the result in this terminal' : 'was told under the message'}: ${d.told} Do not reply about it again.`
   }
+  if (terminal) return `已转给 worker ${owner.name}（${owner.title}）。用一句话告诉用户；它的回答会作为一条消息送到这里。`
   const noteId = await tg.send(io($), req.chatId, `已转给「${owner.title}」的 worker。`, req.messageId, true)
   if (noteId !== undefined) await tasks.addMessage(kv($), owner.name, noteId, now)
   return `已转给 worker ${owner.name}（${owner.title}），host 已告诉用户；你不用再回复。`
+}
+
+/**
+ * The task a SendMessage of the Router names: a follow-up to a worker goes through `forward`, so the
+ * worker's current executor gets it and magpie-tasks sees it.
+ */
+async function workerNamed($: EngineInterface, to: unknown): Promise<tasks.Task | undefined> {
+  if (typeof to !== 'string' || to.trim() === '') return undefined
+  const name = to.trim()
+  return (await tasks.byName(kv($), name)) ?? (await tasks.byAgent(kv($), name))
+}
+
+/**
+ * The task of a worker a restart notice names (task-id is the agent id; the summary names the worker),
+ * when that worker's last run had ended with an answer: the notice that it "didn't finish" is wrong.
+ */
+const RESTORED = /<task-id>([^<]+)<\/task-id>[\s\S]*<status>stopped<\/status>[\s\S]*didn't finish before the previous session ended/
+async function answeredWorker($: EngineInterface, text: string): Promise<tasks.Task | undefined> {
+  const m = RESTORED.exec(text)
+  if (!m) return undefined
+  const agentId = m[1]!.trim()
+  let task = await tasks.byAgent(kv($), agentId)
+  if (!task && (await magpieActive($))) {
+    const worker = workerOfAgent(await magpieIndex($), agentId)
+    task = worker ? await tasks.byName(kv($), worker) : undefined
+  }
+  return task?.lastEnd === 'answer' && task.state === 'idle' ? task : undefined
 }
 
 /**
@@ -311,7 +356,7 @@ async function handBack($: EngineInterface, task: tasks.Task, answer: string): P
     if (!(h.messageId in task.followUps)) continue
     const text = (await tasks.removeMessage(kv($), task.name, h.messageId))!
     const key = reqKey(task.chatId, h.messageId)
-    requests.set(key, { chatId: task.chatId, messageId: h.messageId, text })
+    requests.set(key, { chatId: task.chatId, messageId: h.messageId, text, at: await $.clock.now() })
     // queued for the Router, which may be mid-turn: the worker's end does not wait on it
     void $.prompt.submit({ text: handedBack(h.reason, text) }).catch(async (err) => {
       // the Router never got it: the follow-up stays the worker's
@@ -424,9 +469,10 @@ export const register: Register = (on) => {
       armed = null
       await ensureTools($)
       const now = await $.clock.now()
+      pruneRequests(now)
       let messageId = now
       while (requests.has(reqKey(TERMINAL_CHAT, messageId))) messageId++
-      requests.set(reqKey(TERMINAL_CHAT, messageId), { chatId: TERMINAL_CHAT, messageId, text: e.text })
+      requests.set(reqKey(TERMINAL_CHAT, messageId), { chatId: TERMINAL_CHAT, messageId, text: e.text, at: now })
       const open = await tasks.openTasks(kv($), TERMINAL_CHAT)
       const magpieMode = await magpieActive($)
       return next({ ...e, context: [...(e.context ?? []), terminalContext(messageId, open, now), ...(magpieMode ? [terminalHintLine(messageId)] : [])] })
@@ -444,7 +490,8 @@ export const register: Register = (on) => {
     }
     await ensureTools($)
     const now = await $.clock.now()
-    const req: Request = { chatId: tag.chatId, messageId: tag.messageId, text: e.text }
+    pruneRequests(now)
+    const req: Request = { chatId: tag.chatId, messageId: tag.messageId, text: e.text, at: now }
 
     // a handed-back follow-up still replies to its task's message: it must not go back to that worker
     const owner = !handed && tag.replyTo !== undefined ? await tasks.byMessage(kv($), tag.chatId, tag.replyTo) : undefined
@@ -455,7 +502,9 @@ export const register: Register = (on) => {
       if (kind !== undefined || long || RATING_TEXT.test(channelBody(e.text))) return handOn($, e, next, req, now, owner?.name)
     }
     if (owner) {
-      if (await deliver($, owner, req, now)) return { drop: `tg-router: 已转给 worker（${owner.title}）` }
+      const d = await deliver($, owner, req, now)
+      if (d.to === 'worker') return { drop: `tg-router: 已转给 worker（${owner.title}）` }
+      if (d.to === 'magpie') return { drop: `tg-router: magpie-tasks 把它当作「${owner.title}」待决定问题的回答处理了：${d.told}` }
       await tg.send(io($), tag.chatId, `这件事（${owner.title}）原来的 worker 已经不在了，可能是会话重启过。已交给 Router 重新派发。`, tag.messageId, true)
       armed = { ...requests.get(reqKey(tag.chatId, tag.messageId))!, at: now }
       return next({ ...e, context: [...(e.context ?? []), routerContext(await tasks.openTasks(kv($), tag.chatId), now), lostWorker(owner.title)] })
@@ -465,6 +514,18 @@ export const register: Register = (on) => {
     if (!handed) requests.set(reqKey(tag.chatId, tag.messageId), req)
     armed = { ...req, at: now }
     return next({ ...e, context: [...(e.context ?? []), routerContext(await tasks.openTasks(kv($), tag.chatId), now)] })
+  })
+
+  // After a restart Claude Code tells the Router that every worker it had resumed with a follow-up
+  // "didn't finish", because this mod drops the completion notice those runs sent (their answer was
+  // already posted). For a worker whose last run ended with an answer the notice is wrong and invites
+  // the Router to wake it again; its row is rewritten to say so.
+  on('session.append', async ($, e, next) => {
+    if (e.agentId || e.message.type !== 'user') return next(e)
+    const text = e.message.content.map((b) => (b.type === 'text' ? b.text : '')).join('')
+    const task = text.includes("didn't finish before the previous session ended") ? await answeredWorker($, text) : undefined
+    if (!task) return next(e)
+    return next({ ...e, message: { ...e.message, content: [{ type: 'text', text: restoredNotice(task.name, task.title) }] } })
   })
 
   on('turn.start', async ($, e, next) => {
@@ -486,6 +547,10 @@ export const register: Register = (on) => {
     if (e.tool === 'Agent' && next.origin.plugin === 'magpie-tasks') return next(e)
     const deny = routerDeny(e as never, inbox ?? (await inboxDir($)))
     if (deny) return { deny }
+    if (!e.agentId && e.tool === 'SendMessage') {
+      const named = await workerNamed($, (e as { to?: unknown }).to)
+      if (named) return { deny: `给 worker ${named.name}（${named.title}）的后续消息用 ${FORWARD} 转交：chat_id 和 message_id 用这条消息的，worker 填 ${named.name}。forward 会交给任务当前的执行者；消息回答任务的待决定问题时，由插件直接处理。` }
+    }
     // registered tools: the engine's types list built-in names only
     const tool: string = e.tool
     if (tool === DISPATCH || tool === FORWARD) {
@@ -519,7 +584,7 @@ export const register: Register = (on) => {
       const task = await taskFor($, e.agentId)
       if (!task) return next(e)
       if (task.chatId === TERMINAL_CHAT) {
-        await tasks.setState(kv($), task.name, 'idle', await $.clock.now())
+        await tasks.ended(kv($), task.name, e.reason as EndReason, await $.clock.now())
         const body = e.reason === 'answer' && e.answer.trim()
           ? e.answer.trim()
           : renderFinal({ chatId: task.chatId, startedAt: 0, tools: 0, recent: [], dirty: false, lastEditAt: 0, done: true }, e.reason as EndReason, e.durationMs)
@@ -536,7 +601,7 @@ export const register: Register = (on) => {
       await run?.chain
       const carded = endCard($, key, reason, e.durationMs)
       const now = await $.clock.now()
-      await tasks.setState(kv($), task.name, 'idle', now)
+      await tasks.ended(kv($), task.name, reason, now)
       // an answer of HANDBACK lines alone posts nothing: those messages are the Router's now
       const onlyHandBacks = reason === 'answer' && !answer && e.answer.trim() !== ''
       // the answer goes out as written, as the channel's reply tool would send it:

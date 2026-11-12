@@ -55,6 +55,17 @@ export const CONFLICT_CHOICE = {
 // A predicate's yes: Jev's probability at or above this. Not calibrated [NEEDS-EVIDENCE].
 export const PREDICATE_YES = 0.5
 
+// Whether a daily task's finished turn gets an acceptance check (plan section 9.11). Jev reads what
+// the person asked in that turn, the executor's answer, the turn's tool calls and the change waiting
+// for integration. Measured with the real Jev on the 20 acceptance checks run on 2026-11-11
+// (`bun eval/check-eval.ts`): the 4 checks that failed score 0.65 to 0.98 and 10 others 0.54 to
+// 0.98, all on turns of 7 to 88 tool calls; the 6 turns of 0 to 5 tool calls (conversation, a
+// hand-back, "merge it", "push it", "reinstall") score 0.01 to 0.07. Without the tool calls the two
+// groups meet: a failed check scores 0.37 and a passed one 0.24. CHECK_YES sits in the gap, nearer
+// the low group: a skipped check loses a finding, a check that runs costs the person nothing to read.
+export const CHECK_QUESTION = 'An agent finished one turn of a task for the person. The first message is what the person asked in that turn, the second is the agent\'s answer, and the third says how many tool calls the turn took and whether it left a change to project files that is about to be applied to the person\'s project. Is an independent check of this result by a second reviewer worth its cost before the person relies on it? It is when the result took real work that can be wrong in ways the person would not see at a glance: findings, measurements, a review or research whose conclusions rest on facts, numbers or sources the agent collected, or a change to how a program, a system or a machine behaves. It is not when the answer is conversational: an opinion, advice or an explanation from what is already known, a clarification or a question back, a hand-back or a status note, or a mechanical edit of a line or two that the person sees in the diff.' + UNTRUSTED
+export const CHECK_YES = 0.3
+
 
 export function spawnQuestions(rules: Rules): JevQuestion[] {
   return [
@@ -233,6 +244,21 @@ export async function recommendArchitect(c: JudgeCtx, firstMessage: string): Pro
     ? `${by}判断这项长期任务符合「${picked.when}」（置信度 ${ch.confidence.toFixed(2)}）。证据：${picked.evidence}`
     : `${by}的首选是 ${picked.name}（置信度 ${ch.confidence.toFixed(2)}），低于推荐门槛 ${threshold}，因此推荐默认的 ${def.name}。证据：${def.evidence}`
   return { model: chosen.model, reason, limits: chosen.limits, judgment: judgmentOf(a, ch, null) }
+}
+
+export function checkInput(a: { asked: string; answer: string; tools: number; diffStat: string | null }): JevMessage[] {
+  const change = a.diffStat === null ? 'It left no change to project files.' : `It left this change to project files, about to be applied to the person's project:\n${a.diffStat.trimEnd()}`
+  return [
+    { role: 'user', content: a.asked },
+    { role: 'assistant', content: a.answer },
+    { role: 'user', content: `The agent made ${a.tools} tool calls in this turn. ${change}` },
+  ]
+}
+
+export async function judgeCheck(c: JudgeCtx, input: JevMessage[]): Promise<{ check: boolean; p: number | null; provider: 'jev' | 'substitute' }> {
+  const a = await judge(c, [{ name: 'check', type: 'predicate', instructions: CHECK_QUESTION }], input)
+  const d = predicateOf(a, 'check', CHECK_YES)
+  return { check: d.yes, p: d.p, provider: a.provider }
 }
 
 export async function predicate(c: JudgeCtx, instructions: string, input: JevMessage[]): Promise<{ yes: boolean; p: number | null; provider: 'jev' | 'substitute' }> {

@@ -3,7 +3,6 @@
 // message of a new long task, the launch claim of a background architect, the takeover of an
 // existing session and its claim in the /bg copy, and the architect's per-turn context.
 import type { Next, PromptSubmitInput, SessionStartInput, Settings, SettingsReadInput } from 'claude-code'
-import { baseRefName, createWorktree, initRepo, projectStats, repoRoot } from './git'
 import { fnv1a64, newId } from './io'
 import type { JudgeCtx } from './judge'
 import { recommendArchitect } from './judge'
@@ -16,6 +15,7 @@ import type { Ctx, PromptResult } from './state'
 import { defaultChat, send } from './telegram'
 import { registerTools } from './tools'
 import type { Role, SessionState, TaskRecord } from './types'
+import { placementLine, placeTask, previewPlacement, projectDir } from './workspace'
 
 const TAKEOVER_CLAIM_MS = 2 * 60_000
 const EXIT_DELAY_MS = 1500
@@ -72,15 +72,6 @@ function titleOf(text: string): string {
 // recovery is reported where recovery is started and does not belong to the step that waited.
 function recoverySettled(st: SessionState): Promise<void> {
   return (st.recovery ?? Promise.resolve()).then(() => undefined, () => undefined)
-}
-
-export function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} 字节`
-  const units = ['KB', 'MB', 'GB', 'TB']
-  let v = bytes / 1024
-  let u = 0
-  while (v >= 1024 && u < units.length - 1) { v /= 1024; u++ }
-  return `${v.toFixed(1)} ${units[u]}`
 }
 
 // ---- role detection (section 2) ----------------------------------------------------------------
@@ -151,7 +142,26 @@ export function isOwner(t: TaskRecord, sessionId: string): boolean {
   return t.owner.kind === 'session' && t.owner.sessionId === sessionId && (t.owner.jobShortId !== undefined || t.architect?.source === 'takeover')
 }
 
-// Loads an architect session's state from its task: the subagents this session routed (agents of
+// Loads a Router session's state from its daily tasks: the subagents this session ID started, in this
+// process or in one before a restart (`claude-telegram --resume telegram` keeps the ID, and a reply
+// resumes such an agent from its transcript), with their pending effort raises and touched files, so a
+// resumed agent is routed, gated and followed to the end of its turn like one started here.
+export async function loadRouter(ctx: Ctx): Promise<number> {
+  const { st } = ctx
+  let n = 0
+  for (const task of await ctx.reg.list(t => t.kind === 'daily' && t.owner.kind === 'agent' && t.owner.routerSessionId === st.sessionId)) {
+    for (const agent of Object.values(task.agents)) {
+      if (agent.sessionId !== st.sessionId) continue
+      st.agents.set(agent.agentId, task.id)
+      if (agent.pendingRaises.length > 0) st.pendingRaises.set(agent.agentId, [...agent.pendingRaises])
+      if (agent.filesTouched.length > 0) st.touches.set(agent.agentId, new Set(agent.filesTouched))
+      n++
+    }
+  }
+  return n
+}
+
+// Loads an architect session's state from its task:the subagents this session routed (agents of
 // earlier session IDs ran in other processes and cannot be continued here), their pending effort
 // raises and touched files; refreshes the recorded context-memory fingerprint.
 export async function loadArchitect(ctx: Ctx, task: TaskRecord): Promise<void> {
@@ -199,10 +209,10 @@ export async function onFirstPrompt(ctx: Ctx, e: PromptSubmitInput, next: Next<'
   return ctx.st.startSource === 'resume' ? takeover(ctx, e, next) : newLongTask(ctx, e, next)
 }
 
-async function projectInfo(ctx: Ctx): Promise<{ root: string; git: { files: number; bytes: number } | null }> {
-  const top = await repoRoot(ctx.io, ctx.st.cwd)
-  if (top !== null) return { root: top, git: null }
-  return { root: ctx.st.cwd, git: await projectStats(ctx.io, ctx.st.cwd) }
+// A long task's project root: the repository top of the window's directory, or the directory itself
+// outside Git.
+async function projectRootOf(ctx: Ctx): Promise<string> {
+  return (await projectDir(ctx.io, ctx.st.cwd)).dir
 }
 
 // The models of the confirmation options, in order: the recommendation, then the other candidates.
@@ -212,7 +222,7 @@ export function optionModels(recommended: string, rules: Rules): string[] {
   return [recommended, ...others]
 }
 
-export function askText(a: { recommendation: { model: string; reason: string; limits: string }; root: string; worktree: string; git: { files: number; bytes: number } | null; trusted: boolean }, rules: Rules): { question: string; options: string[] } {
+export function askText(a: { recommendation: { model: string; reason: string; limits: string }; root: string; workspace: string; trusted: boolean }, rules: Rules): { question: string; options: string[] } {
   const models = optionModels(a.recommendation.model, rules)
   const name = (m: string) => displayName(m, rules)
   const options = models.map((m, i) => (i === 0 ? `${name(m)}（推荐）` : name(m)))
@@ -221,33 +231,39 @@ export function askText(a: { recommendation: { model: string; reason: string; li
     `推荐理由：${a.recommendation.reason}`,
     `证据的限制：${a.recommendation.limits}`,
     `项目根目录：${a.root}`,
-    `任务工作副本：${a.worktree}`,
+    a.workspace,
   ]
-  if (a.git !== null) lines.push(`这个目录不是 Git 仓库。确认后会在 ${a.root} 建立 Git 仓库并提交一份基线快照：${a.git.files} 个文件，共 ${formatBytes(a.git.bytes)}。`)
   if (!a.trusted) lines.push(UNTRUSTED(a.root))
   lines.push('确认后这条消息交给后台的架构师会话，当前窗口随即关闭，之后用 claude attach 重新打开。不需要登记的临时操作请使用普通 claude。')
   return { question: lines.join('\n'), options }
 }
 
 // The architect's first message: the request, the task marker line, and its standing instructions.
-export function architectFirstMessage(request: string, taskId: string, worktree: string): string {
+// `workspace` is where the subagents work: the project directory itself (`direct`) or the task
+// worktree.
+export function architectFirstMessage(request: string, taskId: string, workspace: { mode: 'direct' | 'worktree'; path: string } | null): string {
+  const where = workspace === null
+    ? 'The task has no project yet; once the person names one, magpie-tasks gives the task its working directory.'
+    : workspace.mode === 'direct'
+      ? `Implementation subagents you delegate with the Agent tool work directly in the project directory ${workspace.path}: their changes are there as soon as they make them, and an accepted result is recorded with mcp__magpie-tasks__integrate.`
+      : `Another task changes the project directory in place, so this task works in the Git worktree ${workspace.path}: implementation subagents you delegate with the Agent tool work there, you read their changes there by absolute path, and an accepted result is applied to the project main directory with mcp__magpie-tasks__integrate.`
   return [
     request,
     '',
-    `[magpie-tasks architect task=${taskId} worktree=${worktree}]`,
-    `You are the architect of this long task, started by magpie-tasks. The task worktree is ${worktree}: implementation subagents you delegate with the Agent tool work there, and you read their changes there by absolute path. You stay in the project main directory, where you write only .planning/findings.md, CONTEXT.md, .planning/plan-*.md and .planning/*.html; discuss goals and design with the person, delegate implementation, accept results and integrate them with mcp__magpie-tasks__integrate. Do not commit or push, whatever the background-session default says: integrated changes stay in the person's working tree for them to commit.`,
+    `[magpie-tasks architect task=${taskId} ${workspace?.mode === 'direct' ? 'direct' : 'worktree'}=${workspace?.path ?? 'none'}]`,
+    `You are the architect of this long task, started by magpie-tasks. ${where} You stay in the project main directory, where you write only .planning/findings.md, CONTEXT.md, .planning/plan-*.md and .planning/*.html; discuss goals and design with the person, delegate implementation and accept results. Commit and push only when the person asks, whatever the background-session default says: then run git add, git commit and git push yourself in the project main directory${workspace?.mode === 'worktree' ? ', never in the task worktree' : ''}. Until then changes stay uncommitted in the person's working tree.`,
   ].join('\n')
 }
 
 async function newLongTask(ctx: Ctx, e: PromptSubmitInput, next: Next<'prompt.submit'>): Promise<PromptResult> {
   const { io, st, opts, rules, reg } = ctx
-  const { root, git } = await projectInfo(ctx)
+  const root = await projectRootOf(ctx)
   const chatId = await defaultChat(io, opts)
   const rec = await recommendArchitect(judgeCtxOf(ctx), e.text)
   const taskId = newId('l', await io.now())
-  const worktree = `${opts.worktreeDir}/${taskId}`
   const trusted = await projectTrusted(io, root)
-  const { question, options } = askText({ recommendation: rec, root, worktree, git, trusted }, rules)
+  const preview = await previewPlacement(io, reg, opts, taskId, root)
+  const { question, options } = askText({ recommendation: rec, root, workspace: placementLine(preview), trusted }, rules)
   const models = optionModels(rec.model, rules)
   let answer: string
   try {
@@ -268,7 +284,7 @@ async function newLongTask(ctx: Ctx, e: PromptSubmitInput, next: Next<'prompt.su
     pausedByUser: false,
     request: e.text,
     followUps: [],
-    project: { root, gitInitByPlugin: git !== null },
+    project: { root },
     worktree: null,
     extraWorktrees: {},
     owner: { kind: 'session', sessionId: st.sessionId, previousSessionIds: [], model, contextMemoryFingerprint: '' },
@@ -284,10 +300,9 @@ async function newLongTask(ctx: Ctx, e: PromptSubmitInput, next: Next<'prompt.su
   })
   st.taskId = task.id
   if (!trusted) await trustProject(io, root)
-  if (git !== null) await initRepo(io, root)
-  const wt = await createWorktree(io, root, worktree, baseRefName(task.id), root)
-  const ready = await reg.update(task.id, t => { t.worktree = { path: worktree, baseRef: wt.baseRef, baseCommit: wt.baseCommit } }, { type: 'worktree', path: worktree, baseCommit: wt.baseCommit, gitInit: git !== null })
-  const message = architectFirstMessage(e.text, task.id, worktree)
+  const placed = await placeTask(io, reg, opts, task.id, root)
+  const ready = (await reg.get(task.id))!
+  const message = architectFirstMessage(e.text, task.id, placed)
   let shortId: string
   try {
     shortId = (await launchArchitect(ctx, { task: ready, model, message, cwd: root })).shortId
@@ -331,16 +346,14 @@ async function takeover(ctx: Ctx, e: PromptSubmitInput, next: Next<'prompt.submi
     notice(ctx, `当前模型 ${displayName(model, rules)} 不在架构师候选（${rules.architect.candidates.map(c => c.name).join('、')}）中，这个会话不登记为长期任务`)
     return unmanaged(ctx, e, next)
   }
-  const { root, git } = await projectInfo(ctx)
+  const root = await projectRootOf(ctx)
   const chatId = await defaultChat(io, opts)
   const taskId = newId('l', await io.now())
-  const worktree = `${opts.worktreeDir}/${taskId}`
   const lines = [
     `接管这个会话，作为长期任务继续吗？接管后：登记为长期任务，沿用当前模型 ${candidate.name} 与对话历史，接入 Telegram，启用架构师的工具限制（主对话只写设计记录，实施交给子代理），本轮回答结束后转入后台（之后用 claude attach 重新打开）。`,
     `项目根目录：${root}`,
-    `任务工作副本：${worktree}`,
+    placementLine(await previewPlacement(io, reg, opts, taskId, root)),
   ]
-  if (git !== null) lines.push(`这个目录不是 Git 仓库。接管后会在 ${root} 建立 Git 仓库并提交一份基线快照：${git.files} 个文件，共 ${formatBytes(git.bytes)}。`)
   const trusted = await projectTrusted(io, root)
   if (!trusted) lines.push(UNTRUSTED(root))
   lines.push('选择不接管后，这个会话以后恢复时不再询问。')
@@ -370,7 +383,7 @@ async function takeover(ctx: Ctx, e: PromptSubmitInput, next: Next<'prompt.submi
     pausedByUser: false,
     request: e.text,
     followUps: [],
-    project: { root, gitInitByPlugin: git !== null },
+    project: { root },
     worktree: null,
     extraWorktrees: {},
     owner: { kind: 'session', sessionId: st.sessionId, previousSessionIds: [], model, contextMemoryFingerprint: await contextMemoryFingerprint(io, await claudeConfigDir(io)) },
@@ -386,9 +399,8 @@ async function takeover(ctx: Ctx, e: PromptSubmitInput, next: Next<'prompt.submi
   })
   st.taskId = task.id
   if (!trusted) await trustProject(io, root)
-  if (git !== null) await initRepo(io, root)
-  const wt = await createWorktree(io, root, worktree, baseRefName(task.id), root)
-  const ready = await reg.update(task.id, t => { t.worktree = { path: worktree, baseRef: wt.baseRef, baseCommit: wt.baseCommit } }, { type: 'worktree', path: worktree, baseCommit: wt.baseCommit, gitInit: git !== null })
+  await placeTask(io, reg, opts, task.id, root)
+  const ready = (await reg.get(task.id))!
   st.role = 'architect'
   st.firstPromptSeen = true
   st.pendingBg = true
@@ -517,17 +529,23 @@ export async function claimTakeover(ctx: Ctx): Promise<TaskRecord | 'failed' | n
 
 export function architectContext(task: TaskRecord, opts: { worktreeDir: string }): string {
   const root = task.project?.root ?? '(none)'
-  const wt = task.worktree?.path ?? `${opts.worktreeDir}/${task.id} (not created yet)`
+  const direct = task.direct ?? null
+  const wt = task.worktree?.path ?? null
+  const where = direct !== null
+    ? `Implementation subagents work directly in the project directory ${direct.dir}${direct.baseRef === null ? ' (not a Git repository: the plugin keeps no diff, only the files they edit with the file tools)' : `; their change since the last record is git -C ${direct.dir} diff ${direct.baseRef}`}.`
+    : wt !== null
+      ? `Task worktree: ${wt} (another task changes the project directory in place); implementation subagents work there, and you read their changes there by absolute path (for example git -C ${wt} diff).`
+      : `The task has no working directory yet (worktrees go under ${opts.worktreeDir}).`
   const lines = [
-    `[magpie-tasks] You are the architect of long task ${task.id} "${task.title}". Project main directory: ${root}. Task worktree: ${wt}; implementation subagents work there, and you read their changes there by absolute path (for example git -C ${wt} diff).`,
+    `[magpie-tasks] You are the architect of long task ${task.id} "${task.title}". Project main directory: ${root}. ${where}`,
   ]
   const extra = Object.entries(task.extraWorktrees)
   if (extra.length > 0) lines.push(`Separate worktrees: ${extra.map(([agentId, x]) => `${agentId}: ${x.path}`).join('; ')}.`)
   lines.push(
-    'You write only .planning/findings.md, CONTEXT.md, .planning/plan-*.md and .planning/*.html in the project main directory, and Bash runs only read-only commands and the html-plan pack and publish-plan commands. Delegate implementation, builds and tests to subagents with the Agent tool. Do not commit or push; after you accept a result, mcp__magpie-tasks__integrate applies the task worktree\'s changes to the project main directory.',
-    'Delegation: delegate each piece of work with mcp__magpie-tasks__model_route (description, and the full brief as prompt). Jev judges which routing rule fits and whether the work needs deep reasoning, and the routing table gives the model and effort. When you think another model suits the work better, add recommended_model (a Magpie model ID), reason (the concrete evidence) and, if you like, recommended_effort; Jev weighs your recommendation against the table\'s choice and its notes on both models, and the table\'s choice stands unless Jev prefers yours. The subagent starts in the task worktree and runs in the background. When the person names a model, delegate with the Agent tool and put "[model <Magpie model ID>]" and "[model-reason user: <the person\'s words>]" on their own lines in the brief, with "[effort <low|medium|high|xhigh|max>]" when no rule gives its effort. For a second review by a different model, put "[review-of agent=<agentId>]" or "[review-of model=<id>,<id>]" in the brief.',
+    'You write only .planning/findings.md, CONTEXT.md, .planning/plan-*.md and .planning/*.html in the project main directory, and Bash runs only read-only commands and the html-plan pack and publish-plan commands. Delegate implementation, builds and tests to subagents with the Agent tool. After you accept a result, mcp__magpie-tasks__integrate applies a task worktree\'s changes to the project main directory, or records the change subagents made there directly; when the person asks for a commit or a push, run git add, git commit and git push there yourself, never in a task worktree.',
+    'Delegation: delegate each piece of work with mcp__magpie-tasks__model_route (description, and the full brief as prompt). Jev judges which routing rule fits and whether the work needs deep reasoning, and the routing table gives the model and effort. When you think another model suits the work better, add recommended_model (a Magpie model ID), reason (the concrete evidence) and, if you like, recommended_effort; Jev weighs your recommendation against the table\'s choice and its notes on both models, and the table\'s choice stands unless Jev prefers yours. The subagent starts in the task\'s working directory and runs in the background. When the person names a model, delegate with the Agent tool and put "[model <Magpie model ID>]" and "[model-reason user: <the person\'s words>]" on their own lines in the brief, with "[effort <low|medium|high|xhigh|max>]" when no rule gives its effort. For a second review by a different model, put "[review-of agent=<agentId>]" or "[review-of model=<id>,<id>]" in the brief.',
     'After checking a subagent\'s result, call mcp__magpie-tasks__report_outcome: accepted, or rejected (it goes back for fixes). Report diagnosis, diagnosis-redelegate and model-change too, with blocker_id: the ID of an existing blocker (mcp__magpie-tasks__task_status lists them) for the same problem, or new with a one-sentence blocker only for a different problem. The plugin raises that subagent\'s effort on its next run and counts diagnoses and model changes per blocker; a second one for the same blocker is refused, and you then pause that work and discuss it with the person.',
-    'mcp__magpie-tasks__notify_user (kind decision or done) reaches the person on Telegram for decisions they must make and for finished results; ordinary progress is not sent. mcp__magpie-tasks__resolve_conflict answers a file-conflict question (separate or wait). Keep progress in context-memory\'s notes_write and lasting findings in .planning/findings.md.',
+    'mcp__magpie-tasks__notify_user reaches the person on Telegram: kind decision for what they must decide, result for a finished part, done when the whole task is finished (the task closes; this session is stopped after ten idle minutes and the worktree removed; their next message reopens it); ordinary progress is not sent. mcp__magpie-tasks__resolve_conflict answers a file-conflict question (separate or wait). Keep progress in context-memory\'s notes_write and lasting findings in .planning/findings.md.',
   )
   const blockers = Object.values(task.blockers)
   if (blockers.length > 0) lines.push(`Blockers: ${blockers.map(b => `${b.id} "${b.description}" (diagnoses ${b.diagnoses}, model changes ${b.modelChanges})`).join('; ')}.`)

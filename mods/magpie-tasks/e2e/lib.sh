@@ -1,6 +1,8 @@
 # Shared helpers of the magpie-tasks scenario scripts (plan section 12.2). Source it from a scenario
 # with E set to a directory made by e2e/setup.sh. Each check prints PASS or FAIL; `finish` exits
-# non-zero when any check failed.
+# non-zero when any check failed. With FAIL_FAST=1 the scenario stops at its first failed check and
+# leaves its tmux sessions open: later checks wait on what the failed one stands for, each to its
+# full time limit.
 set -uo pipefail
 : "${E:?export E=<directory printed by e2e/setup.sh>}"
 REPO=${REPO:-$HOME/sipeng/claude-mods}
@@ -11,7 +13,9 @@ failed=0
 
 check() {
   local name=$1; shift
-  if "$@" >/dev/null 2>&1; then echo "PASS $name"; else echo "FAIL $name"; failed=1; fi
+  if "$@" >/dev/null 2>&1; then echo "PASS $name"; return; fi
+  echo "FAIL $name"; failed=1
+  if [ "${FAIL_FAST:-0}" = 1 ]; then echo "STOPPED at the first failed check"; exit 1; fi
 }
 finish() { [ $failed = 0 ] && echo "ALL PASS" || echo "SOME CHECKS FAILED"; exit $failed; }
 

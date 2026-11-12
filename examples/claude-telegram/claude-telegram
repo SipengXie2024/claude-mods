@@ -29,6 +29,18 @@ LIVE="$HOME/.claude/channels/telegram-live"
 export MAGPIE_TASKS_ROLE=router
 export TG_ROUTER_STATE_DIR="$LIVE"
 export JEV_MAIN_EFFORT=low
+# Claude Code asks for a one-line progress summary of each background worker about every 30 s, each
+# request carrying the worker's whole context; under claude-magpie each one starts a `claude -p` helper
+# (about 270 MB) that lingers for about 200 s, some 1.5-1.8 GB per running worker (measured
+# 2026-11-11). Nothing here reads those summaries: tg-router posts its own progress cards.
+export CLAUDE_CODE_DISABLE_AGENT_PROGRESS_SUMMARIES=1
+
+# tg-router runs from a copy made at each start. Claude Code reloads a --plugin-dir whenever a file in
+# it changes, and a reload drops the mod's state in memory (messages waiting to be dispatched, progress
+# cards); tasks integrate changes into this repository while the Router runs. The copy keeps those
+# changes for the next start.
+ROUTER_COPY="$HOME/.local/share/claude-telegram/tg-router"
+rm -rf "$ROUTER_COPY" && mkdir -p "${ROUTER_COPY%/*}" && cp -a "$CLAUDE_MODS/mods/tg-router" "$ROUTER_COPY" || exit 1
 
 # The channel is tg-channel, a copy of the official telegram plugin's server
 # that also reports which message a message replies to. It is not on the
@@ -37,8 +49,18 @@ export JEV_MAIN_EFFORT=low
 mcp_config=$(jq -nc --arg dir "$CHANNEL_DIR" --arg live "$LIVE" \
   '{mcpServers: {"tg-channel": {command: "bun", args: ["run", "--cwd", $dir, "--shell=bun", "--silent", "start"], env: {TELEGRAM_STATE_DIR: $live}}}}')
 
+# claude-magpie refreshes every subscription's model list as it starts. For the
+# Antigravity account that prints three lines on stderr: the sign-in's tiers, Google
+# answering the paid-tier entitlement with HTTP 400 "invalid argument", and the list
+# fetched again without it. magpie handles that retry itself, but the lines land
+# inside Claude Code's start-up dialog and cover its options. Exactly those three
+# shapes are dropped; every other stderr line, an Antigravity failure included, still
+# reaches the terminal.
+HIDE='^[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9:]{8} antigravity [^ ]+: (loadCodeAssist at [^ ]+: current tier |fetchAvailableModels with entitlement [^ ]+: Antigravity: Request contains an invalid argument\.; asking with none next$|fetchAvailableModels at .*\): [1-9][0-9]* models, [1-9][0-9]* kept; )'
+
 exec claude-magpie --model 'claude/claude-opus-5-5[1m]' --effort low --dangerously-skip-permissions \
   --mcp-config "$mcp_config" \
   --dangerously-load-development-channels server:tg-channel \
-  --plugin-dir "$CLAUDE_MODS/mods/tg-router" \
-  "$@"
+  --plugin-dir "$ROUTER_COPY" \
+  "$@" \
+  2> >(grep --line-buffered -v -E "$HIDE" >&2)

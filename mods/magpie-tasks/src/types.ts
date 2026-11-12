@@ -64,7 +64,7 @@ export interface AgentRecord {
   reviewOf?: string[]                   // canonical IDs of the reviewed models
   contextSource: 'brief'                // ordinary subagents receive only the brief
   cwd: string
-  worktree: string | null               // the worktree it may write in
+  worktree: string | null               // the directory it may write in: the task worktree, or the project directory of a direct task
   state: 'running' | 'idle' | 'paused' | 'done' | 'failed'
   pausedFor?: string                    // ID of the decision it waits for
   failure?: { at: number; kind: 'model-unavailable' | 'api-error'; error: string }   // section 9.16; error is the StopFailure category
@@ -78,7 +78,7 @@ export interface AgentRecord {
 export interface Decision {
   id: string
   kind: 'file-conflict' | 'integration-conflict' | 'route-confirm' | 'fix-confirm' | 'model-change-confirm' | 'no-progress' | 'model-unavailable' | 'interrupted'
-  // fix-confirm: a daily result fixed after failed acceptance waits for the person (integrated on approval when it changed files)
+  // fix-confirm: a daily task's change, fixed after a failed acceptance, waits for the person (integrated on approval)
   // model-change-confirm: a diagnosis suggests a model outside the automatic substitutes
   // model-unavailable: a routed agent's model is unavailable and no automatic substitute exists, or the person chose the model
   createdAt: number
@@ -105,8 +105,16 @@ export interface TaskRecord {
   updatedAt: number
   request: string                       // the first message, or the daily task's original request
   followUps: { at: number; source: 'telegram' | 'window'; text: string }[]
-  project: { root: string; gitInitByPlugin: boolean } | null
+  project: { root: string } | null
+  // Where the task changes its project (src/workspace.ts): `direct` while it works in the project
+  // directory itself, `worktree` once it got a Git worktree because another task works there
+  // directly; neither before it names a project. `dir` is the repository top, or the directory
+  // itself outside Git; the base ref is absent outside Git, where no diff is taken.
+  direct?: { dir: string; baseRef: string | null; baseCommit: string | null } | null
   worktree: { path: string; baseRef: string; baseCommit: string } | null
+  // Files other tasks changed in `direct.dir` since this task's base: they show in its diff without
+  // being its own. Cleared when its base moves.
+  alsoChanged?: { taskId: string; title: string; files: string[]; at: number }[]
   extraWorktrees: Record<string, { path: string; baseRef: string; forAgent: string }>
   owner:
     | { kind: 'session'; sessionId: string; jobShortId?: string; previousSessionIds: string[]; model: string; contextMemoryFingerprint: string }
@@ -117,7 +125,11 @@ export interface TaskRecord {
   agents: Record<string, AgentRecord>
   blockers: Record<string, Blocker>
   decisions: Record<string, Decision>
-  deliverables: { at: number; summary: string; verification: string[]; acceptance?: { agentId: string; pass: boolean; notes: string }; integration?: { status: 'applied' | 'empty' | 'conflict'; files: string[]; at: number } }[]
+  // check: a daily turn's judgment of whether an acceptance is worth running (p is Jev's probability, null from the evaluator)
+  // acceptance.fixed: the executor answered a failed acceptance with its fix; decisionId is the fix-confirm question asked about a fixed change
+  // told: the outcome the executor was last told of with a message that reached it (brief.ts outcomeNote)
+  // integration 'in-place': a direct task's change, already in the project directory, recorded as its result
+  deliverables: { at: number; summary: string; verification: string[]; check?: { needed: boolean; p: number | null; provider: 'jev' | 'substitute' }; acceptance?: { agentId: string; pass: boolean; notes: string; fixed?: { at: number; decisionId?: string } }; told?: string; integration?: { status: 'applied' | 'in-place' | 'empty' | 'conflict'; files: string[]; at: number } }[]
   feedback: { at: number; source: 'telegram' | 'window'; text: string; unsuitable: boolean | null; modelOpinion: boolean | null }[]
   ratings: { at: number; score: number; raw: string; invited: boolean }[]
   pendingRelays: Record<string, RelayRequest>

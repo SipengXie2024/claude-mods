@@ -40,7 +40,7 @@ function longTask(id: string, sessionId: string, projectRoot: string): Omit<Task
     pausedByUser: false,
     request: '检查 greet.py 并只回复 ok',
     followUps: [],
-    project: { root: projectRoot, gitInitByPlugin: true },
+    project: { root: projectRoot },
     worktree: null,
     extraWorktrees: {},
     owner: { kind: 'session', sessionId, previousSessionIds: [], model: 'claude/claude-opus-5-5', contextMemoryFingerprint: 'absent' },

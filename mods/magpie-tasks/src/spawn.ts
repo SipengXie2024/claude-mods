@@ -13,6 +13,7 @@ import type { Ctx } from './state'
 import { EFFORTS, type AgentRecord, type AgentRole, type Effort, type EffortChange, type JevJudgment, type RaiseReason, type SelectionKind, type SessionState, type TaskRecord } from './types'
 import { tell } from './daily'
 import { parseChannelTag } from './telegram'
+import { directOf, workspaceOf } from './workspace'
 
 export type SpawnDecision =
   | { action: 'pass' }
@@ -112,8 +113,9 @@ export function decideSpawn(a: { e: AgentSpawnInput; origin: string; task: Route
   let hardUsed = false
 
   // The task's working directory: a long task's helper works where its parent does (a separate copy
-  // when the parent has one), every other agent in the task worktree.
-  const worktree = parent?.worktree ?? task.worktree?.path ?? null
+  // when the parent has one), every other agent in the task's working directory (the task worktree,
+  // or the project directory of a direct task).
+  const worktree = parent?.worktree ?? workspaceOf(task)
   const cwd = worktree ?? e.cwd ?? a.session.cwd
 
   // The daily task's first agent turns into the routing assessment when routing cannot decide; a
@@ -155,7 +157,7 @@ export function decideSpawn(a: { e: AgentSpawnInput; origin: string; task: Route
     }
     return {
       action: 'assess',
-      rewrite: { prompt: withRouting(assessmentBrief(task, rules, chosen), m, { cwd: null, daily: true }), model: requestId(model, catalog), description: `${e.description} · ${displayName(model, rules)}/${effort}` },
+      rewrite: { prompt: withRouting(assessmentBrief(task, rules, chosen), m, { cwd: null, daily: true, direct: null }), model: requestId(model, catalog), description: `${e.description} · ${displayName(model, rules)}/${effort}` },
       agent,
       ...(chosen !== undefined ? { requestedModel: chosen } : {}),
       notice: chosen === undefined
@@ -266,7 +268,7 @@ export function decideSpawn(a: { e: AgentSpawnInput; origin: string; task: Route
     : `magpie-tasks routed the subagent "${e.description}" (${role}) to ${name} (${model}) at effort ${effort}; rule ${ruleId ?? 'none'} (${rules.version}); selection ${selection.kind}: ${selection.reason}. ${jevText(judgment)}.`
   return {
     action: 'route',
-    rewrite: { prompt: withRouting(e.prompt, m, { cwd: worktree, daily }), model: requestId(model, catalog), ...(worktree !== null ? { cwd: worktree } : {}), description: `${e.description} · ${name}/${effort}` },
+    rewrite: { prompt: withRouting(e.prompt, m, { cwd: worktree, daily, direct: directOf(task, worktree) }), model: requestId(model, catalog), ...(worktree !== null ? { cwd: worktree } : {}), description: `${e.description} · ${name}/${effort}` },
     agent,
     notice,
   }

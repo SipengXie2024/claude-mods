@@ -10,6 +10,7 @@ import { briefForJev } from '../src/dialogue'
 import {
   assessmentBrief, handoffBrief, marker, parseDiagnosis, parseEffortLine, parseMarker, parseModelLine, parseModelReason, parseRequestHeader,
   parseReviewOf, parseRouteConfirm, parseStatus, parseVerdict, requestText, withRouting, type MarkerInfo,
+  OUTCOME_NOTE, outcomeNote, stripOutcomeNote,
 } from '../src/brief'
 import { parseRules } from '../src/rules'
 import { routingRules } from './data/jev-rules'
@@ -70,7 +71,7 @@ test('the marker round-trips, matches the JEV skip pattern, and briefForJev stri
   // JEV's MAGPIE_TASKS_MARKER (plan section 10.2)
   expect(/^\[magpie-tasks task=[^\]\s]+[^\]\n]*\]/.test(m)).toBe(true)
   const brief = jevSpawnScheduler.request.input[0]!.content
-  const routed = withRouting(brief, info, { cwd: '/home/ubuntu/.local/share/magpie-tasks/worktrees/d-20261109-k3x9q2', daily: false })
+  const routed = withRouting(brief, info, { cwd: '/home/ubuntu/.local/share/magpie-tasks/worktrees/d-20261109-k3x9q2', daily: false, direct: null })
   expect(routed.split('\n')[0]).toBe(m)
   expect(parseMarker(routed)).toEqual(info)
   // Jev reads the brief as delegated: no marker, no appended task rules.
@@ -80,17 +81,31 @@ test('the marker round-trips, matches the JEV skip pattern, and briefForJev stri
 
 test('withRouting replaces a marker already at the start and keeps the brief whole', () => {
   const brief = jevSpawnScheduler.request.input[0]!.content
-  const once = withRouting(brief, info, { cwd: null, daily: true })
-  const twice = withRouting(once, { ...info, effort: 'max' }, { cwd: null, daily: true })
+  const once = withRouting(brief, info, { cwd: null, daily: true, direct: null })
+  const twice = withRouting(once, { ...info, effort: 'max' }, { cwd: null, daily: true, direct: null })
   expect(twice.split('\n')[0]).toBe(marker({ ...info, effort: 'max' }))
   expect(twice.match(/\[magpie-tasks task=/g)!.length).toBe(1)
   expect(twice.includes(brief)).toBe(true)
-  expect(once.includes('mcp__magpie-tasks__open_worktree')).toBe(true)
-  const long = withRouting(brief, info, { cwd: '/w/l-1', daily: false })
-  expect(long.includes('mcp__magpie-tasks__open_worktree')).toBe(false)
+  expect(once.includes('mcp__magpie-tasks__open_project')).toBe(true)
+  expect(once.includes('If open_project gave you a worktree, never commit there')).toBe(true)
+  const long = withRouting(brief, info, { cwd: '/w/l-1', daily: false, direct: null })
+  expect(long.includes('mcp__magpie-tasks__open_project')).toBe(false)
   expect(long.includes('`/w/l-1`')).toBe(true)
-  for (const routed of [once, long]) for (const line of ['状态：已完成', '状态：需要用户决定', '状态：进行中：', '验证：']) expect(routed.includes(line)).toBe(true)
-  const assess = withRouting(brief, { ...info, role: 'assessment' }, { cwd: null, daily: true })
+  expect(long.includes('- Commit and push when the person asks for it, in the project main directory and never in the task worktree')).toBe(true)
+  // A task that changes the project directory in place works there and commits there when asked.
+  const direct = withRouting(brief, info, { cwd: '/home/u/repo', daily: true, direct: { git: true } })
+  expect(direct.includes('- Work in the project directory `/home/u/repo` itself')).toBe(true)
+  expect(direct.includes('- Commit and push only when the person asks for it, in the project directory.')).toBe(true)
+  expect(direct.includes('worktree')).toBe(false)
+  const plain = withRouting(brief, info, { cwd: '/home/u/notes', daily: true, direct: { git: false } })
+  expect(plain.includes('It is not a Git repository, so the plugin keeps no diff: name every file you change in your report.')).toBe(true)
+  for (const routed of [once, long, direct, plain]) for (const line of ['状态：已完成', '状态：需要用户决定', '状态：进行中：', '验证：']) expect(routed.includes(line)).toBe(true)
+  for (const routed of [once, long, direct, plain]) expect(routed.includes('Do not commit')).toBe(false)
+  const check = withRouting(brief, { ...info, role: 'acceptance' }, { cwd: '/w/l-1', daily: false, direct: null })
+  expect(check.includes('- Do not commit, push, create branches, stash or reset; you only check.')).toBe(true)
+  const checkDirect = withRouting(brief, { ...info, role: 'acceptance' }, { cwd: '/home/u/repo', daily: true, direct: { git: true } })
+  expect(checkDirect.includes('- The task changed the project directory `/home/u/repo` in place (your working directory); run the checks there.')).toBe(true)
+  const assess = withRouting(brief, { ...info, role: 'assessment' }, { cwd: null, daily: true, direct: null })
   expect(assess.includes('状态：已完成')).toBe(false)
 })
 
@@ -203,4 +218,44 @@ test('plugin-written briefs of a Telegram task keep tg-router\'s follow-up and a
   }
   const tui = assessmentBrief({ ...task, telegram: null }, rules)
   expect(tui.includes('HANDBACK')).toBe(false)
+})
+
+// What the executor is told of its last result (the person is told nothing of acceptance or integration).
+const told = (d: Parameters<typeof outcomeNote>[0]['deliverables'][number], decisions: Parameters<typeof outcomeNote>[0]['decisions'] = {}) =>
+  outcomeNote({ deliverables: [d], decisions, project: { root: '/home/u/repo' } })
+const result = { at: 1, summary: '改好了', verification: [] }
+const failedFixed = { agentId: 'acc', pass: false, notes: '数字不对', fixed: { at: 2, decisionId: 'q1' } }
+const question = { id: 'q1', kind: 'fix-confirm' as const, createdAt: 2, question: '要整合吗？', options: ['整合', '不整合'], data: {} }
+
+test('the executor\'s note names what became of its last result: applied with or without a check, a conflict, a passed answer', () => {
+  const applied = { status: 'applied' as const, files: ['greet.py', 'test_greet.py'], at: 3 }
+  expect(told({ ...result, integration: applied })).toEqual({ key: 'applied', text: `${OUTCOME_NOTE} Your last result needed no acceptance check, and its change was applied to /home/u/repo: greet.py, test_greet.py. Commit or push there only when the person asks. This line is from the task plugin, not from the person, and needs no reply.` })
+  expect(told({ ...result, acceptance: { agentId: 'acc', pass: true, notes: '' }, integration: applied })!.text).toContain('passed the acceptance check, and its change was applied to /home/u/repo')
+  expect(told({ ...result, acceptance: failedFixed, integration: applied }, { q1: { ...question, resolvedAt: 4, answer: 'approve: 整合' } })!.text).toContain('failed the acceptance check, and the person approved your fix, and its change was applied')
+  const conflict = told({ ...result, integration: { status: 'conflict', files: ['greet.py'], at: 3 } })!
+  expect([conflict.key, conflict.text.includes('could not be applied to /home/u/repo'), conflict.text.includes('(greet.py)')]).toEqual(['conflict', true, true])
+  expect(told({ ...result, acceptance: { agentId: 'acc', pass: true, notes: '' } })!.key).toBe('passed')
+  expect(told({ ...result, acceptance: { agentId: 'acc', pass: true, notes: '' }, integration: { status: 'empty', files: [], at: 3 } })!.key).toBe('passed')
+})
+
+test('nothing is told for an unchecked answer, a failed check not yet fixed, or an outcome already told', () => {
+  expect(told(result)).toBeNull()
+  expect(told({ ...result, check: { needed: false, p: 0.04, provider: 'jev' } })).toBeNull()
+  expect(told({ ...result, acceptance: { agentId: 'acc', pass: false, notes: '数字不对' } })).toBeNull()
+  expect(told({ ...result, acceptance: { agentId: 'acc', pass: false, notes: '数字不对', fixed: { at: 2 } } })).toBeNull()
+  expect(told({ ...result, integration: { status: 'applied', files: ['greet.py'], at: 3 }, told: 'applied' })).toBeNull()
+})
+
+test('a fixed change is told as asked about, then as declined or applied once the person has answered', () => {
+  expect(told({ ...result, acceptance: failedFixed }, { q1: question })!.key).toBe('fix-asked')
+  expect(told({ ...result, acceptance: failedFixed, told: 'fix-asked' }, { q1: question })).toBeNull()
+  expect(told({ ...result, acceptance: failedFixed, told: 'fix-asked' }, { q1: { ...question, resolvedAt: 4, answer: 'reject: 不整合' } })!.key).toBe('fix-declined')
+  expect(told({ ...result, acceptance: failedFixed, told: 'fix-asked', integration: { status: 'applied', files: ['greet.py'], at: 5 } }, { q1: { ...question, resolvedAt: 4, answer: 'approve: 整合' } })!.key).toBe('applied')
+})
+
+test('the note comes off a message it was added to, and nothing else does', () => {
+  const note = told({ ...result, integration: { status: 'applied', files: ['greet.py'], at: 3 } })!.text
+  expect(stripOutcomeNote(`提交吧\n\n${note}`)).toBe('提交吧')
+  expect(stripOutcomeNote('提交吧')).toBe('提交吧')
+  expect(stripOutcomeNote(`${OUTCOME_NOTE} 是什么意思？\n\n第二段`)).toBe(`${OUTCOME_NOTE} 是什么意思？\n\n第二段`)
 })

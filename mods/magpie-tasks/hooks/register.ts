@@ -4,15 +4,16 @@
 import type { EngineInterface, PluginOptions, Register, RenderElement, TurnCompleteInput } from 'claude-code'
 import { architectTool, onArchitectComplete, onArchitectPrompt, onArchitectToolCall, onSubagentComplete, onSubagentToolCall } from '../src/architect'
 import { agentBand, bandText, clearBands, isEffort, noteBandDone, noteBandStep } from '../src/band'
-import { onDailyComplete, onOpenWorktree } from '../src/daily'
+import { onDailyComplete, onOpenProject } from '../src/daily'
 import { tick } from '../src/calibration'
 import { expandHome, hostIo } from '../src/io'
 import { catalogFrom, withRuleModels, type ModelCatalog } from '../src/model'
-import { recover } from '../src/recovery'
+import { reclaim } from '../src/reclaim'
+import { recover, recoverRouter } from '../src/recovery'
 import { Registry } from '../src/registry'
 import { onRouterPrompt, onSessionSend, routerTool } from '../src/router'
 import { loadRules, type Rules } from '../src/rules'
-import { bgIsolationAnswer, detectRole, onClaimPrompt, onFirstPrompt, onTakeoverTurnEnd } from '../src/session'
+import { bgIsolationAnswer, detectRole, loadRouter, onClaimPrompt, onFirstPrompt, onTakeoverTurnEnd } from '../src/session'
 import { onAgentSpawn, onTurnStart, onTurnStep, turnRule } from '../src/spawn'
 import { ctxFor, freshState, type Ctx } from '../src/state'
 import { clip, defaultChat, send } from '../src/telegram'
@@ -160,6 +161,21 @@ export const register: Register = (on, options) => {
     }, { type: 'error', during, agentId, error: line })
   }
 
+  // The sweep of finished tasks' worktrees and idle architects (src/reclaim.ts). A failure is reported
+  // once per distinct error in this process: the timer repeats the sweep every 15 minutes.
+  const sweepErrors = new Set<string>()
+  async function sweep(c: Ctx): Promise<void> {
+    try {
+      const r = await reclaim(c)
+      if (r.worktrees.length > 0 || r.architects.length > 0) await c.io.log(`reclaim: worktrees of ${r.worktrees.join(',') || '-'}; architects stopped ${r.architects.join(',') || '-'}`)
+    } catch (err) {
+      const line = errorLine(err)
+      if (sweepErrors.has(line)) return void (await c.io.log(`reclaim (again): ${line}`))
+      sweepErrors.add(line)
+      await reportFlowError(c, null, line, 'reclaiming finished tasks')
+    }
+  }
+
   function eventTask(agentId: string | undefined): string | null {
     if (agentId !== undefined) return st.agents.get(agentId) ?? null
     return st.taskId
@@ -205,11 +221,22 @@ export const register: Register = (on, options) => {
         await io.log(`role inactive: ${problem}`)
         return r
       }
-      // Startup recovery runs behind the session; the candidate's exit and /bg wait for it.
+      // A Router's own subagents from before a restart are routed and gated again when a reply resumes them.
+      if (role === 'router') await io.log(`router: ${await loadRouter(c)} subagents of earlier runs of this session loaded`)
+      // Startup recovery runs behind the session; the candidate's exit and /bg wait for it. A Router then
+      // recovers the daily tasks its restart cut off; both sweep what finished tasks still hold.
       st.recovery = recover(c).then(
         res => io.log(`recovery: resumed ${res.resumed.join(',') || '-'}; waiting ${res.waiting.join(',') || '-'}; reported ${res.reported.join(',') || '-'}`),
         (err: unknown) => reportFlowError(c, null, errorLine(err), 'startup recovery'),
-      )
+      ).then(async () => {
+        if (role === 'router') {
+          await recoverRouter(c).then(
+            res => io.log(`router recovery: checks rerun ${res.rerun.join(',') || '-'}; asked ${res.asked.join(',') || '-'}`),
+            (err: unknown) => reportFlowError(c, null, errorLine(err), 'Router restart recovery'),
+          )
+        }
+        await sweep(c)
+      })
     }
     if (role === 'candidate') {
       // U1: the command the first-message flow runs to end the foreground session is listed here.
@@ -223,6 +250,7 @@ export const register: Register = (on, options) => {
         ticking = true
         void tick(c)
           .catch((err: unknown) => reportFlowError(c, null, errorLine(err), 'rating and calibration timer'))
+          .then(() => sweep(c))
           .finally(() => { ticking = false })
       })
     }
@@ -315,7 +343,7 @@ export const register: Register = (on, options) => {
         if (owned.kind !== 'subagent' && e.agentId !== undefined) return { deny: `${e.tool} is for the ${owned.kind} itself; report your result in your answer.` }
         if (owned.kind === 'architect' && st.role === 'architect') return { result: await architectTool(c, owned.name as ArchitectToolName, args) }
         if (owned.kind === 'router' && st.role === 'router') return { result: await routerTool(c, owned.name as RouterToolName, args) }
-        if (owned.kind === 'subagent' && e.agentId !== undefined) return { result: await onOpenWorktree(c, e.agentId, { project: args['project'], init_git: args['init_git'] }) }
+        if (owned.kind === 'subagent' && e.agentId !== undefined) return { result: await onOpenProject(c, e.agentId, { project: args['project'] }) }
         return { deny: `${e.tool} is not available here: ${owned.kind === 'subagent' ? 'only a subagent of a task calls it' : `it belongs to the ${owned.kind} session`}.` }
       } catch (err) {
         // A tool's error (an invalid argument above all) is the refusal the model reads; the task

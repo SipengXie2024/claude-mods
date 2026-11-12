@@ -9,7 +9,7 @@ import { findConflict, isCheckCommand, porcelainChanged, touchedPaths } from './
 import { relay } from './daily'
 import { architectDeny, placeWith, repoOfWith, subagentWriteDeny } from './gate'
 import { baseRefName, createWorktree, gitRun } from './git'
-import { integrate, type IntegrationResult } from './integrate'
+import { integrate, settleDirect, type IntegrationResult } from './integrate'
 import { newId } from './io'
 import { agentLabel } from './model'
 import { MODEL_OPINION_QUESTION, predicate, UNSUITABLE_QUESTION } from './judge'
@@ -20,6 +20,7 @@ import type { Ctx, PromptResult } from './state'
 import { clip, send } from './telegram'
 import type { ArchitectToolName } from './tools'
 import type { AgentRecord, Blocker, Decision, TaskRecord } from './types'
+import { directHolders, isLive, projectDir, workspaceOf } from './workspace'
 
 type ToolEvent = { tool: string; [k: string]: unknown }
 type LongAnswer = 'separate' | 'wait' | 'approve' | 'reject' | 'unclear'
@@ -116,17 +117,29 @@ export async function onArchitectPrompt(ctx: Ctx, e: PromptSubmitInput, next: Ne
   if (source !== null) {
     const text = marker !== null ? marker.body : e.text
     const at = await io.now()
-    const wasError = task.state === 'error'
+    const from = task.state
+    if (from === 'done') context.push(await reopen(ctx, task))
     task = await reg.update(task.id, t => {
       t.followUps.push({ at, source, text })
-      if (t.state === 'error') t.state = 'running'
-    }, wasError ? { type: 'state', from: 'error', to: 'running', source } : { type: 'follow-up', source })
+      if (t.state === 'error' || t.state === 'done') t.state = 'running'
+    }, from === 'error' || from === 'done' ? { type: 'state', from, to: 'running', source } : { type: 'follow-up', source })
     const taskId = task.id
     // Runs after the prompt has gone on; a failure to record the feedback is reported here.
     void judgeFeedback(ctx, taskId, source, text, at).catch((err: unknown) => notice(ctx, `magpie-tasks 出错（任务 ${taskId}）：记录反馈失败：${firstLine(err instanceof Error ? err.message : String(err))}`))
   }
   context.push(architectContext(task, ctx.opts))
   return next({ ...e, context })
+}
+
+// The person's message to a done long task reopens it. Its worktree was removed once the session
+// stopped (src/reclaim.ts); a fresh one of the project as it is now takes the same path, which the
+// architect and its subagents already know. Answers the note the architect reads beside the message.
+async function reopen(ctx: Ctx, task: TaskRecord): Promise<string> {
+  if (task.worktree !== null || task.direct != null || task.project === null) return '[magpie-tasks] This long task was done; the person\'s message reopens it.'
+  const path = `${ctx.opts.worktreeDir}/${task.id}`
+  const made = await createWorktree(ctx.io, task.project.root, path, baseRefName(task.id), task.project.root)
+  await ctx.reg.update(task.id, t => { t.worktree = { path, baseRef: made.baseRef, baseCommit: made.baseCommit } }, { type: 'worktree', path, root: task.project.root, baseCommit: made.baseCommit, reason: 'reopened' })
+  return `[magpie-tasks] This long task was done; the person's message reopens it. Its worktree was removed when it closed and is made again at ${path} from the project as it is now; delegate changes there as before.`
 }
 
 async function decisionFromTelegram(ctx: Ctx, task: TaskRecord, a: { id: string; answer: LongAnswer }, body: string): Promise<string> {
@@ -216,10 +229,21 @@ export async function onArchitectToolCall(ctx: Ctx, e: ToolCallInput, next: Next
 // ---- subagents: write range, touched files and conflicts (sections 9.5, 9.9) ----------------------
 
 function shares(task: TaskRecord, a: AgentRecord): boolean {
-  return task.kind === 'long' && task.worktree !== null && a.worktree === task.worktree.path
+  const ws = workspaceOf(task)
+  return task.kind === 'long' && ws !== null && a.worktree === ws
 }
 
-const pausedText = (decisionId: string | undefined) => `magpie-tasks has paused you${decisionId ? ` (decision ${decisionId})` : ''}: another subagent works on the same files in the shared task worktree. Stop changing files; in your answer say what you have done and what remains, then end this turn. You will be told how to continue.`
+const pausedText = (decisionId: string | undefined) => `magpie-tasks has paused you${decisionId ? ` (decision ${decisionId})` : ''}: another subagent works on the same files in the task's shared working directory. Stop changing files; in your answer say what you have done and what remains, then end this turn. You will be told how to continue.`
+
+// A direct task that ended and was resumed may not write in the project directory once another live
+// task changes it in place: it first moves to a worktree through open_project (leaveIfTaken).
+async function takenDeny(ctx: Ctx, task: TaskRecord, agent: AgentRecord, e: ToolEvent): Promise<string | null> {
+  const d = task.direct
+  if (d === undefined || d === null || isLive(task) || agent.worktree !== d.dir || touchedPaths(e.tool, e).length === 0) return null
+  const others = await directHolders(ctx.reg, d.dir, task.id)
+  if (others.length === 0) return null
+  return `Another task now changes ${d.dir} in place (${others.map(o => `「${o.title}」`).join(', ')}). Call mcp__magpie-tasks__open_project with { "project": "${d.dir}" } again: this task then gets a Git worktree of the project as it is now, and you continue there.`
+}
 
 export async function onSubagentToolCall(ctx: Ctx, e: ToolCallInput, next: Next<'tool.call'>): Promise<ToolCallResult> {
   const { st, reg, io } = ctx
@@ -232,27 +256,31 @@ export async function onSubagentToolCall(ctx: Ctx, e: ToolCallInput, next: Next<
   if (agent === undefined) throw new Error(`agent ${agentId} is not recorded in task ${taskId}`)
   const ev = e as unknown as ToolEvent
   const place = placeFor(ctx)
-  const deny = await subagentWriteDeny(ev, { worktree: agent.worktree, place, repoOf: repoOfWith(io) })
+  const deny = await subagentWriteDeny(ev, { worktree: agent.worktree, place, repoOf: repoOfWith(io) }) ?? await takenDeny(ctx, task, agent, ev)
   if (deny !== null) {
     await reg.log(taskId, { type: 'write-denied', agentId, tool: e.tool, reason: deny.slice(0, 300) })
     return { deny }
   }
-  if (!shares(task, agent)) return next(e)
+  // Outside Git a direct task's change is the files its agents edit with the file tools.
+  const untracked = task.direct != null && task.direct.baseRef === null && agent.worktree === task.direct.dir
+  if (!shares(task, agent)) {
+    const edits = untracked ? touchedPaths(e.tool, ev) : []
+    if (edits.length === 0) return next(e)
+    const r = await next(e)
+    if (r.deny === undefined && r.isError === undefined) await recordTouches(ctx, taskId, agentId, await placed(place, edits))
+    return r
+  }
   if (!active.has(agentId)) {
     active.add(agentId)
     if (agent.state === 'idle') task = await reg.update(taskId, t => { t.agents[agentId]!.state = 'running' }, { type: 'state', agentId, to: 'running' })
     agent = task.agents[agentId]!
   }
-  const wt = await place(task.worktree!.path)
-  if (wt === null) throw new Error(`the task worktree ${task.worktree!.path} does not exist`)
+  const wt = await place(workspaceOf(task)!)
+  if (wt === null) throw new Error(`the task's working directory ${workspaceOf(task)} does not exist`)
   const edits = touchedPaths(e.tool, ev)
   if (edits.length > 0) {
     if (agent.state === 'paused') return { deny: pausedText(agent.pausedFor) }
-    const paths: string[] = []
-    for (const p of edits) {
-      const real = await place(p)
-      if (real !== null) paths.push(real)
-    }
+    const paths = await placed(place, edits)
     for (const path of paths) {
       const other = findConflict(st.touches, agentId, path, runningShared(task))
       if (other !== null) {
@@ -266,6 +294,8 @@ export async function onSubagentToolCall(ctx: Ctx, e: ToolCallInput, next: Next<
   }
   if (e.tool !== 'Bash') return next(e)
   if (agent.state === 'paused') return { deny: pausedText(agent.pausedFor) }
+  // Outside Git there is no status to compare: a shell command's changes are not tracked.
+  if (untracked) return next(e)
   const command = typeof ev['command'] === 'string' ? ev['command'] : ''
   const before = await porcelain(ctx, wt)
   const startedAt = await io.now()
@@ -284,6 +314,15 @@ export async function onSubagentToolCall(ctx: Ctx, e: ToolCallInput, next: Next<
   const paused = await fileConflict(ctx, fresh!, agentId, culprit, { path: command, cause: 'check-failed' })
   if (paused !== agentId) return r
   return { ...r, context: [...(r.context ?? []), pausedText(fresh!.agents[agentId]?.pausedFor)] }
+}
+
+async function placed(place: (path: string) => Promise<string | null>, paths: string[]): Promise<string[]> {
+  const out: string[] = []
+  for (const p of paths) {
+    const real = await place(p)
+    if (real !== null) out.push(real)
+  }
+  return out
 }
 
 function runningShared(task: TaskRecord): Set<string> {
@@ -322,7 +361,8 @@ async function fileConflict(ctx: Ctx, task: TaskRecord, a: string, b: string, wh
   if (later.state === 'paused') return later.agentId
   const now = await io.now()
   const label = (x: AgentRecord) => agentLabel(x, ctx.rules)
-  const file = why.path.startsWith(`${task.worktree?.path}/`) ? why.path.slice(task.worktree!.path.length + 1) : why.path
+  const ws = workspaceOf(task)
+  const file = ws !== null && why.path.startsWith(`${ws}/`) ? why.path.slice(ws.length + 1) : why.path
   const what = why.cause === 'same-file'
     ? `${label(A)}和仍在运行的${label(B)}改动了同一个文件 ${file}`
     : `${label(A)}的检查命令 ${why.path} 在仍在运行的${label(B)}改动文件之后失败`
@@ -333,8 +373,10 @@ async function fileConflict(ctx: Ctx, task: TaskRecord, a: string, b: string, wh
     id: newId('q', now),
     kind: 'file-conflict',
     createdAt: now,
-    question: `长期任务「${task.title}」（${task.id}）：${what}。已暂停后启动的${label(later)}。让它在单独的工作副本中继续，还是等${label(earlier)}完成后再继续？`,
-    options: ['单独副本', '等待前一方'],
+    question: canCopy(task)
+      ? `长期任务「${task.title}」（${task.id}）：${what}。已暂停后启动的${label(later)}。让它在单独的工作副本中继续，还是等${label(earlier)}完成后再继续？`
+      : `长期任务「${task.title}」（${task.id}）：${what}。已暂停后启动的${label(later)}，等${label(earlier)}完成后它再继续（项目不是 Git 仓库，没有单独副本可用）。`,
+    options: canCopy(task) ? ['单独副本', '等待前一方'] : ['等待前一方'],
     data: { agentId: later.agentId, otherAgentId: earlier.agentId, path: why.path, cause: why.cause },
   }
   const updated = await reg.update(task.id, t => {
@@ -345,9 +387,14 @@ async function fileConflict(ctx: Ctx, task: TaskRecord, a: string, b: string, wh
   }, { type: 'decision', decision: decision.id, kind: 'file-conflict', paused: later.agentId, other: earlier.agentId, path: why.path, cause: why.cause })
   task.agents[later.agentId] = updated.agents[later.agentId]!
   task.decisions[decision.id] = decision
-  await appendForArchitect(ctx, `[magpie-tasks] File conflict in the task worktree: subagent ${agentName(later)} was paused (it started later) because ${cause}. Decision ${decision.id}: discuss it with the person if needed, then call mcp__magpie-tasks__resolve_conflict with agent_id ${later.agentId} and decision separate (it continues in its own copy of the worktree) or wait (it continues after ${earlier.agentId} finishes). The person was asked on Telegram as well.`)
+  await appendForArchitect(ctx, `[magpie-tasks] File conflict in the task's working directory: subagent ${agentName(later)} was paused (it started later) because ${cause}. Decision ${decision.id}: discuss it with the person if needed, then call mcp__magpie-tasks__resolve_conflict with agent_id ${later.agentId} and decision ${canCopy(task) ? 'separate (it continues in its own Git worktree copied from the working directory) or wait' : 'wait (the project is not a Git repository, so there is no separate copy)'} (it continues after ${earlier.agentId} finishes). The person was asked on Telegram as well.`)
   await askPerson(ctx, updated, decision)
   return later.agentId
+}
+
+// A separate copy is a Git worktree: a project outside Git has none.
+function canCopy(task: TaskRecord): boolean {
+  return task.worktree !== null || (task.direct != null && task.direct.baseRef !== null)
 }
 
 // ---- subagent turn ends (section 9.9 steps 5, 6) ---------------------------------------------------
@@ -382,7 +429,7 @@ export async function onSubagentComplete(ctx: Ctx, e: TurnCompleteInput): Promis
   }
 }
 
-// A separate copy goes back into the task worktree only after the agent it conflicted with has
+// A separate copy goes back into the task's working directory only after the agent it conflicted with has
 // finished: merged earlier, the still running agent finds its file changed under it and writes its
 // own version back (E7, 2026-11-09), and the merged change is lost.
 async function mergeWhenFree(ctx: Ctx, task: TaskRecord, agentId: string, extra: { path: string; baseRef: string }): Promise<void> {
@@ -390,18 +437,19 @@ async function mergeWhenFree(ctx: Ctx, task: TaskRecord, agentId: string, extra:
   const other = d === undefined ? undefined : task.agents[d.data['otherAgentId']!]
   if (d === undefined || other === undefined || other.state !== 'running') return mergeSeparate(ctx, task, agentId, extra)
   await ctx.reg.update(task.id, t => { t.decisions[d.id]!.data['merge'] = 'waiting' }, { type: 'merge-deferred', decision: d.id, agentId, until: other.agentId })
-  await appendForArchitect(ctx, `[magpie-tasks] Subagent ${agentId} finished in its separate worktree ${extra.path}; its changes go into the task worktree once ${other.agentId}, which it conflicted with, finishes.`)
+  await appendForArchitect(ctx, `[magpie-tasks] Subagent ${agentId} finished in its separate worktree ${extra.path}; its changes go into ${workspaceOf(task)} once ${other.agentId}, which it conflicted with, finishes.`)
 }
 
 async function mergeSeparate(ctx: Ctx, task: TaskRecord, agentId: string, extra: { path: string; baseRef: string }): Promise<void> {
-  if (task.worktree === null || task.project === null) throw new Error(`task ${task.id} has a separate worktree but no task worktree or project`)
-  const r = await integrate(ctx.io, ctx.reg, { taskId: task.id, repo: task.project.root, source: extra.path, target: task.worktree.path, baseRef: extra.baseRef })
+  const target = workspaceOf(task)
+  if (target === null || task.project === null) throw new Error(`task ${task.id} has a separate worktree but no working directory or project`)
+  const r = await integrate(ctx.io, ctx.reg, { taskId: task.id, repo: task.project.root, source: extra.path, target, baseRef: extra.baseRef })
   if (r.status === 'applied') {
-    await appendForArchitect(ctx, `[magpie-tasks] Subagent ${agentId} finished in its separate worktree ${extra.path}; its changes were merged into the task worktree ${task.worktree.path}: ${r.files.join(', ')}.`)
+    await appendForArchitect(ctx, `[magpie-tasks] Subagent ${agentId} finished in its separate worktree ${extra.path}; its changes were merged into ${target}: ${r.files.join(', ')}.`)
   } else if (r.status === 'empty') {
-    await appendForArchitect(ctx, `[magpie-tasks] Subagent ${agentId} finished in its separate worktree ${extra.path} with no changes to merge into the task worktree.`)
+    await appendForArchitect(ctx, `[magpie-tasks] Subagent ${agentId} finished in its separate worktree ${extra.path} with no changes to merge into ${target}.`)
   } else {
-    await integrationConflict(ctx, task, { source: extra.path, target: task.worktree.path, baseRef: extra.baseRef, agentId }, r)
+    await integrationConflict(ctx, task, { source: extra.path, target, baseRef: extra.baseRef, agentId }, r)
   }
 }
 
@@ -415,7 +463,7 @@ async function release(ctx: Ctx, task: TaskRecord, d: Decision): Promise<void> {
   await ctx.reg.update(task.id, t => { const x = t.agents[pausedId]!; x.state = 'idle'; delete x.pausedFor }, { type: 'resume', agentId: pausedId, decision: d.id })
   await relay(ctx, {
     id: newId('r', now), taskId: task.id, createdAt: now, kind: 'wake', agentId: pausedId, raises: [],
-    message: `magpie-tasks: the subagent you were waiting for (${d.data['otherAgentId']}) has finished. Continue your task in ${paused.worktree ?? task.worktree?.path}; check the files it changed before you change them again.`,
+    message: `magpie-tasks: the subagent you were waiting for (${d.data['otherAgentId']}) has finished. Continue your task in ${paused.worktree ?? workspaceOf(task)}; check the files it changed before you change them again.`,
   })
 }
 
@@ -460,7 +508,7 @@ async function integrateApproved(ctx: Ctx, task: TaskRecord, a: { source: string
 
 function integrationText(r: IntegrationResult, target: string): string {
   if (r.status === 'applied') return `Applied to ${target}: ${r.files.join(', ')}. The changes are in the working tree there, uncommitted, for the person to review and commit.`
-  if (r.status === 'empty') return `The task worktree has no changes since the last integration; nothing was applied to ${target}.`
+  if (r.status === 'empty') return `No changes since the last integration; nothing was applied to ${target}.`
   return `Conflict: the changes do not apply to ${target} (${r.files.join(', ')}).`
 }
 
@@ -478,9 +526,11 @@ export async function applyLongDecision(ctx: Ctx, task: TaskRecord, decision: De
       const agentId = decision.data['agentId']
       if (agentId === undefined || task.agents[agentId] === undefined) throw new Error(`decision ${decision.id} names no agent of task ${task.id}`)
       if (answer === 'separate') {
-        if (task.worktree === null || task.project === null) throw new Error(`task ${task.id} has no worktree to copy`)
+        const from = workspaceOf(task)
+        if (from === null || task.project === null) throw new Error(`task ${task.id} has no working directory to copy`)
+        if (!canCopy(task)) throw new Error(`${from} is not a Git repository, so agent ${agentId} cannot get a separate copy; answer wait instead`)
         const path = `${opts.worktreeDir}/${task.id}-${agentId}`
-        const wt = await createWorktree(io, task.project.root, path, baseRefName(task.id, agentId), task.worktree.path)
+        const wt = await createWorktree(io, (await projectDir(io, task.project.root)).dir, path, baseRefName(task.id, agentId), from)
         await reg.update(task.id, t => {
           t.extraWorktrees[agentId] = { path, baseRef: wt.baseRef, forAgent: agentId }
           const a = t.agents[agentId]!
@@ -493,9 +543,9 @@ export async function applyLongDecision(ctx: Ctx, task: TaskRecord, decision: De
         ctx.st.touches.delete(agentId)
         await relay(ctx, {
           id: newId('r', now), taskId: task.id, createdAt: now, kind: 'wake', agentId, raises: [],
-          message: `magpie-tasks: you now have a separate worktree ${path}, a copy of the task worktree as it is now. Continue your task there: make every change under ${path} (cd ${path} before running commands) and do not write in ${task.worktree.path}. Report as before when you finish; your changes are then merged into the task worktree.`,
+          message: `magpie-tasks: you now have a separate worktree ${path}, a copy of ${from} as it is now. Continue your task there: make every change under ${path} (cd ${path} before running commands) and do not write in ${from}. Report as before when you finish; your changes are then merged into ${from}.`,
         })
-        return `separate worktree ${path} created for agent ${agentId}, which is woken to continue there; its changes are merged into the task worktree when it reports done.`
+        return `separate worktree ${path} created for agent ${agentId}, which is woken to continue there; its changes are merged into ${from} when it reports done.`
       }
       if (answer === 'wait') {
         const updated = await reg.update(task.id, t => resolve(t, decision.id, 'wait', now), log)
@@ -600,8 +650,9 @@ export async function architectTool(ctx: Ctx, name: ArchitectToolName, args: Rec
 
 export function taskStatus(task: TaskRecord): string {
   const lines = [`Task ${task.id} "${task.title}": ${task.kind}, state ${task.state}${task.pausedByUser ? ' (paused by the person)' : ''}${task.error ? `, last error: ${task.error}` : ''}.`]
-  lines.push(`Project main directory: ${task.project?.root ?? '(none)'}${task.project?.gitInitByPlugin ? ' (Git repository created by magpie-tasks)' : ''}.`)
-  lines.push(`Task worktree: ${task.worktree ? `${task.worktree.path} (base ref ${task.worktree.baseRef})` : '(none)'}.`)
+  lines.push(`Project main directory: ${task.project?.root ?? '(none)'}.`)
+  if (task.direct != null) lines.push(`Subagents work directly in ${task.direct.dir}${task.direct.baseRef === null ? ' (not a Git repository: no diff, only the files edited with the file tools)' : ` (base ref ${task.direct.baseRef})`}.`)
+  else lines.push(`Task worktree: ${task.worktree ? `${task.worktree.path} (base ref ${task.worktree.baseRef})` : '(none)'}.`)
   for (const [agentId, x] of Object.entries(task.extraWorktrees)) lines.push(`Separate worktree of ${agentId}: ${x.path} (base ref ${x.baseRef}).`)
   const agents = Object.values(task.agents)
   lines.push(agents.length === 0 ? 'Subagents: none yet.' : 'Subagents:')
@@ -631,7 +682,9 @@ async function reportOutcome(ctx: Ctx, task: TaskRecord, args: Record<string, un
   if (outcome === 'accepted') {
     const last = agent.reports[agent.reports.length - 1]
     await reg.update(task.id, t => { t.deliverables.push({ at, summary: notes || `accepted the result of ${agentId}`, verification: last?.verification ?? [] }) }, { type: 'outcome', agentId, outcome, notes })
-    return `Recorded the result of ${agentId} as accepted. Call mcp__magpie-tasks__integrate to apply the task worktree's changes to the project main directory.`
+    return task.direct != null
+      ? `Recorded the result of ${agentId} as accepted. Call mcp__magpie-tasks__integrate to record the change it made in ${task.direct.dir} as the task's result.`
+      : `Recorded the result of ${agentId} as accepted. Call mcp__magpie-tasks__integrate to apply the task worktree's changes to the project main directory.`
   }
   if (outcome === 'rejected') {
     await addRaise(ctx, task.id, agentId, 'acceptance-failed', { type: 'acceptance', agentId, pass: false, notes })
@@ -704,6 +757,13 @@ async function noProgress(ctx: Ctx, task: TaskRecord, blocker: Blocker, outcome:
 }
 
 async function integrateTool(ctx: Ctx, task: TaskRecord, note: string | undefined): Promise<string> {
+  if (task.direct != null) {
+    if (note !== undefined) await ctx.reg.log(task.id, { type: 'integrate-request', note })
+    const r = await settleDirect(ctx.io, ctx.reg, task.id)
+    return r.status === 'empty'
+      ? `Nothing changed in ${task.direct.dir} since the last record.`
+      : `The subagents work directly in ${task.direct.dir}, so the change is already there; recorded as the task's result: ${r.files.join(', ')}. It is uncommitted, for the person to review and commit.`
+  }
   if (task.worktree === null || task.project === null) throw new Error(`task ${task.id} has no worktree to integrate`)
   if (note !== undefined) await ctx.reg.log(task.id, { type: 'integrate-request', note })
   const target = task.project.root
@@ -713,13 +773,23 @@ async function integrateTool(ctx: Ctx, task: TaskRecord, note: string | undefine
   return `${integrationText(r, target)}\n${r.detail}\nNothing was applied. The task waits for the person (decision ${decision.id}); they were asked on Telegram.`
 }
 
+// kind decision: a question the person must answer; result: a finished part worth their attention;
+// done: the whole task is finished, so it closes. A closed task's architect session is stopped once it
+// has been idle for ten minutes and its worktree removed (src/reclaim.ts); the person's next message
+// reopens the task and resumes the session.
 async function notifyUser(ctx: Ctx, task: TaskRecord, args: Record<string, unknown>): Promise<string> {
   const kind = str(args, 'kind', true)
-  if (kind !== 'decision' && kind !== 'done') throw new Error('kind must be decision or done')
+  if (kind !== 'decision' && kind !== 'result' && kind !== 'done') throw new Error('kind must be decision, result or done')
   const text = str(args, 'text', true)
-  if (task.telegram === null || task.telegram.chatId === 'tui') throw new Error(`task ${task.id} has no Telegram chat`)
   const now = await ctx.io.now()
-  const messageId = await telegramReport(ctx, task, `长期任务「${task.title}」${kind === 'done' ? '完成' : '需要你决定'}：\n${text}`)
-  await ctx.reg.update(task.id, t => { if (kind === 'done') t.completedAt = now }, { type: 'notify', kind, messageId })
-  return kind === 'done' ? 'Sent to the person on Telegram; the completion time is recorded.' : 'Sent to the person on Telegram; their reply comes back to this session.'
+  const heading = kind === 'done' ? '完成' : kind === 'result' ? '有了结果' : '需要你决定'
+  const messageId = await telegramReport(ctx, task, `长期任务「${task.title}」${heading}：\n${text}`)
+  await ctx.reg.update(task.id, t => {
+    if (kind !== 'done') return
+    t.completedAt = now
+    t.state = 'done'
+  }, { type: 'notify', kind, messageId, ...(kind === 'done' ? { state: 'done' } : {}) })
+  const where = messageId === null ? 'Shown in this window (the task has no Telegram chat)' : 'Sent to the person on Telegram'
+  if (kind === 'done') return `${where}. The task is closed: once you have been idle for ten minutes this session is stopped and the task worktree removed; the person's next message reopens the task.`
+  return kind === 'decision' ? `${where}; their reply comes back to this session.` : `${where}.`
 }

@@ -1,14 +1,17 @@
-// git.ts and integrate.ts against real repositories in temporary directories (plan section 12.1,
-// git and integrate row).
+// git.ts, integrate.ts and workspace.ts against real repositories in temporary directories (plan
+// section 12.1, git and integrate row).
 import { afterAll, beforeAll, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { baseRefName, createWorktree, diffSince, initRepo, projectStats, removeWorktree, repoRoot, scratchPath } from '../src/git'
-import { integrate } from '../src/integrate'
+import { baseRefName, createWorktree, diffSince, removeWorktree, removeWorktreeAndRef, repoRoot, scratchPath } from '../src/git'
+import { reclaim } from '../src/reclaim'
+import type { Ctx } from '../src/state'
+import { integrate, settleDirect } from '../src/integrate'
 import { Registry } from '../src/registry'
 import type { Options, TaskRecord } from '../src/types'
+import { leaveIfTaken, placeTask } from '../src/workspace'
 import { nodeIo } from './node-io'
 
 let root = ''
@@ -61,7 +64,7 @@ function longTask(id: string, projectRoot: string): Omit<TaskRecord, 'schema' | 
     pausedByUser: false,
     request: '把 greet.py 的 hello 改成 hi',
     followUps: [],
-    project: { root: projectRoot, gitInitByPlugin: false },
+    project: { root: projectRoot },
     worktree: null,
     extraWorktrees: {},
     owner: { kind: 'session', sessionId: `s-${id}`, previousSessionIds: [], model: 'claude/claude-opus-5-5', contextMemoryFingerprint: 'absent' },
@@ -281,35 +284,117 @@ test('createWorktree: when worktree add fails the ref is removed, so a retry wit
   expect(readFileSync(join(s.wt, 'greet.py'), 'utf8')).toBe('print("hello")\n')
 })
 
-test('initRepo in a directory that is not a repository: a baseline commit of every file, a clean status, then a worktree', async () => {
-  const s = await scenario('init')
-  writeFileSync(join(s.project, 'greet.py'), 'print("hello")\n')
-  mkdirSync(join(s.project, 'data'))
-  writeFileSync(join(s.project, 'data', 'notes.txt'), 'abc\n')
-  expect(await repoRoot(s.io, s.project)).toBeNull()
-  expect(await projectStats(s.io, s.project)).toEqual({ files: 2, bytes: 19 })
-  await initRepo(s.io, s.project)
-  expect(await repoRoot(s.io, s.project)).toBe(s.project)
-  expect(sh(s.project, 'log', '--format=%s')).toBe('magpie-tasks baseline\n')
-  expect(sh(s.project, 'ls-files')).toBe('data/notes.txt\ngreet.py\n')
-  expect(sh(s.project, 'status', '--porcelain=v1', '-z', '--untracked-files=all')).toBe('')
-  await expect(initRepo(s.io, s.project)).rejects.toThrow('already inside the repository')
-
+test('placeTask: the first live task on a project works in place, a second one gets a worktree; outside Git every task works in place', async () => {
+  const s = await scenario('place')
+  committedRepo(s.project)
+  const before = userState(s.project)
   await s.task(s.project)
-  const ref = baseRefName(s.taskId)
-  await createWorktree(s.io, s.project, s.wt, ref, s.project)
-  writeFileSync(join(s.wt, 'greet.py'), 'print("hi")\n')
-  const r = await integrate(s.io, s.reg, { taskId: s.taskId, repo: s.project, source: s.wt, target: s.project, baseRef: ref })
-  expect(r.status).toBe('applied')
-  expect(readFileSync(join(s.project, 'greet.py'), 'utf8')).toBe('print("hi")\n')
+  const first = await placeTask(s.io, s.reg, s.opts, s.taskId, s.project)
+  expect(first).toEqual({ mode: 'direct', path: s.project, git: true, others: [] })
+  const a = (await s.reg.get(s.taskId))!
+  expect(a.worktree).toBeNull()
+  expect(a.direct!.dir).toBe(s.project)
+  expect(sh(s.project, 'rev-parse', baseRefName(s.taskId)).trim()).toBe(a.direct!.baseCommit!)
+  // The base holds the user's uncommitted and untracked files and leaves their repository alone.
+  expect(sh(s.project, 'show', `${a.direct!.baseCommit}:README.md`)).toBe('# proj\n\nuser note\n')
+  expect(sh(s.project, 'show', `${a.direct!.baseCommit}:untracked.txt`)).toBe('not added\n')
+  expect(userState(s.project)).toEqual(before)
+  await expect(placeTask(s.io, s.reg, s.opts, s.taskId, s.project)).rejects.toThrow('already works in')
+
+  const second = 'l-20261112-second'
+  await s.reg.create({ ...longTask(second, s.project), title: '第二个任务' })
+  const placed = await placeTask(s.io, s.reg, s.opts, second, join(s.project))
+  expect(placed).toEqual({ mode: 'worktree', path: join(s.opts.worktreeDir, second), git: true, others: [{ id: s.taskId, title: a.title }] })
+  expect(readFileSync(join(placed.path, 'untracked.txt'), 'utf8')).toBe('not added\n')
+  expect((await s.reg.get(second))!.direct).toBeNull()
+
+  // Once the first task is done, the next task works in place again.
+  await s.reg.update(s.taskId, t => { t.state = 'done' }, { type: 'state', state: 'done' })
+  const third = 'l-20261112-thirdd'
+  await s.reg.create(longTask(third, s.project))
+  expect((await placeTask(s.io, s.reg, s.opts, third, s.project)).mode).toBe('direct')
+
+  const plain = join(s.dir, 'plain')
+  mkdirSync(plain)
+  writeFileSync(join(plain, 'notes.txt'), 'abc\n')
+  const p1 = 'l-20261112-plain1'
+  const p2 = 'l-20261112-plain2'
+  await s.reg.create(longTask(p1, plain))
+  await s.reg.create(longTask(p2, plain))
+  expect(await placeTask(s.io, s.reg, s.opts, p1, plain)).toEqual({ mode: 'direct', path: plain, git: false, others: [] })
+  expect((await placeTask(s.io, s.reg, s.opts, p2, plain)).others.map(o => o.id)).toEqual([p1])
+  expect((await s.reg.get(p2))!.direct).toEqual({ dir: plain, baseRef: null, baseCommit: null })
+  expect(existsSync(join(plain, '.git'))).toBe(false)
 })
 
-test('initRepo in an empty directory makes an empty baseline', async () => {
-  const s = await scenario('initempty')
-  expect(await projectStats(s.io, s.project)).toEqual({ files: 0, bytes: 0 })
-  await initRepo(s.io, s.project)
-  expect(sh(s.project, 'log', '--format=%s')).toBe('magpie-tasks baseline\n')
-  expect(sh(s.project, 'ls-files')).toBe('')
+test('settleDirect: the files changed since the base become the result in place, the base moves, and the other direct tasks are told', async () => {
+  const s = await scenario('settle')
+  committedRepo(s.project)
+  await s.task(s.project)
+  await placeTask(s.io, s.reg, s.opts, s.taskId, s.project)
+  writeFileSync(join(s.project, 'greet.py'), 'print("hi")\n')
+  await s.reg.update(s.taskId, t => { t.deliverables.push({ at: 1, summary: 'accepted', verification: [] }) }, { type: 'outcome' })
+  const before = userState(s.project)
+  expect(await settleDirect(s.io, s.reg, s.taskId)).toEqual({ status: 'in-place', files: ['greet.py'] })
+  expect(userState(s.project)).toEqual(before)
+  const a = (await s.reg.get(s.taskId))!
+  expect(a.deliverables[0]!.integration).toMatchObject({ status: 'in-place', files: ['greet.py'] })
+  expect(sh(s.project, 'rev-parse', baseRefName(s.taskId)).trim()).toBe(a.direct!.baseCommit!)
+  expect(sh(s.project, 'show', `${a.direct!.baseCommit}:greet.py`)).toBe('print("hi")\n')
+  expect(await settleDirect(s.io, s.reg, s.taskId)).toEqual({ status: 'empty' })
+
+  // A task in a worktree integrates into the project: the direct task learns which files are not its own.
+  const other = 'l-20261112-wtwtwt'
+  await s.reg.create({ ...longTask(other, s.project), title: '改 README' })
+  const placed = await placeTask(s.io, s.reg, s.opts, other, s.project)
+  expect(placed.mode).toBe('worktree')
+  writeFileSync(join(placed.path, 'README.md'), '# proj\n\nuser note\nmore\n')
+  const r = await integrate(s.io, s.reg, { taskId: other, repo: s.project, source: placed.path, target: s.project, baseRef: baseRefName(other) })
+  expect(r.status).toBe('applied')
+  expect((await s.reg.get(s.taskId))!.alsoChanged).toMatchObject([{ taskId: other, title: '改 README', files: ['README.md'] }])
+  // Its own next settle clears that note with the moved base.
+  await settleDirect(s.io, s.reg, s.taskId)
+  expect((await s.reg.get(s.taskId))!.alsoChanged).toEqual([])
+
+  // Outside Git the result is the files the agents edited with the file tools.
+  const plain = join(s.dir, 'plain')
+  mkdirSync(plain)
+  const p = 'l-20261112-plainx'
+  await s.reg.create(longTask(p, plain))
+  await placeTask(s.io, s.reg, s.opts, p, plain)
+  await s.reg.update(p, t => {
+    t.agents['a1'] = { agentId: 'a1', role: 'implementer', sessionId: 's', ruleId: null, rulesVersion: 'v', selection: { kind: 'rule', reason: 'r' }, judgment: null, model: 'claude/claude-opus-5-5', effort: 'high', efforts: [], contextSource: 'brief', cwd: plain, worktree: plain, state: 'idle', pendingRaises: [], filesTouched: [join(plain, 'a.txt'), '/tmp/elsewhere.txt'], reports: [], startedAt: 1 }
+  }, { type: 'spawn' })
+  expect(await settleDirect(s.io, s.reg, p)).toEqual({ status: 'in-place', files: ['a.txt'] })
+  expect((await s.reg.get(p))!.agents['a1']!.filesTouched).toEqual([])
+  expect(await settleDirect(s.io, s.reg, p)).toEqual({ status: 'empty' })
+})
+
+test('leaveIfTaken: an ended direct task that resumes while another task works in place moves to a worktree of the project as it is now', async () => {
+  const s = await scenario('leave')
+  committedRepo(s.project)
+  await s.task(s.project)
+  await placeTask(s.io, s.reg, s.opts, s.taskId, s.project)
+  // Still live, or ended with nobody else in place: it stays.
+  expect(await leaveIfTaken(s.io, s.reg, s.opts, s.taskId)).toBeNull()
+  await s.reg.update(s.taskId, t => { t.state = 'done' }, { type: 'state', state: 'done' })
+  expect(await leaveIfTaken(s.io, s.reg, s.opts, s.taskId)).toBeNull()
+
+  const next = 'l-20261112-nextnx'
+  await s.reg.create({ ...longTask(next, s.project), title: '下一个任务' })
+  expect((await placeTask(s.io, s.reg, s.opts, next, s.project)).mode).toBe('direct')
+  writeFileSync(join(s.project, 'greet.py'), 'print("next")\n')
+  await s.reg.update(s.taskId, t => {
+    t.agents['x1'] = { agentId: 'x1', role: 'executor', sessionId: 's', ruleId: null, rulesVersion: 'v', selection: { kind: 'rule', reason: 'r' }, judgment: null, model: 'claude/claude-opus-5-5', effort: 'high', efforts: [], contextSource: 'brief', cwd: s.project, worktree: s.project, state: 'running', pendingRaises: [], filesTouched: [], reports: [], startedAt: 1 }
+  }, { type: 'spawn' })
+  const moved = await leaveIfTaken(s.io, s.reg, s.opts, s.taskId)
+  expect(moved).toEqual({ path: s.wt, others: [{ id: next, title: '下一个任务' }] })
+  const a = (await s.reg.get(s.taskId))!
+  expect(a.direct).toBeNull()
+  expect(a.worktree!.path).toBe(s.wt)
+  expect(a.agents['x1']).toMatchObject({ worktree: s.wt, cwd: s.wt })
+  expect(readFileSync(join(s.wt, 'greet.py'), 'utf8')).toBe('print("next")\n')
+  expect(sh(s.project, 'rev-parse', baseRefName(s.taskId)).trim()).toBe(a.worktree!.baseCommit)
 })
 
 test('a repository without commits: the base has no parent, and integration works', async () => {
@@ -393,4 +478,57 @@ test('a separate copy made from the task worktree integrates into the task workt
   rmSync(s.wt, { recursive: true, force: true })
   await removeWorktree(s.io, s.project, s.wt)
   expect(sh(s.project, 'worktree', 'list', '--porcelain')).not.toContain(s.wt)
+})
+
+test('removeWorktreeAndRef: the worktree and its moved base ref go, the user state stays, and the same path and ref can be made again', async () => {
+  const s = await scenario('again')
+  committedRepo(s.project)
+  await s.task(s.project)
+  const ref = baseRefName(s.taskId)
+  const made = await createWorktree(s.io, s.project, s.wt, ref, s.project)
+  await s.reg.update(s.taskId, t => { t.worktree = { path: s.wt, baseRef: ref, baseCommit: made.baseCommit } }, { type: 'worktree' })
+  writeFileSync(join(s.wt, 'greet.py'), 'print("hi")\n')
+  const r = await integrate(s.io, s.reg, { taskId: s.taskId, repo: s.project, source: s.wt, target: s.project, baseRef: ref })
+  expect(r.status).toBe('applied')
+  expect(sh(s.project, 'rev-parse', ref).trim()).not.toBe(made.baseCommit)
+  const before = userState(s.project)
+  await removeWorktreeAndRef(s.io, s.project, s.wt, ref)
+  expect(existsSync(s.wt)).toBe(false)
+  expect(sh(s.project, 'worktree', 'list', '--porcelain')).not.toContain(s.wt)
+  expect(sh(s.project, 'for-each-ref', 'refs/magpie-tasks')).toBe('')
+  expect(userState(s.project)).toEqual(before)
+  // The person changes the project; a new worktree at the same path holds the project as it is now.
+  writeFileSync(join(s.project, 'README.md'), '# proj\n\nlater note\n')
+  const again = await createWorktree(s.io, s.project, s.wt, ref, s.project)
+  expect(readFileSync(join(s.wt, 'README.md'), 'utf8')).toBe('# proj\n\nlater note\n')
+  expect(readFileSync(join(s.wt, 'greet.py'), 'utf8')).toBe('print("hi")\n')
+  expect(sh(s.project, 'rev-parse', ref).trim()).toBe(again.baseCommit)
+  await expect(removeWorktreeAndRef(s.io, s.project, s.wt, 'refs/heads/main')).rejects.toThrow('not a magpie-tasks base ref')
+})
+
+test('reclaim: a done daily task loses its worktree and base ref, a running one keeps them', async () => {
+  const s = await scenario('sweep')
+  committedRepo(s.project)
+  const ctx = { io: s.io, reg: s.reg, opts: s.opts } as unknown as Ctx
+  const daily = async (id: string, state: TaskRecord['state']) => {
+    const path = join(s.opts.worktreeDir, id)
+    const made = await createWorktree(s.io, s.project, path, baseRefName(id), s.project)
+    await s.reg.create({
+      ...longTask(id, s.project), kind: 'daily', state,
+      worktree: { path, baseRef: made.baseRef, baseCommit: made.baseCommit },
+      owner: { kind: 'agent', agentId: `a-${id}`, workerName: `tui-${id}`, routerSessionId: 'router' },
+    })
+    return path
+  }
+  const done = await daily('d-20261111-donexx', 'done')
+  const running = await daily('d-20261111-runxxx', 'running')
+  const out = await reclaim(ctx)
+  expect(out).toEqual({ worktrees: ['d-20261111-donexx'], architects: [] })
+  expect(existsSync(done)).toBe(false)
+  expect(existsSync(running)).toBe(true)
+  expect((await s.reg.get('d-20261111-donexx'))!.worktree).toBeNull()
+  expect(sh(s.project, 'for-each-ref', '--format=%(refname)', 'refs/magpie-tasks')).toBe('refs/magpie-tasks/d-20261111-runxxx/base\n')
+  expect(logEntries(s.opts.stateDir, 'd-20261111-donexx').at(-1)).toMatchObject({ type: 'worktree-removed', paths: [done] })
+  // A second sweep finds nothing left to do.
+  expect(await reclaim(ctx)).toEqual({ worktrees: [], architects: [] })
 })

@@ -27,6 +27,8 @@ interface World {
   sendsToAgents: Record<string, any>[]
   /** whether a session.send reaches its worker */
   deliver: boolean
+  /** magpie-tasks takes the follow-up as an answer to the task's open question and tells the person this */
+  handled?: string
   /** a hook beneath refuses every spawn */
   denySpawn: boolean
   /** prompts that reached the core: the Router's input */
@@ -53,6 +55,7 @@ function world(on: On, o: { token?: boolean; magpie?: boolean } = {}): World {
   }))
   on('session.send', ($, e) => {
     w.sendsToAgents.push(e)
+    if (w.handled !== undefined) return { isDelivered: false as const, reason: `magpie-tasks answered a decision: ${w.handled}` }
     return w.deliver ? { isDelivered: true as const } : { isDelivered: false as const, reason: 'no agent by that id' }
   })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
@@ -731,5 +734,94 @@ describe('messages typed in the terminal', () => {
     // The Agent input takes only aliases, so the named model travels in the brief for magpie-tasks.
     expect(w.spawns[0]!.model).toBe(undefined)
     expect(w.spawns[0]!.prompt).toContain('[model claude/claude-sonnet-5-5]\n[model-reason user: 用 Sonnet 看看这个报错]')
+  })
+})
+
+describe('terminal follow-ups, open questions and restarts', () => {
+  const COMPOSER = { kind: 'composer' as const }
+  const typed = async ($: any, text: string) => $.prompt.submit({ text, wait: false, origin: COMPOSER })
+  const terminalId = (w: World) => /message_id "(\d+)"/.exec(w.routed.at(-1)!.context!.join('\n'))![1]!
+  /** A typed request dispatched, its worker answered; resolves the worker name. */
+  async function answeredTerminal($: any, w: World): Promise<string> {
+    await typed($, '盘点待办')
+    const id = terminalId(w)
+    await $.tool.call({ tool: DISPATCH, chat_id: 'tui', message_id: id, title: '盘点', ack: '收到。' } as never)
+    await $.turn.complete({ turnId: 'w1', agentId: 'a-1', answer: '三件事没做', durationMs: 4_000, isAborted: false, reason: 'answer' })
+    return `tui-${id}`
+  }
+
+  test('the Router forwards a typed follow-up with forward: the worker reads it as a terminal follow-up and nothing goes to Telegram', async ($, on) => {
+    const w = world(on)
+    const worker = await answeredTerminal($, w)
+    await typed($, '第二件先做')
+    const id = terminalId(w)
+    const ctx = w.routed.at(-1)!.context!.join('\n')
+    expect(ctx).toContain(`call ${FORWARD} with chat_id "tui", message_id "${id}"`)
+    expect(ctx).toContain('Do not use SendMessage for it.')
+    const r = await $.tool.call({ tool: FORWARD, chat_id: 'tui', message_id: id, worker } as never)
+    expect(JSON.stringify(r)).toContain(`已转给 worker ${worker}`)
+    expect(w.sendsToAgents.at(-1)).toMatchObject({ to: worker, text: `终端 追问（message_id=${id}）：\n第二件先做` })
+    await w.clock.advance(60_000)
+    expect(w.calls.length).toBe(0) // no note, no card
+  })
+
+  test('a SendMessage of the Router to a worker is refused with the forward call to make instead', async ($, on) => {
+    const w = world(on)
+    const worker = await answeredTerminal($, w)
+    const r = await $.tool.call({ tool: 'SendMessage', to: worker, message: '第二件先做', summary: 's' } as never)
+    expect(r.deny).toContain(FORWARD)
+    expect(r.deny).toContain(`worker 填 ${worker}`)
+    expect(w.sendsToAgents.length).toBe(0)
+    const other = await $.tool.call({ tool: 'SendMessage', to: 'someone-else', message: 'hi', summary: 's' } as never)
+    expect(other.deny).toBeUndefined()
+  })
+
+  test('words magpie-tasks takes as the answer to the open question are handled, not lost, on both paths', async ($, on) => {
+    const w = world(on, { magpie: true })
+    on('fs.exists', () => ({ value: false })) // magpie-tasks has written no index yet
+    const worker = await answeredTerminal($, w)
+    w.handled = '好的，正在整合，结果会单独报告。'
+    await typed($, '整合')
+    const r = await $.tool.call({ tool: FORWARD, chat_id: 'tui', message_id: terminalId(w), worker } as never)
+    expect(JSON.stringify(r)).toContain('took this message as the person\'s answer')
+    expect(JSON.stringify(r)).toContain('好的，正在整合')
+    // the task is not lost: a later follow-up still goes to its worker
+    w.handled = undefined
+    await typed($, '再看一下')
+    const again = await $.tool.call({ tool: FORWARD, chat_id: 'tui', message_id: terminalId(w), worker } as never)
+    expect(JSON.stringify(again)).toContain(`已转给 worker ${worker}`)
+    // a Telegram reply to the task's ack
+    await dispatched($, w) // the ack is message 500
+    w.handled = '好的，不整合；改动保留在工作副本。'
+    const reply = await $.prompt.submit({ text: REPLY('920', '500', '不整合'), wait: false, origin: CHANNEL })
+    expect(reply.drop).toContain('不整合；改动保留')
+    expect(sends(w).some((c) => String(c.body.text).includes('原来的 worker 已经不在'))).toBe(false)
+  })
+
+  const restored = (agentId: string, name: string) => `<task-notification>\n<task-id>${agentId}</task-id>\n<status>stopped</status>\n<summary>Background agent "Resuming agent ${name}" didn't finish before the previous session ended</summary>\n<note>No completion record was found for it after it was re-dispatched via SendMessage in the previous session.</note>\n</task-notification>`
+
+  test("a restart's notice that an answered worker did not finish is rewritten; one about a cut-off run is kept", async ($, on) => {
+    const w = world(on)
+    const worker = await answeredTerminal($, w)
+    const kept = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: restored('a-1', worker) }] } } as never)
+    const text = JSON.stringify(kept)
+    expect(text).toContain(`Worker ${worker} (\\"盘点\\") had answered before the session restarted`)
+    expect(text).not.toContain('No completion record')
+    // a run cut off by the restart ended aborted: its notice stands
+    await typed($, '继续')
+    await $.tool.call({ tool: FORWARD, chat_id: 'tui', message_id: terminalId(w), worker } as never)
+    await $.turn.complete({ turnId: 'w2', agentId: 'a-1', answer: '', durationMs: 4_000, isAborted: true, reason: 'aborted' })
+    const cut = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: restored('a-1', worker) }] } } as never)
+    expect(JSON.stringify(cut)).toContain('No completion record')
+  })
+
+  test('a message the Router never dispatched is forgotten after a day', async ($, on) => {
+    const w = world(on)
+    await typed($, '你好')
+    const id = terminalId(w)
+    await w.clock.advance(25 * 3600_000)
+    await typed($, '在吗')
+    const r = await $.tool.call({ tool: DISPATCH, chat_id: 'tui', message_id: id, title: 't', ack: 'a' } as never)
+    expect(JSON.stringify(r)).toContain('没有等待派发的消息')
   })
 })

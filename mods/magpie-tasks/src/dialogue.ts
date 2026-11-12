@@ -224,6 +224,22 @@ export function subagentDialogue(api: ApiMessage[]): JevMessage[] {
     .filter(it => it.content.length > 0)
 }
 
+// The turn a routed subagent just ended. `asked` is the last message to it that is not a
+// background task's event and does not start with one of `own` (the heads of the plugin's own
+// messages to it); the brief goes through briefForJev. `tools` counts the tool calls made since the
+// last such message that started a turn (one that arrived while the subagent was working is inside it).
+export function endedTurn(api: ApiMessage[], own: readonly string[]): { asked: string; tools: number } {
+  const items = jevDialogueItems(api)
+  const brief = items.find(it => it.message === 0 && it.role === 'user' && it.notice === undefined)
+  const said = items.filter(it => it.role === 'user' && it.notice === undefined && !own.some(head => it.content.startsWith(head)))
+  const last = said[said.length - 1]
+  if (last === undefined) throw new Error('endedTurn: the conversation holds no message to the subagent')
+  const answersTools = (i: number) => blocks(api[i]!.content).some(b => b.type === 'tool_result')
+  const start = said.reduce((at, it) => (answersTools(it.message) ? at : it.message), 0)
+  const tools = api.slice(start + 1).reduce((n, m) => n + (m.role === 'assistant' ? blocks(m.content).filter(b => b.type === 'tool_use').length : 0), 0)
+  return { asked: last === brief ? briefForJev(last.content) : last.content, tools }
+}
+
 // ---- what Jev reads to route a delegation ------------------------------------------------------
 // The conversation the brief comes from, the files the brief names, then the brief. A brief alone
 // does not say what its work is part of (writing a paper, studying someone's design, a translation

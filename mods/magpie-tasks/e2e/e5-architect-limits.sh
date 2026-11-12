@@ -27,7 +27,7 @@ check '(4) git status was not refused (one Bash refusal: touch x)' test "$(tool_
 row=$(agents_json | jq -c --arg s "$sid" '.[] | select(.sessionId == $s)')
 check 'U9: the architect session still runs in the project main directory' test "$(jq -r .cwd <<<"$row")" = "$E/proj"
 check 'U9: no native worktree under the project' test ! -e "$E/proj/.claude/worktrees"
-wts=$(git -C "$E/proj" worktree list --porcelain | grep '^worktree ' | cut -d' ' -f2- | sort | tr '\n' ' ')
-check "U9: worktrees are the project and the task worktree only ($wts)" test "$wts" = "$(printf '%s\n' "$E/proj" "$E/wt/$id" | sort | tr '\n' ' ')"
+wts=$(git -C "$E/proj" worktree list --porcelain | grep '^worktree ' | cut -d' ' -f2- | tr '\n' ' ')
+check "U9: the project is its only worktree ($wts)" test "$wts" = "$E/proj "
 cleanup e5
 finish

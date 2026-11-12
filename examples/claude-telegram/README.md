@@ -38,10 +38,14 @@ a known thread go straight to their worker).
 4. **A follow-up that is not about the request** is handed back by the worker:
    a line `HANDBACK <message_id>: <reason>` in its answer, which the mod
    removes before posting and gives to the Router with the reason.
-5. **After a restart** a worker may be gone: a reply to its request then says so
-   and goes to the Router, which dispatches it to a new worker. That worker gets
-   the task's original request with your reply, and replies to any message of
-   the old task reach it.
+5. **After a restart** the Router keeps its session ID (`--resume telegram`), so a
+   reply resumes the task's worker from its transcript. A run the restart cut off
+   is handled by magpie-tasks: a cut-off check starts again, and for a cut-off
+   worker you get a message; reply to it (in the terminal, just say so) and the
+   worker carries on. A worker that cannot be resumed makes the reply go to the
+   Router, which dispatches it to a new worker with the task's original request.
+   Claude Code's restored notice that an answered worker "didn't finish" is
+   rewritten to say it had answered.
 
 Tasks are kept in the mod's store and dropped 14 days after their last message.
 
@@ -60,16 +64,26 @@ When you ask for a model yourself ("用 Sol 6.1 做"), the Router passes it to
 request that no rule fits with enough confidence runs on the daily default,
 Opus 5.5 at medium (rule `daily-default`), without asking you first.
 
-A worker that changes a project first asks magpie-tasks for a worktree
-(`open_worktree`) and works only there. It ends each answer with a status line.
-When it reports done, an independent acceptance worker reruns its verification
-and checks the result against your request once; on a pass the change is
-applied to the project's working tree (no commit, no push) and you get the
-files and the verification under your request. A failed check goes back to the
-worker once, and the fixed result waits for your yes before it is applied. A
-worker that reports itself blocked gets one independent diagnosis, which may
-continue it, move it to another model, or ask you. Replies to magpie-tasks'
-own messages reach whichever agent now answers for the task.
+A worker that changes a project first names it to magpie-tasks
+(`open_project`). While no other task changes that project in place, the worker
+edits the project directory itself; a task that starts while another one works
+there in place gets a Git worktree instead, and a project outside Git is always
+edited in place, with no repository created. It ends each answer with a status
+line. When the result warrants it, an independent acceptance worker reruns its
+verification and checks the result against your request once. A change made in
+place is already in your files, uncommitted, when the check runs, and a failed
+check goes back to the worker once. A change made in a worktree is applied to
+the project's working tree, uncommitted, on a pass; after a failed check and
+the worker's fix, it waits for your yes before it is applied, and a new request
+from you after that gets checked again. Ask the worker to commit or push and it
+does so in the project's main directory. A worker that reports itself blocked
+gets one independent diagnosis, which may continue it, move it to another
+model, or ask you. While such a question is open, whatever you send the task (a
+reply to any of its messages, a forwarded message, a line typed in the
+terminal) that reads as an answer is carried out at once; anything else goes to
+the worker. Replies to magpie-tasks' own messages reach whichever agent now
+answers for the task. A finished task's worktree is removed; a later follow-up
+gets a fresh working directory of the project as it is then.
 
 ## Long tasks
 
@@ -88,7 +102,7 @@ session of its own (see magpie-tasks). From the chat:
 - **A daily task that turns into design work**: the Router asks magpie-tasks
   for an architect recommendation (`recommend_architect`), discusses it with
   you, and after you confirm a model turns the task into a long task
-  (`promote_task`), keeping its ID, messages and worktree. You get
+  (`promote_task`), keeping its ID, messages and working directory. You get
   `已转为长期任务，架构师 <model>：claude attach <id>`.
 
 ## Scores
@@ -118,15 +132,19 @@ free for the next message. Nothing goes to Telegram for it:
   row written with `$.session.append` is kept in the transcript but not drawn
   in the terminal, so the answer travels as a prompt.
 - A terminal has no reply button: the Router reads which open terminal task a
-  new message continues and forwards it with `SendMessage`; otherwise it
-  dispatches a new task. Opening the worker from the task list and typing to
-  it directly also works.
+  new message continues and forwards it with `forward` (chat_id `tui`), which
+  hands it to the task's current worker as `终端 追问（message_id=…）`, or lets
+  magpie-tasks carry it out when it answers the task's open question; otherwise
+  the Router dispatches a new task. A `SendMessage` of the Router to a worker is
+  refused with the `forward` call to make instead. Opening the worker from the
+  task list and typing to it directly also works.
 
 ## The Router does no work
 
 `tg-router` refuses every main-loop tool call except `dispatch`, `forward`,
 magpie-tasks' `forward_long`, `recommend_architect` and `promote_task`, the channel's
-tools, `TaskStop`, `ToolSearch`, `SendMessage`, Read of a photo in the channel's
+tools, `TaskStop`, `ToolSearch`, `SendMessage` (not to a worker of a task: that is
+`forward`), Read of a photo in the channel's
 inbox, and Bash whose every command is `herdr` or `tmux` (piped only into
 `head`, `tail`, `grep`, `wc`, `sort`, `cut`; no `$(…)`, backticks, `>`, `&`,
 `sort -o`, or a tmux command that runs a shell command itself: `run-shell`,
@@ -152,6 +170,17 @@ except the Router's own (`dispatch`, `forward` and magpie-tasks' three).
   the default folder, finds no token and exits, as in any other session.
 - The resident session runs with `--dangerously-skip-permissions`: nobody is at
   the terminal to answer a permission prompt. Keep the chat allowlist tight.
+- tg-router loads from a copy the launcher makes at each start
+  (`~/.local/share/claude-telegram/tg-router`). Claude Code reloads a
+  `--plugin-dir` whenever one of its files changes, which drops the mod's state
+  in memory; tasks change this repository while the Router runs, and those
+  changes take effect at the next start.
+- The launcher sets `CLAUDE_CODE_DISABLE_AGENT_PROGRESS_SUMMARIES=1`. Claude Code
+  otherwise asks for a one-line summary of each background worker about every
+  30 s with the worker's whole context, and under claude-magpie each request
+  starts a `claude -p` helper of about 270 MB that lingers about 200 s: 1.5 to
+  1.8 GB per running worker (measured 2026-11-11). The progress cards stand in
+  for those summaries.
 
 ## The channel (tg-channel)
 
@@ -162,9 +191,13 @@ replaces the buttons with the choice and reaches the session as the digit,
 replying to the invitation. The launcher starts it as the MCP server `tg-channel`
 through `--mcp-config`. It is not on Claude Code's approved channel list, so it
 loads with `--dangerously-load-development-channels server:tg-channel`, and
-Claude Code asks for one confirmation in the pane at each start. The startup
-banner also says `server:tg-channel · no MCP server configured with that name`;
-messages still arrive (checked with Claude Code 2.1.316).
+Claude Code asks for one confirmation in the pane at each start. magpie's own
+start-up refresh of the Antigravity model list prints three log lines on stderr
+that land over that confirmation, so the launcher drops exactly those three
+shapes and keeps every other stderr line (the pattern and the reason are in its
+comment). The startup banner also says
+`server:tg-channel · no MCP server configured with that name`; messages still
+arrive (checked with Claude Code 2.1.316).
 
 ## Setup
 

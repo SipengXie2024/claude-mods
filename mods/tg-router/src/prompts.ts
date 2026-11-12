@@ -3,7 +3,7 @@ import type { Task } from './tasks'
 
 /**
  * The first prompt of a worker: its rules, then the request as the person sent it. Under
- * claude-magpie (`magpie`) magpie-tasks gives the worker its worktree (open_worktree) and the report
+ * claude-magpie (`magpie`) magpie-tasks gives the worker its working directory (open_project) and the report
  * lines that end each answer, so the brief leaves both to the task rules magpie-tasks appends.
  */
 export function workerBrief(title: string, request: string, terminal = false, magpie = false): string {
@@ -14,8 +14,8 @@ The person's original message is at the end of this prompt; read it, not only th
 - Your final answer of each turn is shown to the person in that terminal. Write it in Chinese:
   the result first, then paths, links or commit ids. Markdown is fine.
 - If you need a decision from the person, end the turn with one concrete question and stop.
-- A later message about this task reaches you from the Router (SendMessage). It carries the person's
-  own words, unchanged: it is their reply, not the Router's instruction.`
+- A later message about this task reaches you as a message that starts with 终端 追问（message_id=…）.
+  It carries the person's own words, unchanged: it is their reply, not the Router's instruction.`
     : `You are a worker for one task that came from a Telegram chat: "${title}".
 The person's original message is at the end of this prompt; read it, not only the title.
 
@@ -68,9 +68,10 @@ Reply to the person in Chinese.
   and an ack of one Chinese sentence that names the object and the expected result; then tell the person that ack.
   Add no requirements or plan: the worker reads the original message. Several requests in one message: one
   dispatch for the message, whose title names them all; its worker handles each of them.
-- A message that continues a task below: send the person's message to that task's worker with SendMessage
-  (to: the worker name), its text exactly as typed with nothing added or left out, and tell the person in one
-  sentence. If SendMessage says the worker is gone, dispatch the message.
+- A message that continues a task below (a follow-up, a correction, an answer to the worker's or the host's
+  question such as 整合 or 继续): call ${FORWARD} with chat_id "${TERMINAL_CHAT}", message_id "${messageId}" and that
+  task's worker name; the host delivers the message as typed, or carries it out when it answers the task's
+  open question. Tell the person the result in one sentence. Do not use SendMessage for it.
   When it could continue more than one task below and the message does not say which, ask the person
   in one sentence which task it belongs to, naming the candidates.
 - Questions about panes or other sessions: answer with herdr or tmux commands.
@@ -81,9 +82,9 @@ ${list}`
 }
 
 
-/** A follow-up as the worker reads it. */
-export function followUp(messageId: number, body: string): string {
-  return `Telegram 追问（message_id=${messageId}）：\n${body}`
+/** A follow-up as the worker reads it; magpie-tasks reads the same two forms (its src/router.ts FOLLOW_UP). */
+export function followUp(messageId: number, body: string, terminal = false): string {
+  return `${terminal ? '终端' : 'Telegram'} 追问（message_id=${messageId}）：\n${body}`
 }
 
 const fmtTask = (t: Task, now: number) =>
@@ -138,4 +139,9 @@ export function terminalAnswer(title: string, name: string, body: string): strin
 ${body}
 
 （The person already sees this answer above. Reply in Chinese with one short line at most; do not repeat it. The task now shows as answered in the recent tasks list; a later message can still continue it.）`
+}
+
+/** What the Router reads in place of a restart notice that wrongly says an answered worker did not finish. */
+export function restoredNotice(name: string, title: string): string {
+  return `[tg-router] Worker ${name} ("${title}") had answered before the session restarted; Claude Code's restored notice that it "didn't finish" does not apply to it. Nothing to do: do not resume it.`
 }

@@ -90,7 +90,7 @@ mods/magpie-tasks/
 | `src/spawn.ts` | `agent.spawn` 路由、`turn.start` 续接判定、`turn.step` 强度、续接时的重新判断 | `agent.spawn`、`turn.start`、`turn.step` | F |
 | `src/band.ts` | 路由过的子代理的强度条：模型、请求实际带的强度、规则 | `turn.step`、`turn.complete`、`ui.render`、`session.end` | F |
 | `src/route.ts` | 架构师的委派工具 `model_route`：Jev 与路由表选择模型和强度，Jev 权衡架构师的推荐，经中转启动子代理 | architect（工具调用） | F |
-| `src/daily.ts` | 中转（启动与唤醒子代理）、日常任务的评估确认、验收、诊断、阻碍判定、整合触发、日常任务决定的执行、`open_worktree` 工具 | `prompt.submit`（中转）、`turn.complete`、`tool.call` | F |
+| `src/daily.ts` | 中转（启动与唤醒子代理）、日常任务的评估确认、验收、诊断、阻碍判定、整合触发、日常任务决定的执行、`open_project` 工具 | `prompt.submit`（中转）、`turn.complete`、`tool.call` | F |
 | `src/unavailable.ts` | 路由过的子代理因模型不可用或额度耗尽结束时的替代与报告 | `classic.StopFailure`、`turn.complete` | F |
 | `src/telegram.ts` | Bot API 发送、令牌读取、默认聊天、频道标签解析 | architect、router、daily、calibration | G |
 | `src/router.ts` | Router 角色：magpie-tasks 消息的回复处理、长期任务转交、日常转长期、架构师推荐、追问观察 | `prompt.submit`、`session.send`、`tool.call` | G |
@@ -206,7 +206,9 @@ export interface TaskRecord {
   updatedAt: number
   request: string                       // 第一条消息或日常任务的原始请求
   followUps: { at: number; source: 'telegram' | 'window'; text: string }[]
-  project: { root: string; gitInitByPlugin: boolean } | null
+  project: { root: string } | null
+  direct?: { dir: string; baseRef: string | null; baseCommit: string | null } | null   // 直接修改项目目录（第 9.9 节）
+  alsoChanged?: { taskId: string; title: string; files: string[]; at: number }[]       // 其他任务在同一目录改过的文件
   worktree: { path: string; baseRef: string; baseCommit: string } | null
   extraWorktrees: Record<string, { path: string; baseRef: string; forAgent: string }>
   owner:
@@ -381,7 +383,7 @@ export function nextEffort(a: { rule: Rule | null; current: Effort; deep: boolea
 // src/daily.ts（F）
 export function relay(ctx: Ctx, req: RelayRequest): Promise<string>                        // 第 9.8 节：启动与唤醒子代理的唯一入口，在调用处直接执行；返回显示在会话中的一行
 export function onDailyComplete(ctx: Ctx, e: TurnCompleteInput): Promise<void>               // 执行者、评估、验收、诊断子代理的回合结束
-export function onOpenWorktree(ctx: Ctx, agentId: string, args: { project?: unknown; init_git?: unknown }): Promise<string>
+export function onOpenProject(ctx: Ctx, agentId: string, args: { project?: unknown }): Promise<string>
 export function applyDailyDecision(ctx: Ctx, task: TaskRecord, decision: Decision, text: string): Promise<string>   // Router 会话中执行日常任务的决定；返回发给用户的确认文字
 export function matchBlocker(ctx: Ctx, task: TaskRecord, report: string): Promise<{ blockerId: string | null; provider: 'jev' | 'substitute'; confidence: number }>   // null：新的阻碍
 
@@ -404,9 +406,9 @@ export function onSessionSend(ctx: Ctx, e: SessionSendInput, next: Next<'session
 // src/tools.ts（H）
 export type ArchitectToolName = 'task_status' | 'report_outcome' | 'integrate' | 'notify_user' | 'resolve_conflict'
 export type RouterToolName = 'forward_long' | 'recommend_architect' | 'promote_task'
-export type SubagentToolName = 'open_worktree'
+export type SubagentToolName = 'open_project'
 export const TOOL_SPECS: Record<ArchitectToolName | RouterToolName | SubagentToolName, { description: string; inputSchema: Record<string, unknown> }>   // ToolSpec.inputSchema 的类型
-export function registerTools(ctx: Ctx, role: Role): Promise<void>          // architect：架构师工具与 open_worktree；router：Router 工具与 open_worktree
+export function registerTools(ctx: Ctx, role: Role): Promise<void>          // architect：架构师工具与 open_project；router：Router 工具与 open_project
 export function toolOwner(fullName: string): { name: string; kind: 'architect' | 'router' | 'subagent' } | null   // mcp__magpie-tasks__<name>
 
 // src/state.ts（H）
@@ -690,7 +692,7 @@ export function briefForJev(prompt: string): string     // 去掉所有 [magpie-
   state/recovery.json          { lastRunAt }
   state/declined.json          { sessions: { <会话 ID>: <拒绝时间> } }：拒绝接管的会话（第 9.4 节）
   locks/<name>.lock/           目录锁
-<worktreeDir>/<taskId>/        任务工作副本
+<worktreeDir>/<taskId>/        任务工作副本（另一个任务在直接修改同一项目时才建立）
 <worktreeDir>/<taskId>-<agentId>/  单独副本
 ```
 
@@ -795,16 +797,16 @@ export class Registry {
 
 触发：`candidate` 角色，`prompt.submit` 中 `e.origin.kind === 'composer'`、没有 `e.command`、本会话第一条消息，`classic.SessionStart` 的 `source` 不是 `resume`。
 
-1. 取项目信息：`git -C <cwd> rev-parse --show-toplevel`。是仓库时项目根为输出路径；不是仓库时项目根为 `cwd`，并用 `find <cwd> -type f -not -path '*/.git/*' | wc -l` 与 `du -sb <cwd>` 取文件数和总大小（`timeoutMs: 120000`，大目录超过默认的 30 秒）。
+1. 取项目根：`git -C <cwd> rev-parse --show-toplevel`。是仓库时项目根为输出路径；不是仓库时项目根为 `cwd`。
 2. `recommendArchitect(firstMessage)`（第 6.2 节）。
-3. `$.ui.ask(question, { options, header: '长期任务' })`。选项为纯文字：推荐模型排第一并标“（推荐）”，然后是另外三个候选。问题文字包含：推荐理由、证据与限制（来自 `architect.candidates`）、项目根路径、工作副本路径（`<worktreeDir>/<taskId>`），不是 Git 仓库时加一句“确认后会在 `<路径>` 建立 Git 仓库并提交一份基线快照：<N> 个文件，共 <大小>”，项目根不受信任时（`trust.projectTrusted` 为假，见第 6 步）加一句“Claude Code 还没有把 `<项目根>` 记为受信任的目录，后台会话不能在那里启动。确认即表示你信任这个目录，插件会在 Claude Code 的配置中记下这一点”，最后一句说明不需要登记的临时操作请使用普通 `claude`。确认对话会一直挂起消息，直到用户回答（实测 23 秒，超过钩子时限也有效）。
+3. `$.ui.ask(question, { options, header: '长期任务' })`。选项为纯文字：推荐模型排第一并标“（推荐）”，然后是另外三个候选。问题文字包含：推荐理由、证据与限制（来自 `architect.candidates`）、项目根路径、任务将在哪里修改（`previewPlacement` 的结果，第 9.9 节：`直接修改：<目录>`，不是 Git 仓库时注明没有差异记录；已有任务在直接修改时为 `工作副本：<worktreeDir>/<taskId>`，并写出那些任务的标题），项目根不受信任时（`trust.projectTrusted` 为假，见第 6 步）加一句“Claude Code 还没有把 `<项目根>` 记为受信任的目录，后台会话不能在那里启动。确认即表示你信任这个目录，插件会在 Claude Code 的配置中记下这一点”，最后一句说明不需要登记的临时操作请使用普通 `claude`。确认对话会一直挂起消息，直到用户回答（实测 23 秒，超过钩子时限也有效）。
 4. 回答处理（与选项文字逐字比较）：
    - Esc（`$.ui.ask` 拒绝）：返回 `{ drop: 'magpie-tasks: 已取消；消息已放回输入框，再次发送会重新询问；临时操作请使用普通 claude' }`，下一条消息重新询问。
    - 无法识别的自由文字：同上，理由写“没有识别出选择”。
    - 某个模型：继续。
 5. 登记：`reg.create`（`kind: 'long'`，`state: 'starting'`，`title` 取第一条消息的前 30 个字，`architect` 写入推荐、判断与用户选择，`telegram: { chatId: defaultChat() }`）。
-6. 项目准备：项目根不受信任时先 `trust.trustProject(root)`：在全局配置（`<CLAUDE_CONFIG_DIR>/.claude.json`，没有 `CLAUDE_CONFIG_DIR` 时为 `~/.claude.json`）中把 `projects[<项目根>].hasTrustDialogAccepted` 设为 `true`，其余字段不变；新内容写到同目录的临时文件，`chmod --reference` 后改名覆盖，再读回确认标记还在。`claude --bg` 拒绝在不受信任的 Git 仓库中启动（“Workspace not trusted”，带不带 `--dangerously-skip-permissions` 都一样），而以 `--dangerously-skip-permissions` 运行的窗口从不显示信任对话，Claude Code 也没有设置信任的命令；用户在确认对话中的回答即视为信任这个目录（findings“workspace trust blocks background architects”）。不是仓库时 `git.initRepo(root)`（`git init`，`git add -A`，`git commit -m 'magpie-tasks baseline'`），记录 `gitInitByPlugin: true`。然后 `git.createWorktree`（第 9.9 节）。
-7. 生成架构师的第一条消息：原文，空一行，加一行 `[magpie-tasks architect task=<id> worktree=<绝对路径>]`，再加一段英文说明：任务工作副本路径、架构师职责与写入范围、不做提交和推送（覆盖后台会话默认的“完成后提交并推送”）。
+6. 项目准备：项目根不受信任时先 `trust.trustProject(root)`：在全局配置（`<CLAUDE_CONFIG_DIR>/.claude.json`，没有 `CLAUDE_CONFIG_DIR` 时为 `~/.claude.json`）中把 `projects[<项目根>].hasTrustDialogAccepted` 设为 `true`，其余字段不变；新内容写到同目录的临时文件，`chmod --reference` 后改名覆盖，再读回确认标记还在。`claude --bg` 拒绝在不受信任的 Git 仓库中启动（“Workspace not trusted”，带不带 `--dangerously-skip-permissions` 都一样），而以 `--dangerously-skip-permissions` 运行的窗口从不显示信任对话，Claude Code 也没有设置信任的命令；用户在确认对话中的回答即视为信任这个目录（findings“workspace trust blocks background architects”）。然后 `placeTask`（第 9.9 节）确定任务的工作目录。插件从不在项目中建立 Git 仓库。
+7. 生成架构师的第一条消息：原文，空一行，加一行 `[magpie-tasks architect task=<id> direct=<项目目录>]`（工作副本时为 `worktree=<绝对路径>`），再加一段英文说明：子代理在哪里修改、架构师职责与写入范围、不做提交和推送（覆盖后台会话默认的“完成后提交并推送”）。
 8. 写启动认领（散列为第 7 步完整消息的 `fnv1a64`）。
 9. `launch.launchArchitect`：`io.run(['env', '-u', 'CLAUDECODE', '-u', 'CLAUDE_CODE_SESSION_ID', '-u', 'CLAUDE_CODE_ENTRYPOINT', opts.launcher, '--bg', '--model', requestId(model), ...pluginDirArgs, message], { cwd: root, timeoutMs: 60000 })`。`env -u` 去掉嵌套会话的标记（`$.process.run` 的 `env` 只能叠加变量，不能删除）。`pluginDirArgs`：`<CLAUDE_CONFIG_DIR 或 ~/.claude>/plugins/installed_plugins.json` 中没有 `magpie-tasks@…` 条目（以 `--plugin-dir` 加载的开发方式）时为 `['--plugin-dir', $.plugin.root]`，否则为空。插件根目录不能用来判断：从目录形式的市场安装的插件直接从市场目录运行（2026-11-09 端到端环境：`$.plugin.root` 为 `~/sipeng/claude-mods/mods/magpie-tasks`），按目录判断会给后台会话加上 `--plugin-dir`，那个会话以 `magpie-tasks@inline` 加载插件、读不到 `pluginConfigs["magpie-tasks@sipeng-mods"]` 的选项。
 10. 解析输出 `/backgrounded · ([0-9a-f]{8})/`；退出码非 0 或解析不到时，任务改为 `error` 并写入 `error`，返回 `{ drop: 'magpie-tasks: 后台会话没有启动：<stderr 第一行>' }`，前台会话保留。解析到 `shortId` 后等待认领完成：每 500 毫秒 `wait(io, 500)` 后读取任务记录，最多 60 秒。`owner.kind === 'session'` 且 `state === 'running'` 为成功；任务变为 `error`（后台会话发现散列不符，第 9.3 节）或 60 秒内没有认领时为失败：`stopSession(shortId)` 停止那个后台会话，任务改为 `error`（`error` 写明原因），删除剩余的启动认领，`$.ui.notice` 与 Telegram 报告，返回 `{ drop: 'magpie-tasks: 架构师会话没有完成认领（<原因>），已停止；消息已放回输入框' }`，前台会话保留。
@@ -862,7 +864,7 @@ export class Registry {
 
 每轮上下文告诉架构师：验收一个子代理的成果后调用 `report_outcome`（通过、退回修复）；安排诊断或依据诊断重新委派、更换实施模型时同样申报，插件据此提高该子代理下次续接的强度并累计阻碍次数。
 
-子代理的写入范围（`gate.subagentWriteDeny`），对路由过且记录了 `worktree` 的子代理生效：`Edit`/`Write`/`MultiEdit`/`NotebookEdit` 的真实路径位于某个 Git 仓库之内时，必须在该子代理的 `worktree` 之内；位于仓库之外（例如 `/tmp`）的写入放行。日常任务的执行者在调用 `open_worktree` 之前写入仓库会被拒绝，理由中要求先调用 `mcp__magpie-tasks__open_worktree`。`CONTEXT.md` 与 `.planning/findings.md` 在工作副本中也拒绝写入（设计记录由架构师写在主目录）。
+子代理的写入范围（`gate.subagentWriteDeny`），对路由过且记录了 `worktree` 的子代理生效：`Edit`/`Write`/`MultiEdit`/`NotebookEdit` 的真实路径位于某个 Git 仓库之内时，必须在该子代理的 `worktree` 之内（任务工作副本，或直接修改的任务的项目目录）；位于仓库之外（例如 `/tmp`）的写入放行。日常任务的执行者在调用 `open_project` 之前写入仓库会被拒绝，理由中要求先调用 `mcp__magpie-tasks__open_project`。`CONTEXT.md` 与 `.planning/findings.md` 在任务的工作目录中也拒绝写入（设计记录由架构师写在主目录）。一个已结束的直接修改任务被续接后，若另一个进行中的任务正在直接修改同一项目，它的文件写入被拒绝，理由要求再次调用 `open_project`，插件随之把它转到工作副本（`leaveIfTaken`）。
 
 ### 9.6 子代理启动路由（`agent.spawn`）
 
@@ -926,14 +928,21 @@ on('turn.step', async function* ($, e, next) { … })
 
 本节适用于第 9.9 节第 5、6 步，第 9.11 节的验收、诊断、接手、验收不通过、补状态行、诊断结论与决定的执行，第 9.16 节的接手与“等待”后继续。
 
-### 9.9 工作副本、文件冲突与单独副本（工作包 D）
+### 9.9 工作目录、工作副本、文件冲突与单独副本（工作包 D）
+
+任务在哪里修改项目（`workspace.ts`，用户 2026-11-12 决定：工作副本只在有并行任务时使用）：
+
+- `placeTask(taskId, root)` 在项目锁（与整合相同的 `project-<fnv1a64(目录)>`）内判断：没有其他进行中（不是 `done` 或 `abandoned`）的任务在直接修改同一目录时，任务直接修改项目目录（`direct`）；在 Git 仓库中同时用 `snapshotBase` 为当时的目录内容做基线提交 `refs/magpie-tasks/<taskId>/base`，用来区分任务自己的改动。已有任务在直接修改时，后来的任务得到工作副本（`createWorktree`，下文）。不是 Git 仓库的目录总是直接修改，`direct.baseRef` 为空，没有差异，任务的改动是子代理用文件工具改过的文件（`filesTouched`）；插件从不建立仓库。
+- `settleDirect(taskId)`：直接修改的任务的结果在项目目录中已经存在，记为整合 `in-place`（文件为基线到当前目录的差异，或文件工具改过的文件），基线移到当前目录内容，下一次只记之后的改动。
+- `noteChange`：一个任务的改动进入某个目录（工作副本整合或 `settleDirect`）后，其他直接修改这个目录的任务在 `alsoChanged` 里记下这些文件；它们的差异统计据此注明哪些文件也被别的任务改过。差异同样会带上用户在这段时间里在项目目录中的修改，验收说明写明这一点。
+- `leaveIfTaken(taskId)`：已结束的直接修改任务被续接时，若另一个进行中的任务正在直接修改同一目录，删除它的基线引用，按当前目录内容建立工作副本，任务转为工作副本模式。
 
 `git.ts`：
 
 ```ts
 export function repoRoot(io: Io, dir: string): Promise<string | null>
-export function projectStats(io: Io, dir: string): Promise<{ files: number; bytes: number }>
-export function initRepo(io: Io, dir: string): Promise<void>
+export function snapshotBase(io: Io, repo: string, ref: string, from: string): Promise<{ baseCommit: string; baseRef: string }>
+export function dropBase(io: Io, repo: string, ref: string, commit: string): Promise<void>
 export function snapshotTree(io: Io, dir: string, tmpIndex: string): Promise<string>
 export function snapshotCommit(io: Io, repo: string, tree: string, parent: string | null, message: string): Promise<string>
 export function createWorktree(io: Io, repo: string, path: string, ref: string, from: string): Promise<{ baseCommit: string; baseRef: string }>
@@ -950,7 +959,7 @@ export function diffSince(io: Io, dir: string, base: string, tmpIndex: string): 
 
 被 Git 忽略的文件（例如 `node_modules`）不进入工作副本，子代理说明中写明需要时在工作副本中安装依赖。
 
-文件冲突（长期任务，多个实施子代理共用任务工作副本），`conflict.ts`：
+文件冲突（长期任务，多个实施子代理共用任务的工作目录：工作副本或直接修改的项目目录），`conflict.ts`：
 
 ```ts
 export function touchedPaths(tool: string, input: Record<string, unknown>): string[]           // Edit/Write/MultiEdit/NotebookEdit 的 file_path
@@ -962,10 +971,10 @@ export function isCheckCommand(cmd: string): boolean                            
 `architect.ts` 的处理（`tool.call`，子代理属于本任务且在工作副本中）：
 
 1. 写入前：`touchedPaths` 的每个路径，`findConflict` 找到另一个仍在运行、改过同一文件的子代理时，暂停后来的一方（启动时间较晚者）：本次调用返回 `{ deny }`，理由要求它停止修改、在回答中说明进度并结束本轮；代理记录 `state: 'paused'`，`pausedFor` 为新决定。
-2. Bash 调用：调用前后各取一次工作副本的 `git status --porcelain=v1 -z`，差异记为该代理改过的文件（并发时可能记到多个代理名下，判定按保守方向处理）。
+2. Bash 调用：调用前后各取一次工作目录的 `git status --porcelain=v1 -z`（不是 Git 仓库时不取），差异记为该代理改过的文件（并发时可能记到多个代理名下，判定按保守方向处理）。
 3. 检查命令失败（`isCheckCommand` 且结果为错误）时，若自该代理上一次运行同一命令以来，另一个运行中的代理改过文件，按冲突处理，暂停后启动的一方。
-4. 新决定（`kind: 'file-conflict'`）：问题与选项 `单独副本`、`等待前一方`。通知两处：`$.session.append` 给架构师一行说明（架构师可以与用户讨论后调用 `resolve_conflict`），Telegram 发一条问题（索引 `kind: 'long'` 加 `decisionId`）。用户在 Telegram 的回复由 Router 判断后交给架构师会话执行（第 9.12 节），因为被暂停的子代理、`st.touches` 与 `pausedFor` 都在架构师会话中，Router 的 `$.session.send({ to: { agentId } })` 送不到别的会话的子代理。
-5. `单独副本`（`applyLongDecision`，由 `resolve_conflict` 或 Telegram 回复触发）：`createWorktree(from = 任务工作副本)` 建立单独副本，该代理记录的 `worktree` 改为单独副本，`state` 改回 `idle`，清除 `pausedFor`，决定记为已解决；经中转唤醒它（`kind: 'wake'`，第 9.8 节），消息告诉它新的工作目录（续接不能改 `cwd`，写入范围由第 9.5 节的检查保证，Bash 需要先 `cd`）。它完成后（`turn.complete` 且报告状态为完成）用 `integrate(source = 单独副本, target = 任务工作副本)` 合入，冲突时同样建立决定并通知。与它冲突的前一方仍在运行时，合入推迟到前一方 `turn.complete`（决定的 `data.merge` 记为 `waiting`，日志 `merge-deferred`，架构师收到一行说明）：先合入时，仍在运行的前一方看到自己负责的文件被改，会把它改回自己的版本（2026-11-09 E7 实测），合入的改动随之丢失。
+4. 新决定（`kind: 'file-conflict'`）：问题与选项 `单独副本`、`等待前一方`（不是 Git 仓库时只有 `等待前一方`）。通知两处：`$.session.append` 给架构师一行说明（架构师可以与用户讨论后调用 `resolve_conflict`），Telegram 发一条问题（索引 `kind: 'long'` 加 `decisionId`）。用户在 Telegram 的回复由 Router 判断后交给架构师会话执行（第 9.12 节），因为被暂停的子代理、`st.touches` 与 `pausedFor` 都在架构师会话中，Router 的 `$.session.send({ to: { agentId } })` 送不到别的会话的子代理。
+5. `单独副本`（`applyLongDecision`，由 `resolve_conflict` 或 Telegram 回复触发）：`createWorktree(from = 任务的工作目录)` 建立单独副本，该代理记录的 `worktree` 改为单独副本，`state` 改回 `idle`，清除 `pausedFor`，决定记为已解决；经中转唤醒它（`kind: 'wake'`，第 9.8 节），消息告诉它新的工作目录（续接不能改 `cwd`，写入范围由第 9.5 节的检查保证，Bash 需要先 `cd`）。它完成后（`turn.complete` 且报告状态为完成）用 `integrate(source = 单独副本, target = 任务的工作目录)` 合入，冲突时同样建立决定并通知。与它冲突的前一方仍在运行时，合入推迟到前一方 `turn.complete`（决定的 `data.merge` 记为 `waiting`，日志 `merge-deferred`，架构师收到一行说明）：先合入时，仍在运行的前一方看到自己负责的文件被改，会把它改回自己的版本（2026-11-09 E7 实测），合入的改动随之丢失。
 6. `等待前一方`（`applyLongDecision`）：决定记为已解决，被暂停者保持 `paused`。前一方 `turn.complete` 时，经中转唤醒被暂停者，告诉它继续，记录恢复。
 
 ### 9.10 整合（`integrate.ts`）
@@ -987,38 +996,44 @@ export function integrate(io: Io, reg: Registry, a: { taskId: string; repo: stri
 
 ### 9.11 日常任务（工作包 F）
 
-消息顺序（Telegram 中用户看到的）：tg-router 的确认 `收到：…` → magpie-tasks 的路由说明 → 进度卡片（tg-router，超过 30 秒时） → 执行者的回答（tg-router 在执行者 `turn.complete` 时发出，早于验收） → magpie-tasks 的验收与整合报告。终端输入的任务（chat `tui`）没有 Telegram 消息，magpie-tasks 的说明与报告用 `$.ui.notice` 显示在 Router 窗格中。
+消息顺序（Telegram 中用户看到的）：tg-router 的确认 `收到：…` → magpie-tasks 的路由说明 → 进度卡片（tg-router，超过 30 秒时） → 执行者的回答（tg-router 在执行者 `turn.complete` 时发出，早于验收） → 需要用户决定时 magpie-tasks 的问题（整合冲突、返工后的改动是否整合）；验收通过与整合不发消息。终端输入的任务（chat `tui`）没有 Telegram 消息，magpie-tasks 的说明与报告用 `$.ui.notice` 显示在 Router 窗格中。
 
 **派发与路由。** Router 调用 tg-router 的 `dispatch`，tg-router 在 claude-magpie 中以请求头开头的说明启动 worker（第 10.1 节）。magpie-tasks 在 `agent.spawn` 中新建日常任务并路由（第 9.6 节）。匹配规则时，Telegram 发路由说明（回复原消息，静音）：`模型：<名称> · <强度> · 规则 <id>（Jev 置信度 0.82；需要深入推理）`，替代判断时加“由评估模型代为判断”，指定模型时写“用户指定：<理由>”；消息写入索引 `kind: 'magpie'`。
 
 **执行者的说明。** 第 9.6 节附加的任务规则中包括：
 
-- 需要修改某个项目时，先调用 `mcp__magpie-tasks__open_worktree { project: <绝对路径> }`，此后只在返回的工作副本中修改（Bash 先 `cd` 到该目录）；不修改项目的任务不需要调用。
+- 需要修改某个项目时，先调用 `mcp__magpie-tasks__open_project { project: <绝对路径> }`，此后只在返回的目录中修改（Bash 先 `cd` 到该目录）：没有其他任务直接修改这个项目时就是项目目录本身，否则是工作副本；不修改项目的任务不需要调用。
 - 回答末尾的状态行：`状态：已完成`、`状态：需要用户决定` 或 `状态：受阻：<一句话说明阻碍>`。完成时在状态行之前写 `验证：`，每行一条实际运行过的验证命令及结果。
 
-**`open_worktree` 工具**（执行者调用，`daily.onOpenWorktree`）：
+**`open_project` 工具**（执行者调用，`daily.onOpenProject`）：
 
-1. `project` 必须是存在的绝对路径；`repoRoot` 为空时返回错误，说明该目录不是 Git 仓库，需要用户确认建立仓库；执行者以 `需要用户决定` 结束本轮并说明。用户确认后，执行者带 `init_git: true` 再调用，插件执行 `initRepo` 并记录用户的回复原文（任务的最后一条追问）。
-2. 任务已有工作副本时直接返回其路径；否则按第 9.9 节创建，写入任务的 `project` 与 `worktree`，该代理记录的 `worktree` 同步设置。
-3. 返回工作副本路径与说明（依赖安装、只在此目录修改）。
+1. `project` 必须是存在的绝对路径；项目根为它所在仓库的顶层目录，不是仓库时为它自己。
+2. 任务还没有工作目录时按 `placeTask` 确定（第 9.9 节），写入任务的 `project` 与 `direct` 或 `worktree`，该代理记录的 `worktree` 与 `cwd` 同步设置。任务已有工作目录时，不同项目返回错误（一个任务只改一个项目），同一项目先经 `leaveIfTaken` 判断是否转到工作副本，再返回当前目录。
+3. 返回目录与说明：直接修改时写明改动立即在项目目录中、验收在之后；工作副本时写明依赖安装、只在此目录修改，以及是哪个任务在直接修改项目。
 
 **执行者完成**（`turn.complete`，代理为任务当前负责的执行者）：
 
 1. 用 `parseStatus` 取状态与验证命令，写入 `reports`。
-2. `已完成`：建立验收子代理，每个日常任务的成果都检查一次（实现方案第 2、7 节）。规则 `review`（Opus 5.5 / medium，深入推理时提高），说明包含：任务标记、原始请求与全部追问、执行者最后一次回答、执行者报告的验证命令；要求重新运行这些命令，对照原始请求检查结果，末行 `验收结论：通过` 或 `验收结论：不通过`，不通过时每个问题写位置、触发条件和依据。说明按有无改动分两种（`acceptanceBrief` 的 `change` 为 `null` 即为第二种）：
-   - 任务有工作副本且 `diffSince` 不为空：`cwd` 为工作副本，另附 `git diff --stat` 与补丁路径（写到 `<stateDir>/tasks/<id>.patch`），并要求检查改动范围。
-   - 没有改动（只给出回答的任务，或执行者没有修改项目）：`cwd` 为 Router 的工作目录，说明写明没有需要整合的改动，要求核对回答是否回应了请求、事实与数字能否用执行者报告的命令或原始材料复核、没有运行验证时指出这一点。
+2. `已完成`：先判断这一轮的成果是否值得独立检查（`judgeCheck`，实现方案第 2、7 节）。Jev 回答一个判断题，材料是三条消息：用户这一轮的话与这一轮的工具调用次数（`endedTurn` 从执行者的对话中取：最后一条不属于后台任务事件、也不是插件自己发给它的消息，首轮是说明中用户的原话；工具调用从这一轮开始的那条消息之后计数）、执行者的回答（上一条报告是补状态行之前的回答时两者拼接）、等待整合的改动统计或“没有改动”。概率不低于 `CHECK_YES`（0.3）时验收；Jev 失败时由评估模型回答同一个问题。判断写入 `deliverables` 最后一项的 `check` 与日志 `check`。2026-11-11 用当天 20 次验收的真实记录测量（`bun eval/check-eval.ts`）：4 次不通过的验收为 0.65 到 0.98，其余 10 次工具调用 7 到 88 次的为 0.54 到 0.98；6 次工具调用 0 到 5 次的（对话、交还、“合并吧”“推吧”“重装”）为 0.01 到 0.07。
+   - 不需要验收：有改动时直接整合；任务 `done`，不发消息。
+   - 需要验收：建立验收子代理。规则 `review`（Opus 5.5 / medium，深入推理时提高），说明包含：任务标记、原始请求与全部追问、执行者最后一次回答、执行者报告的验证命令；要求重新运行这些命令，对照原始请求检查结果，末行 `验收结论：通过` 或 `验收结论：不通过`，不通过时每个问题写位置、触发条件和依据。说明按有无改动分两种（`acceptanceBrief` 的 `change` 为 `null` 即为第二种）：
+     - 任务有工作副本且 `diffSince` 不为空：`cwd` 为工作副本，另附 `git diff --stat` 与补丁路径（写到 `<stateDir>/tasks/<id>.patch`），并要求检查改动范围。
+     - 没有改动（只给出回答的任务，或执行者没有修改项目）：`cwd` 为 Router 的工作目录，说明写明没有需要整合的改动，要求核对回答是否回应了请求、事实与数字能否用执行者报告的命令或原始材料复核、没有运行验证时指出这一点。
 
-   通过中转启动（第 9.8 节），名字 `<worker>-acc<n>`。
+     通过中转启动（第 9.8 节），名字 `<worker>-acc<n>`。
 3. `需要用户决定`：任务 `waiting-user`（回答已由 tg-router 发出）。
 4. `受阻`：进入诊断（下文）。
 5. 没有状态行：任务有改动时经中转唤醒它，请它补一行状态（每个回合最多一次），日志记 `status-missing`；没有改动时视为 `需要用户决定`。
 
 **验收子代理完成**：`parseVerdict`。
 
-- 通过且有改动：`integrate(source = 工作副本, target = 项目主目录)`。`applied`：Telegram 回复原消息“已整合到 `<项目>`：<文件列表>；验收：<一句结论>；验证：<命令>”，任务 `done`；`empty`：报告无需整合，任务 `done`；`conflict`：建立决定并报告冲突文件，任务 `waiting-user`。
-- 通过且没有改动：Telegram 回复原消息“验收通过：<一句结论>”（静音），任务 `done`，记录完成时间（评分候选）。
-- 不通过：经中转唤醒执行者（`raises: ['acceptance-failed']`），送去验收意见并要求修复后重新报告；任务保持 `running`，`deliverables` 最后一项记录 `acceptance.pass = false`，日志 `acceptance`。执行者再次以 `已完成` 结束、且最后一项验收为不通过时不再验收（只检查一次）：Telegram 发“验收意见 + 修复结果”，有改动时询问是否整合，没有改动时询问是否接受，消息写入索引 `kind: 'decision'`（`fix-confirm`），任务 `waiting-user`。用户回复经 `approve` 判断：同意则整合（有改动时）并把任务改为 `done`，拒绝则记录并保持工作副本，无法判断时请用户明确回答。
+- 通过且有改动：`integrate(source = 工作副本, target = 项目主目录)`。`applied` 或 `empty`：任务 `done`，不发消息；`conflict`：建立决定并报告冲突文件，任务 `waiting-user`。
+- 通过且没有改动：任务 `done`，记录完成时间（评分候选），不发消息。
+- 不通过：经中转唤醒执行者（`raises: ['acceptance-failed']`），送去验收意见并要求修复后重新报告，同时说明用户已经读过上一次回答、新回答要写明哪些说法有误和正确的内容；任务保持 `running`，`deliverables` 最后一项记录 `acceptance.pass = false`，日志 `acceptance`。执行者再次以 `已完成` 结束时不再验收（只检查一次），该项记录 `acceptance.fixed`：
+  - 没有改动：修复后的回答已由 tg-router 发出，任务 `done`，不发消息。
+  - 有改动：Telegram 询问是否整合这份返工过的改动（不附验收意见，执行者的回答已经写明更正了什么），消息写入索引 `kind: 'decision'`（`fix-confirm`，决定 ID 记入 `acceptance.fixed.decisionId`），任务 `waiting-user`。用户回复经 `approve` 判断：同意则整合，回复整合结果，任务 `done`；拒绝则记录并保持工作副本；无法判断时请用户明确回答。这个问题未答复期间，执行者之后的 `已完成` 只记录报告，不验收、不整合、不再询问；用户拒绝之后执行者又完成一轮时，带着当时的改动再问一次。
+
+**执行者得知结果。** 验收通过与整合不通知用户，执行者从下一条到达它的消息得知：`outcomeNote` 按 `deliverables` 最后一项给出一行 `[magpie-tasks note] …`（改动已整合到主目录及文件列表、是否经过验收；整合冲突；验收通过且没有改动；返工后的改动正在等用户答复或被用户拒绝），`withOutcome` 把它附在消息末尾。经过的消息有两类：Router 主对话或 tg-router 发给该任务执行者的消息（`session.send` 钩子），以及用户回复 magpie-tasks 的消息后转给执行者的追问（`executorReply`）。送达后在该项记 `told`（已告知的结果）并写日志 `outcome-told`，同一结果只告知一次；没有验收也没有改动的回答、已经用验收意见唤醒执行者的不通过，不告知。判断是否验收时，`asked` 先去掉这一行（`stripOutcomeNote`）。执行者的任务规则写明：改动在回合结束后由插件应用到主目录，用户不会收到通知，下一条消息后的说明行会写明结果，用户再次要求时提交。
 
 **执行者不能按规则直接确定：评估与确认。** 用户指定的模型没有规则给出的强度、规则的模型不在 Magpie 的模型列表中，或独立复核缺少条件时，日常任务走这个流程；没有匹配规则的请求按 `daily-default` 直接执行（第 9.6 节）。
 
@@ -1182,8 +1197,8 @@ export function tick(ctx: Ctx): Promise<void>
    - `deliver`：`ownerOf` 有记录且 `ownerAgentId` 与 tg-router 记录的 worker 不同时，发往 `{ agentId: ownerAgentId }`；`long` 为真时不投递，返回交给内层。
    - `prompt.submit`：频道消息 `reply_to` 的 `messageKind` 为 `long`、`magpie`、`decision`、`rating`，或文字匹配 `^\s*评分\s*[1-5]\s*$` 时，不做自己的路由，清除 `armed` 后 `return next(e)`；内层返回 `drop` 时同样清除 `armed`。
    - `taskFor(agentId)`：自己的记录与代理名都找不到时，用 `workerOfAgent` 找 worker 名，再按名取任务（更换后的执行者的回答发到原任务下）。
-3. `src/gate.ts`：`ROUTER_TOOLS` 增加 `mcp__magpie-tasks__forward_long`、`mcp__magpie-tasks__recommend_architect`、`mcp__magpie-tasks__promote_task`；子代理调用这三个工具时拒绝。子代理调用 `mcp__magpie-tasks__open_worktree` 不受 tg-router 限制（tg-router 不检查子代理的普通工具）。
-4. `src/prompts.ts`：`workerBrief` 在 `magpieActive` 时去掉“自己建工作副本”一条（由 `open_worktree` 负责），并说明状态行由 magpie-tasks 的任务规则规定。`routerContext` 与 `terminalContext` 增加 `dispatch` 的 `model`/`model_reason` 用法。
+3. `src/gate.ts`：`ROUTER_TOOLS` 增加 `mcp__magpie-tasks__forward_long`、`mcp__magpie-tasks__recommend_architect`、`mcp__magpie-tasks__promote_task`；子代理调用这三个工具时拒绝。子代理调用 `mcp__magpie-tasks__open_project` 不受 tg-router 限制（tg-router 不检查子代理的普通工具）。
+4. `src/prompts.ts`：`workerBrief` 在 `magpieActive` 时去掉“自己建工作副本”一条（由 `open_project` 负责），并说明状态行由 magpie-tasks 的任务规则规定。`routerContext` 与 `terminalContext` 增加 `dispatch` 的 `model`/`model_reason` 用法。
 5. `src/telegram.ts`：`stateDir` 依次读取 `TG_ROUTER_STATE_DIR`、`TELEGRAM_STATE_DIR`、默认目录。
 6. 测试：`tests/magpie.test.ts`（索引查询）；`hooks/register.test.ts` 中现有用例在 `magpieActive` 为 false 时保持通过。
 
@@ -1281,7 +1296,7 @@ U1、U2 是实现方案第 11 节列出的待验证行为；U9 来自官方文�
 | 阻碍判定 | `io-tests/judge.spec.ts` | 真实 Jev 的 `blocker` 选择题：已有阻碍 `b1`（依赖安装失败）时，换一种说法描述同一失败的报告选中 `b1`，描述另一个失败（测试断言错误）的报告选中 `new`；记录置信度。低置信度归入概率最高的已有阻碍的逻辑在 `tests/judge.test.ts` |
 | lock | `io-tests/lock.spec.ts` | 两个并发 `withLock` 串行执行；持有者进程被杀后旧锁超过 `staleMs` 被接管；`waitMs` 超时抛出；等待期间调用的是 `io.run(['sleep', …])` 而不是 `io.sleep`（node-io 记录调用）。钩子中长时间等待不超时由场景 E8 的锁等待步骤检查 |
 | registry | `io-tests/registry.spec.ts` | 创建、更新、日志追加；20 个并发 `update` 不丢修改；认领只被取走一次；过期认领清理；索引读写；会话索引随换 ID 更新 |
-| git、integrate | `io-tests/git.spec.ts` | 真实仓库：未提交与未跟踪文件进入工作副本，用户索引不变；整合只应用任务改动并保留用户未提交改动；第二次整合只应用新改动；与用户改动冲突时 `conflict` 且主目录不变；非仓库 `initRepo`；空仓库（无 HEAD）；二进制文件 |
+| git、integrate | `io-tests/git.spec.ts` | 真实仓库：未提交与未跟踪文件进入工作副本，用户索引不变；整合只应用任务改动并保留用户未提交改动；第二次整合只应用新改动；与用户改动冲突时 `conflict` 且主目录不变；`placeTask` 的直接修改与工作副本两种结果，非仓库目录直接修改且不建立仓库；`settleDirect` 记录改动、移动基线并告知同一目录的其他任务；`leaveIfTaken` 转到工作副本；空仓库（无 HEAD）；二进制文件 |
 | conflict | `tests/conflict.test.ts` | `touchedPaths`、`porcelainChanged`（`-z` 输出含空格与改名）、`findConflict`、`isCheckCommand` |
 | gate | `tests/gate.test.ts` | 写入白名单的路径（含 `..`、符号链接解析结果、工作副本中的同名文件）；只读 Bash 的放行与拒绝（重定向、`$(…)`、`sed -i`、`find -delete`、`git commit`）；打包与发布命令 |
 | brief | `tests/brief.test.ts` | 标记生成与解析、`[model-reason …]`、`[review-of …]`、`[effort …]`、tg-router 请求头、`requestText`；状态行、验收结论、选模确认、诊断建议的解析（含全角冒号与多余空白） |
@@ -1319,19 +1334,19 @@ start() { tmux new-session -d -s "$1" -x 220 -y 60 "cd $2 && env -u CLAUDECODE -
 | --- | --- | --- |
 | E1 生效范围 | `claude -p --model claude/claude-haiku-5-5 '回复 ok'`；`claude-magpie -p --model claude/claude-haiku-5-5 '回复 ok'`；`start e1 $E claude-magpie --model claude/claude-haiku-5-5 --debug-file $E/e1.log` 后发送 `回复 ok`，确认对话出现后按 Esc | 前两者调试日志中 magpie-tasks 判定 `inactive`，`$E/state/tasks` 为空；第三个会话判定 `candidate`，确认对话的选项恰好是四个候选模型，按 Esc 后窗格显示 `Prompt dropped by a hook: magpie-tasks: 已取消…`，`$E/state/tasks` 仍为空，再次发送时重新出现确认对话 |
 | E2 安装顺序 | `--debug-file` 启动任一会话，检查 `$ built for` 行；再把 `enabledPlugins` 中 magpie-tasks 移到 jev 之前启动一次 | 第一次 magpie-tasks 在 jev 与 subagent-opus 之后；第二次出现顺序错误提示且角色为 `inactive` |
-| E3 新长期任务（U1、U4） | `mkdir $E/proj && printf 'print("hello")\n' > $E/proj/greet.py`；`start e3 $E/proj claude-magpie`；发送 `检查 greet.py 并只回复 ok`；确认对话中选推荐项 | 确认文字含“建立 Git 仓库…1 个文件”；`$E/proj/.git` 有一个 `magpie-tasks baseline` 提交；`$E/wt/<id>` 存在；任务记录 `running`，`owner.sessionId` 等于 `claude agents --json` 中 `cwd=$E/proj` 的后台会话；认领文件已删除；前台 `pane_dead=1`；`magpie usage --csv --last 10m` 中该会话为所选模型；`$E/state/debug/<任务 ID>.txt` 含该会话的认领日志行 |
+| E3 新长期任务（U1、U4） | `mkdir $E/proj`，其中 `git init`，提交 `greet.py`；`start e3 $E/proj claude-magpie`；发送 `检查 greet.py 并只回复 ok`；确认对话中选推荐项 | 确认文字含“直接修改：$E/proj”，没有“建立 Git 仓库”；分支上仍只有一个提交；任务记录 `direct.dir` 为 `$E/proj`，`refs/magpie-tasks/<id>/base` 等于 `direct.baseCommit`；`$E/wt/<id>` 不存在；任务记录 `running`，`owner.sessionId` 等于 `claude agents --json` 中 `cwd=$E/proj` 的后台会话；认领文件已删除；前台 `pane_dead=1`；`magpie usage --csv --last 10m` 中该会话为所选模型；`$E/state/debug/<任务 ID>.txt` 含该会话的认领日志行 |
 | E4 接管（U6） | 在 `$E/proj2`（`git init` 加一次提交）中运行两次 `claude-magpie -p --model claude/claude-haiku-5-5 --output-format json '回复 ok'`，取得会话 ID A、B（`-p` 为 `inactive`，不登记）。(a) `start e4a $E/proj2 claude-magpie --resume A --model claude/claude-opus-5-5 --debug-file $E/e4a.log`，发消息，选“不接管”，得到回答后 `/exit`；用同一命令再启动一次（`--debug-file $E/e4a2.log`）并发消息。(b) `start e4b $E/proj2 claude-magpie --resume B --model claude/claude-opus-5-5 --debug-file $E/e4b.log`，发消息，选“接管” | (a) 第一次的调试日志中 `$.session.id()` 等于 A（交互式恢复保持会话 ID），`state/declined.json` 含 A；第二次没有出现确认对话，角色为 `unmanaged`，消息正常得到回答。(b) 回答在前台完成后窗格显示 `backgrounded · <id>`；新后台会话记录为负责人，B 在 `previousSessionIds`；`claude attach <id>` 后再发一条消息，回答带架构师上下文 |
-| E5 架构师工具限制（U9） | 对 E3 的架构师 `claude attach`，依次请它：(1) 用 Edit 改 `greet.py`；(2) 用 Write 写 `.planning/findings.md`，再用 Edit 在其末尾加一行 `e5-edit`；(3) 运行 `touch x`；(4) 运行 `git status` | (1)、(3) 被拒（任务日志无写入，`greet.py` 不变，`$E/proj/x` 不存在）；(2)、(4) 成功。U9：`$E/proj/.planning/findings.md` 含 `e5-edit`；`claude agents --json` 中该会话的 `cwd` 仍为 `$E/proj`；`$E/proj/.claude/worktrees/` 不存在；`git -C $E/proj worktree list` 只列出项目本身与 `$E/wt/<id>` |
-| E6 子代理路由（U8） | 对 E3 架构师依次请求：(1) “委派一个子代理：在工作副本里给 greet.py 加一个 main 函数并运行验证”；(2) “委派子代理对这次修改做独立审查”；(3) “用不同模型复核这次修改，[review-of agent=<(1) 的 agentId>]”；(4) “用 Haiku 委派一个子代理统计文件行数”；(5) “用 Haiku 委派，理由是我指定的”；(6) “用 Fable 5.1 委派一个子代理（我指定的），让它不指定模型再委派一个子代理统计 greet.py 的行数” | (1) `agent.spawn` 记录 `code-change`，模型 Opus 5.5（Jev 深入推理概率达到 0.95 时为 Mythos 5.2），`cwd` 为工作副本，说明第一行为任务标记，Magpie 用量中该子代理的强度为 high；(2) `review`、Opus、medium 或 high；(3) `review-second`，模型 Sol 6.1；(4) 被拒，拒绝理由中有 `model-reason`；(5) 采用 Haiku，选择类型 `user`；(6) Fable 子代理选择类型 `user`，它的嵌套委派登记在同一任务下（`parentAgentId` 为 Fable 子代理），选择类型 `rule`，没有被拒，模型为规则模型（经 `requestId`，不是 subagent-opus 写入的别名 `opus`）；子代理模型都不是 subagent-opus 改写的 `opus` |
-| E7 文件冲突 | 对 E3 架构师请求：“委派后台子代理 A：把 greet.py 的 hello 改成 hi，然后运行 `sleep 60`，再运行 `python3 greet.py`。等工作副本中的 greet.py 出现 hi 之后，委派后台子代理 B：把 greet.py 输出的词改成 hey 并运行 `python3 greet.py`。B 的写入被拒后，调用 `resolve_conflict`，`agent_id` 为 B，`decision` 为 `separate`。” | B 对 greet.py 的第一次写入被拒，拒绝理由要求它停止并报告；B 的记录 `paused`，任务有一个 `file-conflict` 决定，Telegram 收到冲突问题（索引 `long` 加 `decisionId`），架构师窗口有一行冲突说明；`resolve_conflict` 之后决定已解决，`$E/wt/<id>-<B 的 agentId>` 存在，B 的记录 `worktree` 为该路径，任务日志有 B 的 `relay`（唤醒）；B 在单独副本中完成，整合日志 `integration-start` 与 `integration`（`applied`）成对出现，任务工作副本的 greet.py 输出 hey；A 的记录不受影响 |
-| E8 日常任务（终端，U3） | `mkdir $E/repo && cd $E/repo && git init && printf 'print("hello")\n' > greet.py && git add . && git commit -m init && echo '# note' >> README.md`；`start e8 $HOME env MAGPIE_TASKS_ROLE=router claude-magpie --model 'claude/claude-opus-5-5[1m]' --plugin-dir ~/sipeng/claude-mods/mods/tg-router`；在窗格输入：(a) `在 $E/repo 里把 greet.py 的 hello 改成 hi，并运行 python3 greet.py 验证`；脚本在任务日志出现验收子代理的 `spawn` 时建立 `$E/state/locks/project-<fnv1a64(realpath $E/repo)>.lock`（写入当前时间的 `owner.json`），在插件调试日志出现该锁的等待行之后再保持 15 秒才删除；(b) `统计 $E/repo/greet.py 有几行，只回答数字`；(c) 一条没有匹配规则的请求（例如为一段混合任务挑选模型），在评估回答后输入“确认” | (a) 日常任务记录 `code-change`；执行者调用 `open_worktree`；验收子代理经中转启动，结论写入记录；整合在锁删除之后完成（`integration` 的时间晚于锁等待行至少 15 秒），调试日志中 magpie-tasks 的钩子没有超时（没有 `expired` 或被当作不存在的记录）；整合后 `$E/repo/greet.py` 为 `hi`，`README.md` 的未提交改动仍在，`git rev-list --count HEAD` 仍为 1，基线引用已移动；Router 窗格显示整合报告。(b) 执行者完成后验收子代理以没有改动的说明启动，`cwd` 不是工作副本，结论写入记录，任务 `done`，没有 `integration` 日志。(c) 评估子代理为 Opus/xhigh，确认后执行者模型为推荐模型且选择类型 `assessment-confirmed` |
+| E5 架构师工具限制（U9） | 对 E3 的架构师 `claude attach`，依次请它：(1) 用 Edit 改 `greet.py`；(2) 用 Write 写 `.planning/findings.md`，再用 Edit 在其末尾加一行 `e5-edit`；(3) 运行 `touch x`；(4) 运行 `git status` | (1)、(3) 被拒（任务日志无写入，`greet.py` 不变，`$E/proj/x` 不存在）；(2)、(4) 成功。U9：`$E/proj/.planning/findings.md` 含 `e5-edit`；`claude agents --json` 中该会话的 `cwd` 仍为 `$E/proj`；`$E/proj/.claude/worktrees/` 不存在；`git -C $E/proj worktree list` 只列出项目本身 |
+| E6 子代理路由（U8） | 对 E3 架构师依次请求：(1) “委派一个子代理：给 greet.py 加一个 main 函数并运行验证”；(2) “委派子代理对这次修改做独立审查”；(3) “用不同模型复核这次修改，[review-of agent=<(1) 的 agentId>]”；(4) “用 Haiku 委派一个子代理统计文件行数”；(5) “用 Haiku 委派，理由是我指定的”；(6) “用 Fable 5.1 委派一个子代理（我指定的），让它不指定模型再委派一个子代理统计 greet.py 的行数” | (1) `agent.spawn` 记录 `code-change`，模型 Opus 5.5（Jev 深入推理概率达到 0.95 时为 Mythos 5.2），说明第一行为任务标记，Magpie 用量中该子代理的强度为 high；(1) 的 `cwd` 为项目目录 `$E/proj`；(2) `review`、Opus、medium 或 high；(3) `review-second`，模型 Sol 6.1；(4) 被拒，拒绝理由中有 `model-reason`；(5) 采用 Haiku，选择类型 `user`；(6) Fable 子代理选择类型 `user`，它的嵌套委派登记在同一任务下（`parentAgentId` 为 Fable 子代理），选择类型 `rule`，没有被拒，模型为规则模型（经 `requestId`，不是 subagent-opus 写入的别名 `opus`）；子代理模型都不是 subagent-opus 改写的 `opus` |
+| E7 文件冲突 | 对 E3 架构师请求：“委派后台子代理 A：把 greet.py 的 hello 改成 hi，然后运行 `sleep 60`，再运行 `python3 greet.py`。等 greet.py 出现 hi 之后，委派后台子代理 B：把 greet.py 输出的词改成 hey 并运行 `python3 greet.py`。B 的写入被拒后，调用 `resolve_conflict`，`agent_id` 为 B，`decision` 为 `separate`。” | B 对 greet.py 的第一次写入被拒，拒绝理由要求它停止并报告；B 的记录 `paused`，任务有一个 `file-conflict` 决定，Telegram 收到冲突问题（索引 `long` 加 `decisionId`），架构师窗口有一行冲突说明；`resolve_conflict` 之后决定已解决，`$E/wt/<id>-<B 的 agentId>` 存在，B 的记录 `worktree` 为该路径，任务日志有 B 的 `relay`（唤醒）；B 在单独副本中完成，整合日志 `integration-start` 与 `integration`（`applied`）成对出现，项目目录的 greet.py 输出 hey；A 的记录不受影响 |
+| E8 日常任务（终端，U3） | `mkdir $E/repo && cd $E/repo && git init && printf 'print("hello")\n' > greet.py && git add . && git commit -m init && echo '# note' >> README.md`；`start e8 $HOME env MAGPIE_TASKS_ROLE=router claude-magpie --model 'claude/claude-opus-5-5[1m]' --plugin-dir ~/sipeng/claude-mods/mods/tg-router`；在窗格输入：(a) `在 $E/repo 里给 greet.py 加一个 --name 参数（默认 world），输出 hello <name>；再补一个 test_greet.py，用 subprocess 检查带参数和不带参数两种调用；运行测试验证`；脚本在任务日志出现验收子代理的 `spawn` 时建立 `$E/state/locks/project-<fnv1a64(realpath $E/repo)>.lock`（写入当前时间的 `owner.json`），在插件调试日志出现该锁的等待行之后再保持 15 秒才删除；(b) `在 $E/repo 里把 greet.py 输出里的 hello 改成 hi，并运行 python3 greet.py 验证`；(c) `统计 $E/repo/greet.py 有几行，只回答数字`；(d) 一条没有匹配规则的请求（例如为一段混合任务挑选模型），在评估回答后输入“确认” | (a) 日常任务记录 `code-change`；执行者调用 `open_project`，任务直接修改 `$E/repo`（`direct.dir`，没有工作副本）；日志 `check` 判断为需要验收，验收子代理经中转启动，结论写入记录；结果在锁删除之后记录（`integration`（`in-place`）的时间晚于锁等待行至少 15 秒），调试日志中 magpie-tasks 的钩子没有超时（没有 `expired` 或被当作不存在的记录）；之后 `python3 greet.py --name Ann` 输出 `hello Ann`，`README.md` 的未提交改动仍在，`git rev-list --count HEAD` 仍为 1，基线引用已越过第一次的基线提交；Router 窗格没有验收或整合报告。(b) 日志 `check` 判断为不需要验收，没有验收子代理，改动直接记为结果（`in-place`），`python3 greet.py` 输出 `hi world`，任务 `done`，Router 窗格没有验收或整合报告；Router 把这条请求转给 (a) 的执行者时，任务日志有 `outcome-told`（`in-place`）。(c) 日志 `check` 判断为不需要验收，没有验收子代理，任务 `done`，没有 `integration` 日志，Router 窗格没有验收或整合报告。(d) 评估子代理为 Opus/xhigh，确认后执行者模型为推荐模型且选择类型 `assessment-confirmed` |
 | E9 Telegram 连接（U2、U5，需要用户） | 用户同意暂停常驻的 `claude-telegram` 后，用新的启动脚本在独立配置目录中启动 Router；用户在手机上：(1) 发“把这条转给 greet 那个长期任务：greet.py 现在输出什么？”；(2) 回复架构师发回的消息“再确认一次”；(3) `claude stop <架构师 ID>` 后回复 (2) 的回答；(4) 发一个日常请求，等完成后回复 `评分 4`；(5) 让架构师按 E7 的步骤再委派一次，但不调用 `resolve_conflict`，用户回复 Telegram 中的冲突问题“给它单独副本” | (1) Router 调用 `forward_long`，`isDelivered` 为真，架构师回答经 Bot API 作为回复出现；(2) 由 magpie-tasks 直接转给架构师，Router 不产生回合；(3) 插件用 `claude --bg --resume <完整 ID>` 恢复，会话 ID 不变，回答送达，恢复后的会话按 U9 的检查仍在 `$E/proj`；(4) 任务 `ratings` 有一条 4 分；(5) Router 的调试日志记录判断结果 `separate`，转交标记带 `decision=<id> answer=separate`，架构师会话在模型回合开始前执行决定（日志 `decision` 的会话为架构师会话），单独副本被建立、被暂停的子代理经中转唤醒，架构师的回答经 Bot API 回复用户 |
 | E10 恢复 | E3 的架构师 `claude stop`；任务保持 `running`；删除 `$E/state/state/recovery.json`（E3 的启动恢复在 10 分钟内运行过）；`start e10 $E claude-magpie --model claude/claude-haiku-5-5`，不发送消息，等恢复日志出现后关闭窗格 | 恢复日志 `recovery`；架构师会话以原 ID 重新运行（`claude agents --json`），收到恢复说明 |
 | E11 评分与校准 | 在 E9 环境中把 `ratingHour` 设为当前小时（`/config` 修改插件选项），已有一个当天完成的任务 | 当天发出一次邀请，第二次定时检查不再发；回复 `5` 记录评分。校准检查对 E8、E9 产生的真实记录运行一次，条件不足时只更新 `lastCheckAt` |
 | E12 JEV 跳过 | E6、E8 运行期间的 JEV 日志 | 每个带任务标记的子代理，每一轮运行在 JEV 日志中恰好一条 `skip` 记录（`reason: 'magpie-tasks'`），没有 `prompt`/`step` 判断行，也没有 Jev 请求；Magpie 用量中这些子代理的强度等于插件设置的强度；中转消息（`[magpie-tasks spawn …]`）没有判断行；Router 与架构师主对话照常有判断行 |
 | E13 替代判断 | E8 的环境中把插件选项 `jevKeyFile` 改为不存在的 `$E/missing.key`，重启 Router，输入 `在 $E/repo 里把 greet.py 的 hi 改成 hey，并运行 python3 greet.py 验证` | 执行者的代理记录 `judgment.provider === 'substitute'`，`substituteReason` 为 `key file missing`，判断由 `evaluatorModel` 给出（Magpie 用量中有该模型的一次请求）；Router 窗格的路由说明含“由评估模型代为判断”；任务照常完成验收与整合 |
 | E14 模型不可用（U11） | 对 E3 架构师请求：“按我的指定用模型 `codex/gpt-6-magpie-missing` 委派一个子代理统计 greet.py 的行数，说明中写 `[model-reason user: 测试不可用模型]`” | 启动被接受，选择类型 `user`；插件调试日志记录该子代理的 `StopFailure`（`agent_id` 相同，分类属于不可用集合）与 `reason: error` 的 `turn.complete`；代理记录 `state: 'failed'`、`failure.kind: 'model-unavailable'`；任务有 `model-unavailable` 决定，架构师窗口有一行说明，Telegram 收到问题；没有自动启动接手者 |
-| E15 流程出错 | `mkdir $E/proj3 && printf 'x\n' > $E/proj3/a.txt`；`chmod 500 $E/wt`；`start e15 $E/proj3 claude-magpie`；发送 `检查 a.txt`，在确认对话中选推荐项；结束后 `chmod 700 $E/wt` | 窗格显示 `magpie-tasks 出错（任务 <id>）：…` 的提示与 `Prompt dropped by a hook: magpie-tasks 出错：…`，消息没有交给模型；Telegram 收到含任务 ID 与错误首行的通知；任务记录 `state: 'error'`，`error` 含建立工作副本失败的原因；`claude agents --json` 中没有新的后台会话；前台窗格仍在运行 |
+| E15 流程出错 | `mkdir $E/proj3`，其中 `git init`，提交 `a.txt`，再写一个未提交的 `b.txt`；`chmod -R a-w $E/proj3/.git/objects`（基线快照写不进对象库）；`start e15 $E/proj3 claude-magpie`；发送 `检查 a.txt`，在确认对话中选推荐项；结束后 `chmod -R u+w $E/proj3/.git/objects` | 窗格显示 `magpie-tasks 出错（任务 <id>）：…` 的提示与 `Prompt dropped by a hook: magpie-tasks 出错：…`，消息没有交给模型；Telegram 收到含任务 ID 与错误首行的通知；任务记录 `state: 'error'`，`error` 含基线快照失败的原因；`claude agents --json` 中没有新的后台会话；前台窗格仍在运行 |
 
 E9 与 E11 需要暂停用户常驻的 `claude-telegram` 并由用户在手机上发消息，开始前另外征得用户同意。全部场景通过后，正式安装 `claude plugin install magpie-tasks@sipeng-mods --scope user`（在 jev 与 subagent-opus 之后），替换 `/home/ubuntu/.local/bin/claude-telegram`，由用户重新启动常驻 Router。
 

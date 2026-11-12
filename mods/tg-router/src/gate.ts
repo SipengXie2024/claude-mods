@@ -48,7 +48,7 @@ export type GateInput = { tool: string; agentId?: string; command?: unknown; fil
 
 /** The deny reason for a Router call, or null when the call may run. */
 export function routerDeny(e: GateInput, inboxDir: string): string | null {
-  // a worker's other tools, magpie-tasks' open_worktree among them, are not this gate's to judge
+  // a worker's other tools, magpie-tasks' open_project among them, are not this gate's to judge
   if (e.agentId) return ROUTER_ONLY.has(e.tool) ? `${e.tool} 只给 Router 用` : null
   if (ROUTER_TOOLS.has(e.tool) || e.tool.startsWith(CHANNEL_PREFIX)) return null
   if (e.tool === 'Bash' && typeof e.command === 'string' && isPaneCommand(e.command)) return null

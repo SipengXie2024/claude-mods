@@ -147,7 +147,7 @@ const daily = (): RoutedTask => {
   return t
 }
 const WT = '/home/ubuntu/.local/share/magpie-tasks/worktrees/l-20261109-p7m2c4'
-const long = (): RoutedTask => ({ ...daily(), id: 'l-20261109-p7m2c4', kind: 'long', telegram: { chatId: '7051661301' }, project: { root: '/home/ubuntu/proj', gitInitByPlugin: false }, worktree: { path: WT, baseRef: 'refs/magpie-tasks/l-20261109-p7m2c4/base', baseCommit: '4b825dc642cb6eb9a060e54bf8d69288fbee4904' } })
+const long = (): RoutedTask => ({ ...daily(), id: 'l-20261109-p7m2c4', kind: 'long', telegram: { chatId: '7051661301' }, project: { root: '/home/ubuntu/proj' }, worktree: { path: WT, baseRef: 'refs/magpie-tasks/l-20261109-p7m2c4/base', baseCommit: '4b825dc642cb6eb9a060e54bf8d69288fbee4904' } })
 
 // `rand` draws the model for work on a rule border; other decisions never call it.
 function decide(e: AgentSpawnInput, task: RoutedTask | null, j: JevJudgment, agents: Record<string, string> = {}, origin = 'engine', rand: () => number = () => { throw new Error('no draw expected') }): SpawnDecision {
@@ -209,7 +209,7 @@ test('a daily task\'s first agent is its executor; the routing note is the Teleg
   expect(d.action).toBe('route')
   expect(d.agent).toMatchObject({ role: 'executor', name: 'tg-7051661301-878', worktree: null, cwd: '/home/ubuntu' })
   expect(d.rewrite.cwd).toBe(undefined)
-  expect(d.rewrite.prompt.includes('mcp__magpie-tasks__open_worktree')).toBe(true)
+  expect(d.rewrite.prompt.includes('mcp__magpie-tasks__open_project')).toBe(true)
   const c = judged(jevSpawnScheduler).confidence.toFixed(2)
   expect(d.notice).toBe(`模型：Opus 5.5 · high · 规则 code-change（Jev 置信度 ${c}）`)
   const sub = routed(decide(spawn(`${HEADER}\n${WORKER_BRIEFS.telegram}`), daily(), { ...judged(jevSpawnScheduler), provider: 'substitute', substituteReason: 'key file missing' }))

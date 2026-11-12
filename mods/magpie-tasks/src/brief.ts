@@ -105,39 +105,52 @@ const STATUS_RULES = [
   '- Use `状态：进行中` only while an agent or command you started in the background is still running and the answer depends on its result: its completion notice resumes you, and you finish the task then. Waiting for your own background work is not 受阻.',
 ]
 
-// What the plugin appends to a brief it routes, by the agent's role. `cwd` is the worktree the agent
-// runs in, or null when it has none yet (a daily executor before open_worktree, a check of an answer).
+// What the plugin appends to a brief it routes, by the agent's role. `cwd` is the directory the
+// agent works in, or null when it has none yet (a daily executor before open_project, a check of an
+// answer); `direct` says that `cwd` is the project directory of a task that changes it in place, and
+// whether that is a Git repository.
 export const TASK_RULES_LINE = '[magpie-tasks task-rules]'
 
-function taskRules(m: MarkerInfo, a: { cwd: string | null; daily: boolean }): string[] {
+type Placing = { cwd: string | null; daily: boolean; direct: { git: boolean } | null }
+
+function taskRules(m: MarkerInfo, a: Placing): string[] {
   // The first line opens the block briefForJev cuts off: Jev judges the brief as the delegator wrote it.
   const out = [`${TASK_RULES_LINE} Task rules from magpie-tasks (task ${m.taskId}):`]
   const noRecords = '- Do not edit `CONTEXT.md` or `.planning/findings.md`; put findings, decisions and their evidence into your report.'
-  const noGit = '- Do not commit, push, create branches, stash or reset; the changes are integrated by the plugin or the architect.'
+  const noGit = '- Do not commit, push, create branches, stash or reset; you only check.'
+  const tellLater = 'The person is told nothing of the acceptance check; a `[magpie-tasks note]` line after the next message you receive says what became of your result.'
+  const inWorktree = 'Changes you make in the worktree reach the main directory only when the plugin applies them after your turn ends, after an acceptance check when the result warrants one. ' + tellLater + ' So changes made in this turn cannot be committed yet: say so in your report, and commit and push them when the person asks again.'
+  const gitWhenAsked = a.direct !== null
+    ? `- Commit and push only when the person asks for it, in the project directory. Your changes are there as soon as you make them; an acceptance check, when the result warrants one, comes after your turn. ${tellLater} Create branches, stash or reset only when the person asks.`
+    : a.cwd !== null
+      ? `- Commit and push when the person asks for it, in the project main directory and never in the task worktree: the worktree's commits are the plugin's snapshots and carry the person's uncommitted files. ${inWorktree} Create branches, stash or reset only when the person asks.`
+      : `- Commit and push only when the person asks for it, in the project main directory. If open_project gave you a worktree, never commit there: its commits are the plugin's snapshots and carry the person's uncommitted files. ${inWorktree} Create branches, stash or reset only when the person asks.`
   if (m.role === 'assessment') {
     out.push('- Do not do the task and do not change any file; your answer is the recommendation the person confirms.')
     return out
   }
   if (m.role === 'acceptance' || m.role === 'diagnosis') {
     out.push('- Do not edit files; you check and report. Run commands only to inspect or verify.')
-    if (a.cwd !== null) out.push(`- The task worktree is \`${a.cwd}\` (your working directory); run the checks there.`)
+    if (a.cwd !== null) out.push(a.direct !== null ? `- The task changed the project directory \`${a.cwd}\` in place (your working directory); run the checks there.` : `- The task worktree is \`${a.cwd}\` (your working directory); run the checks there.`)
     out.push(noGit)
     return out
   }
-  if (a.cwd !== null) {
+  if (a.cwd !== null && a.direct !== null) {
+    out.push(`- Work in the project directory \`${a.cwd}\` itself: change files there and \`cd\` there before Bash commands that touch the project. Writes to any other path inside a Git repository are refused.`)
+    if (!a.direct.git) out.push('- It is not a Git repository, so the plugin keeps no diff: name every file you change in your report.')
+  } else if (a.cwd !== null) {
     out.push(`- Work only in the task worktree \`${a.cwd}\`: change files there and \`cd\` there before Bash commands that touch the project. Writes to any other path inside a Git repository are refused.`)
     out.push('- Files Git ignores (node_modules, build output) are not in the worktree; install dependencies there when the work needs them.')
   } else if (a.daily) {
-    out.push('- If the task changes a project, first call `mcp__magpie-tasks__open_worktree` with `project` set to the project\'s absolute path, then change files only in the worktree it returns (`cd` there before Bash commands). A task that changes no project needs no worktree.')
-    out.push('- If the tool says the directory is not a Git repository, ask the person whether to create one and end the turn with `状态：需要用户决定`; once they agree, call it again with `init_git: true`.')
+    out.push('- If the task changes a project, first call `mcp__magpie-tasks__open_project` with `project` set to the project\'s absolute path, then change files only in the directory it returns (`cd` there before Bash commands): the project directory itself while no other task changes that project in place, or a Git worktree of it when one does. A task that changes no project needs no call.')
   }
-  out.push(noGit, noRecords, ...STATUS_RULES)
+  out.push(gitWhenAsked, noRecords, ...STATUS_RULES)
   return out
 }
 
 // The brief a routed subagent runs with: the marker as its first line, the brief as given (a marker
 // already at its start is replaced), then the task rules.
-export function withRouting(prompt: string, m: MarkerInfo, a: { cwd: string | null; daily: boolean }): string {
+export function withRouting(prompt: string, m: MarkerInfo, a: Placing): string {
   let body = prompt.trimStart()
   if (MARKER.test(body)) body = body.slice(body.indexOf('\n') === -1 ? body.length : body.indexOf('\n') + 1).trimStart()
   return `${marker(m)}\n\n${body.trimEnd()}\n\n${taskRules(m, a).join('\n')}`
@@ -246,7 +259,7 @@ function verificationBlock(executor: AgentRecord): string {
 
 // The acceptance brief: one independent check of a daily task's result (plan section 9.11).
 // `change` is null for a task that changed no project files.
-export function acceptanceBrief(task: TaskRecord, executor: AgentRecord, change: { patchPath: string; diffStat: string } | null): string {
+export function acceptanceBrief(task: TaskRecord, executor: AgentRecord, change: { patchPath: string | null; diffStat: string } | null): string {
   const lines = [
     `You are the acceptance reviewer for a daily task (${task.title}). Check the executor's result once, independently, against the person's request. Do not fix anything.`,
     '',
@@ -260,13 +273,18 @@ export function acceptanceBrief(task: TaskRecord, executor: AgentRecord, change:
     '',
   ]
   if (change !== null) {
-    if (task.worktree === null) throw new Error(`acceptanceBrief: task ${task.id} has a change but no worktree`)
-    lines.push(
-      `The change is in the task worktree \`${task.worktree.path}\`, your working directory. Its diff against the task's base:`,
-      change.diffStat.trimEnd(),
-      `The full patch is \`${change.patchPath}\`.`,
-      'Rerun the reported verification commands in the worktree, check that the result does what the request asks, and check that the change stays within what the request asks for.',
-    )
+    const direct = task.direct ?? null
+    if (direct === null && task.worktree === null) throw new Error(`acceptanceBrief: task ${task.id} has a change but no working directory`)
+    if (direct !== null) {
+      lines.push(
+        `The executor changed the project directory \`${direct.dir}\` in place; it is your working directory. ${change.patchPath === null ? 'The change:' : 'Its diff against the task\'s base, taken when the task started or last recorded a result (edits the person made there since show in it too):'}`,
+        change.diffStat.trimEnd(),
+      )
+    } else {
+      lines.push(`The change is in the task worktree \`${task.worktree!.path}\`, your working directory. Its diff against the task's base:`, change.diffStat.trimEnd())
+    }
+    if (change.patchPath !== null) lines.push(`The full patch is \`${change.patchPath}\`.`)
+    lines.push('Rerun the reported verification commands there, check that the result does what the request asks, and check that the change stays within what the request asks for.')
   } else {
     lines.push(
       'There is no change to integrate: the task changed no project files.',
@@ -287,9 +305,10 @@ export function diagnosisBrief(task: TaskRecord, executor: AgentRecord, blocker:
   const reports = executor.reports.length === 0
     ? ['(none)']
     : executor.reports.map((r, i) => `Report ${i + 1} (${r.status}):\n${r.text}`)
-  const where = task.worktree === null
-    ? 'The task has no worktree: the executor changed no project files.'
-    : `The task worktree is \`${task.worktree.path}\`. Its diff against the task's base:\n${diffStat === null ? '(no change)' : diffStat.trimEnd()}`
+  const ws = task.worktree?.path ?? task.direct?.dir ?? null
+  const where = ws === null
+    ? 'The task has no working directory: the executor changed no project files.'
+    : `${task.worktree !== null ? 'The task worktree is' : 'The executor works directly in the project directory'} \`${ws}\`. Its change since the task's base:\n${diffStat === null ? '(no change)' : diffStat.trimEnd()}`
   return [
     `You are an independent diagnosis for a daily task (${task.title}) whose executor reports that it is blocked. Find out why, from the evidence; do not do the task yourself.`,
     '',
@@ -317,9 +336,11 @@ export function handoffBrief(task: TaskRecord, a: { reason: string; previous: Ag
   const reports = p.reports.length === 0
     ? ['(none)']
     : p.reports.map((r, i) => `Report ${i + 1} (${r.status}):\n${r.text}`)
-  const where = task.worktree === null
-    ? 'The task has no worktree yet.'
-    : `The task worktree \`${task.worktree.path}\` holds the previous agent's changes so far; continue there.`
+  const where = task.worktree !== null
+    ? `The task worktree \`${task.worktree.path}\` holds the previous agent's changes so far; continue there.`
+    : task.direct != null
+      ? `The previous agent worked directly in the project directory \`${task.direct.dir}\`; its changes so far are there. Continue there.`
+      : 'The task has no working directory yet.'
   return [
     `You take over a daily task (${task.title}) from agent ${p.name ?? p.agentId} (${p.model} at effort ${p.effort}): ${a.reason}`,
     '',
@@ -385,6 +406,46 @@ function verification(lines: string[], statusIndex: number): string[] {
     return out
   }
   return []
+}
+
+// ---- what the executor is told of its last result ---------------------------------------------
+
+// The person is told nothing of a daily task's acceptance or integration (plan section 9.11); the
+// executor learns of them from one line added after the next message that reaches it.
+export const OUTCOME_NOTE = '[magpie-tasks note]'
+
+// What became of the executor's last result, when it has not been told of that yet: `key` names the
+// outcome, `text` is the line. Null when there is nothing to tell: no result, a failed acceptance
+// the executor was woken with, or an answer that needed no check and left no change.
+export function outcomeNote(task: Pick<TaskRecord, 'deliverables' | 'decisions' | 'project'>): { key: string; text: string } | null {
+  const d = task.deliverables[task.deliverables.length - 1]
+  if (d === undefined) return null
+  const root = task.project?.root ?? 'the project main directory'
+  const a = d.acceptance
+  const i = d.integration === undefined || d.integration.status === 'empty' ? undefined : d.integration
+  const how = a === undefined ? 'needed no acceptance check' : a.pass ? 'passed the acceptance check' : i?.status === 'in-place' ? 'failed the acceptance check, and your fix was not checked again' : 'failed the acceptance check, and the person approved your fix'
+  let out: { key: string; text: string } | null = null
+  if (i?.status === 'in-place') {
+    out = { key: 'in-place', text: `Your last result ${how}; its change stays in ${root}, where you made it: ${i.files.join(', ')}. Commit or push there only when the person asks.` }
+  } else if (i?.status === 'applied') {
+    out = { key: 'applied', text: `Your last result ${how}, and its change was applied to ${root}: ${i.files.join(', ')}. Commit or push there only when the person asks.` }
+  } else if (i?.status === 'conflict') {
+    out = { key: 'conflict', text: `Your last result ${how}, but its change could not be applied to ${root}: it conflicts with the project's current files (${i.files.join(', ')}). The person has been asked what to do; the change stays in the task worktree.` }
+  } else if (a?.pass === true) {
+    out = { key: 'passed', text: 'Your last result passed the acceptance check. It left no change to apply.' }
+  } else if (a?.fixed?.decisionId !== undefined) {
+    const q = task.decisions[a.fixed.decisionId]
+    if (q?.resolvedAt === undefined) out = { key: 'fix-asked', text: `Your fixed change is not applied yet: the person has been asked whether to integrate it into ${root}. It stays in the task worktree until they answer.` }
+    else if (q.answer?.startsWith('reject') === true) out = { key: 'fix-declined', text: 'The person declined to integrate your fixed change; it stays in the task worktree.' }
+  }
+  if (out === null || out.key === d.told) return null
+  return { key: out.key, text: `${OUTCOME_NOTE} ${out.text} This line is from the task plugin, not from the person, and needs no reply.` }
+}
+
+// A message without the note withOutcome added to it.
+export function stripOutcomeNote(text: string): string {
+  const at = text.lastIndexOf(`\n\n${OUTCOME_NOTE} `)
+  return at < 0 || text.indexOf('\n', at + 2) >= 0 ? text : text.slice(0, at)
 }
 
 export function parseVerdict(answer: string): { pass: boolean; notes: string } | null {

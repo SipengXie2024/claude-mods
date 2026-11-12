@@ -19,6 +19,14 @@ function unnested(argv: string[]): string[] {
   return ['env', ...NESTED_MARKERS.flatMap(name => ['-u', name]), ...argv]
 }
 
+// What every architect session starts or resumes with. Claude Code asks for a one-line progress
+// summary of each background subagent about every 30 seconds, each request carrying the subagent's
+// whole context; under claude-magpie each starts a `claude -p` helper (about 270 MB) that lingers for
+// about 200 seconds, some 1.5–1.8 GB per running subagent (measured 2026-11-11). Nobody reads those
+// summaries here: the architect reads its subagents' reports. Claude Code hands this variable on to a
+// background session it starts.
+export const ARCHITECT_ENV: Readonly<Record<string, string>> = { CLAUDE_CODE_DISABLE_AGENT_PROGRESS_SUMMARIES: '1' }
+
 // `model` is the ID sent to the engine (requestId of the chosen model). A background session writes
 // no debug log unless asked, so the architect gets one per task (debugFile); `claude --bg --resume`
 // keeps it as a saved option, and the context-memory archive check (scanDebugLog) reads it.
@@ -86,7 +94,7 @@ export async function launchArchitect(ctx: Ctx, a: { task: TaskRecord; model: st
   const debug = debugFile(opts, a.task.id)
   const made = await io.run(['mkdir', '-p', debug.slice(0, debug.lastIndexOf('/'))])
   if (made.exitCode !== 0) throw new Error(`mkdir for ${debug} exited ${made.exitCode}: ${made.stderr.trim()}`)
-  const r = await io.run(launchArgv(opts, { model: requestId(a.model, ctx.catalog), message: a.message, pluginDir, debugFile: debug }), { cwd: a.cwd, timeoutMs: RUN_MS })
+  const r = await io.run(launchArgv(opts, { model: requestId(a.model, ctx.catalog), message: a.message, pluginDir, debugFile: debug }), { cwd: a.cwd, env: { ...ARCHITECT_ENV }, timeoutMs: RUN_MS })
   const shortId = parseBackgrounded(r.stdout)
   if (r.exitCode !== 0 || shortId === null) {
     const reason = firstLine(r.stderr) || firstLine(r.stdout) || `exit code ${r.exitCode}`
@@ -129,7 +137,7 @@ export function resumedCopy(stdout: string, sessionId: string): string | null {
 // short ID on the `backgrounded ·` line; any other printed ID is a copy (resumedCopy), which is
 // stopped, and the call throws.
 export async function resumeSession(ctx: Ctx, sessionId: string, message: string, cwd: string): Promise<void> {
-  const r = await ctx.io.run(unnested([ctx.opts.claudeBin, '--bg', '--resume', sessionId, message]), { cwd, timeoutMs: RUN_MS })
+  const r = await ctx.io.run(unnested([ctx.opts.claudeBin, '--bg', '--resume', sessionId, message]), { cwd, env: { ...ARCHITECT_ENV }, timeoutMs: RUN_MS })
   const copy = resumedCopy(r.stdout, sessionId)
   if (copy !== null) {
     await stopSession(ctx, copy)

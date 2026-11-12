@@ -100,7 +100,7 @@ test('a follow-up tg-router sends a worker is recorded as the person\'s words, w
 function long(id: string, over: Partial<TaskRecord> = {}): TaskRecord {
   return {
     schema: 1, id, kind: 'long', title: '整理 greet', state: 'running', pausedByUser: false, createdAt: NOW - 3600_000, updatedAt: NOW - 25 * 60_000,
-    request: '检查 greet.py', followUps: [], project: { root: '/tmp/mt/proj', gitInitByPlugin: false },
+    request: '检查 greet.py', followUps: [], project: { root: '/tmp/mt/proj' },
     worktree: { path: `/tmp/mt/wt/${id}`, baseRef: `refs/magpie-tasks/${id}/base`, baseCommit: '0'.repeat(40) }, extraWorktrees: {},
     owner: { kind: 'session', sessionId: '455258f7-73cb-4580-a3fb-e7a7cece7995', jobShortId: '455258f7', previousSessionIds: [], model: 'codex/gpt-6.1-sol', contextMemoryFingerprint: 'c0ffee00c0ffee00' },
     architect: { model: 'codex/gpt-6.1-sol', recommendation: { model: 'codex/gpt-6.1-sol', reason: 'r', limits: 'l', judgment: null }, userChoice: 'Sol 6.1（推荐）', confirmedAt: NOW - 3600_000, source: 'new' },
@@ -133,7 +133,7 @@ test('a promoted task\'s brief carries the request, follow-ups, reports, checks 
     } },
     decisions: { 'q-20261109-aaaaaa': { id: 'q-20261109-aaaaaa', kind: 'fix-confirm', createdAt: NOW, question: '要整合修复后的改动吗？', options: ['整合', '不整合'], data: {} } },
   })
-  const brief = promotionBrief(t, { worker: 'tg-7051661301-953', confirmation: '好，用 Opus 当架构师', worktree: '/tmp/mt/wt/d-20261101-aaaaaa' })
+  const brief = promotionBrief(t, { worker: 'tg-7051661301-953', confirmation: '好，用 Opus 当架构师' })
   expect(brief).toContain('The person confirmed the architect with these words: "好，用 Opus 当架构师"')
   expect(brief).toContain('在 ~/repo 里把 greet.py 的 hello 改成 hi，并运行 python3 greet.py 验证')
   expect(brief).toContain('- (telegram) 顺便加个 main 函数')

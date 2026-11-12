@@ -7,8 +7,7 @@
 // workers, recorded as the person's feedback.
 import type { Next, PromptSubmitInput, SessionSendInput, SessionSendResult } from 'claude-code'
 import { parseRating } from './calibration'
-import { applyDailyDecision, askDecision } from './daily'
-import { createWorktree } from './git'
+import { applyDailyDecision, askDecision, openDailyDecision, tell, withOutcome } from './daily'
 import { CONFLICT_CHOICE, choose, MODEL_OPINION_QUESTION, predicate, recommendArchitect, UNSUITABLE_QUESTION } from './judge'
 import { launchArchitect, listAgents, resumeSession } from './launch'
 import { displayName, sameModel } from './model'
@@ -18,19 +17,25 @@ import { clip, defaultChat, parseChannelTag, send } from './telegram'
 import type { RouterToolName } from './tools'
 import type { Decision, JevJudgment, TaskRecord, TelegramIndex } from './types'
 import type { Rules } from './rules'
+import { workspaceOf } from './workspace'
 
 type LongAnswer = 'separate' | 'wait' | 'approve' | 'reject' | 'unclear'
 type Tg = { chatId: string; messageId: number }
 type Recommendation = { model: string; reason: string; limits: string; judgment: JevJudgment | null }
 
-// tg-router's follow-up format (mods/tg-router/src/prompts.ts `followUp`).
-const FOLLOW_UP = /^Telegram 追问（message_id=(\d+)）：\n([\s\S]*)$/
+// tg-router's follow-up format (mods/tg-router/src/prompts.ts `followUp`): Telegram or terminal.
+const FOLLOW_UP = /^(?:Telegram|终端) 追问（message_id=(\d+)）：\n([\s\S]*)$/
+// The reason a follow-up's send is refused with when magpie-tasks took the words as the person's answer
+// to the task's open decision; tg-router (src/magpie.ts DECISION_HANDLED) reads it as handled, not lost.
+export const DECISION_HANDLED = 'magpie-tasks answered a decision: '
 // The context entry tg-router adds when it hands one of its own task's replies on: the worker name.
 const WORKER_HINT = /^\[tg-router worker=([^\]\s]+)\]$/
 // The context entry tg-router adds beside a message typed in this terminal: the message_id it gave it.
 const TERMINAL_HINT = /^\[tg-router terminal message_id=(\d+)\]$/
 const TERMINAL_CHAT = 'tui'
 const OPEN: readonly TaskRecord['state'][] = ['starting', 'running', 'paused', 'waiting-user', 'error']
+// States of a daily task that the person's words to its agent set running again.
+const RESUMED: readonly TaskRecord['state'][] = ['paused', 'waiting-user', 'done']
 const REMEMBERED = 200
 
 const APPROVE = {
@@ -166,7 +171,7 @@ ${list}
 }
 
 // The hand-over an architect starts from when a daily task becomes a long one (section 9.12 step 3).
-export function promotionBrief(task: TaskRecord, a: { worker: string; confirmation: string; worktree: string | null }): string {
+export function promotionBrief(task: TaskRecord, a: { worker: string; confirmation: string }): string {
   const lines = [
     `This long task was promoted from daily Telegram task ${task.id} (worker ${a.worker}). The person confirmed the architect with these words: "${a.confirmation}"`,
     '',
@@ -201,9 +206,11 @@ export function promotionBrief(task: TaskRecord, a: { worker: string; confirmati
       for (const h of b.history) lines.push(`  ${h.step} (${h.agentId}): ${h.note}`)
     }
   }
-  lines.push('', a.worktree === null
-    ? 'The task has no worktree yet: no project was named. Once the person names the project, its worktree is yours to arrange.'
-    : `Task worktree: ${a.worktree}`)
+  lines.push('', task.direct != null
+    ? `The task works directly in the project directory ${task.direct.dir}; its subagents keep working there.`
+    : task.worktree !== null
+      ? `Task worktree: ${task.worktree.path}`
+      : 'The task has no project yet: no project was named. Once the person names the project, delegate the work there; magpie-tasks gives the task its working directory.')
   const decisions = Object.values(task.decisions)
   const settled = decisions.filter(d => d.resolvedAt !== undefined)
   const open = decisions.filter(d => d.resolvedAt === undefined)
@@ -255,14 +262,20 @@ async function replyNote(ctx: Ctx, task: TaskRecord, tg: Tg, text: string, entry
   return messageId
 }
 
-// The person's words to a task: a follow-up, which also sets a task stopped on an error running again.
-async function recordFollowUp(ctx: Ctx, taskId: string, text: string, judge: boolean): Promise<void> {
+// The person's words to a task: a follow-up. Words that go on to a daily task's agent set the task
+// running again (from an error, a pause, a wait or done), so the reclaim sweep leaves its worktree
+// alone while the agent works; an answer to a decision leaves the state to the decision.
+async function recordFollowUp(ctx: Ctx, taskId: string, text: string, judge: boolean, resumes = true): Promise<void> {
   const at = await ctx.io.now()
   const before = await taskOrThrow(ctx, taskId)
+  const wakes = resumes && (before.state === 'error' || (before.kind === 'daily' && RESUMED.includes(before.state)))
   await ctx.reg.update(taskId, t => {
     t.followUps.push({ at, source: 'telegram', text })
-    if (t.state === 'error') t.state = 'running'
-  }, before.state === 'error' ? { type: 'state', from: 'error', to: 'running', source: 'telegram' } : { type: 'follow-up', source: 'telegram' })
+    if (wakes) {
+      t.state = 'running'
+      t.pausedByUser = false
+    }
+  }, wakes ? { type: 'state', from: before.state, to: 'running', source: 'telegram' } : { type: 'follow-up', source: 'telegram' })
   if (judge) {
     // Runs after the message has gone on, outside any hook's error handling: whatever the report of
     // a failure throws itself is left in the transcript and the debug log.
@@ -360,8 +373,9 @@ export async function onRouterPrompt(ctx: Ctx, e: PromptSubmitInput, next: Next<
       if (task.owner.kind === 'session') return longDecisionReply(ctx, task, route.decisionId, tag, tg)
       const decision = task.decisions[route.decisionId]
       if (decision === undefined) throw new Error(`task ${task.id} has no decision ${route.decisionId}`)
-      await recordFollowUp(ctx, task.id, tag.body, false)
-      const answer = await applyDailyDecision(ctx, (await taskOrThrow(ctx, task.id)), decision, tag.body)
+      await recordFollowUp(ctx, task.id, tag.body, false, false)
+      const answer = await applyDailyDecision(ctx, (await taskOrThrow(ctx, task.id)), decision, tag.body, 'ask')
+      if (answer === null) throw new Error(`decision ${decision.id} of task ${task.id} gave no answer to show`)
       await replyNote(ctx, task, tg, answer, { taskId: task.id, kind: 'decision', decisionId: decision.id })
       return { drop: `magpie-tasks: 已处理任务「${task.title}」的决定：${firstLine(answer)}` }
     }
@@ -393,16 +407,20 @@ async function longDecisionReply(ctx: Ctx, task: TaskRecord, decisionId: string,
   return { drop: r === 'failed' ? `magpie-tasks: 没能把决定的回答交给长期任务「${task.title}」的架构师，已报告` : `magpie-tasks: 已把决定的回答（${answer}）交给长期任务「${task.title}」的架构师` }
 }
 
-// A reply to a daily task's message from magpie-tasks: to the task's current executor, in
-// tg-router's follow-up format.
+// A reply to a daily task's message from magpie-tasks: an answer to the task's open decision when it
+// reads as one, else to the task's current executor, in tg-router's follow-up format.
 async function executorReply(ctx: Ctx, task: TaskRecord, tag: { body: string; imagePath?: string; messageId: number }, tg: Tg): Promise<PromptResult> {
+  const decided = await decisionByFollowUp(ctx, task, tag.body, tag.messageId)
+  if (decided !== null) return { drop: `magpie-tasks: 已把这条消息当作任务「${task.title}」待决定问题的回答：${firstLine(decided)}` }
   const index = await ctx.reg.readIndex()
   const worker = Object.values(index.workers).find(w => w.taskId === task.id)
   const agentId = worker?.ownerAgentId ?? (task.owner.kind === 'agent' ? task.owner.agentId : undefined)
   if (agentId === undefined) throw new Error(`daily task ${task.id} has no executor`)
   await recordFollowUp(ctx, task.id, tag.body, true)
-  const r = await ctx.host.session.send({ to: { agentId }, text: `Telegram 追问（message_id=${tag.messageId}）：\n${channelText(tag)}` })
+  const out = await withOutcome(ctx, task.id, `Telegram 追问（message_id=${tag.messageId}）：\n${channelText(tag)}${worktreeGoneNote(task) ?? ''}`)
+  const r = await ctx.host.session.send({ to: { agentId }, text: out.text })
   if (r.isDelivered) {
+    await out.delivered()
     await ctx.reg.updateIndex(x => { x.messages[`${tg.chatId}:${tg.messageId}`] = { taskId: task.id, kind: 'magpie' } })
     await ctx.reg.log(task.id, { type: 'relay', stage: 'follow-up', agentId, messageId: tag.messageId })
     return { drop: `magpie-tasks: 已转给任务「${task.title}」的执行者` }
@@ -410,6 +428,29 @@ async function executorReply(ctx: Ctx, task: TaskRecord, tag: { body: string; im
   await ctx.reg.log(task.id, { type: 'error', during: 'follow-up', agentId, error: r.reason })
   await send(ctx.io, ctx.opts, tg.chatId, `任务「${task.title}」的执行者已不在（${r.reason}），可能是 Router 重启过。回复这个任务原来的请求消息，新的执行者会接手。`, tg.messageId, true)
   return { drop: `magpie-tasks: 任务「${task.title}」的执行者已不在，已告诉用户` }
+}
+
+// The note a daily task's agent reads under the person's words once the task's worktree was removed
+// after the task finished: a change to the project needs a fresh worktree first.
+export function worktreeGoneNote(task: TaskRecord): string | null {
+  if (task.kind !== 'daily' || task.project === null || task.worktree !== null || task.direct != null) return null
+  return `\n\n[magpie-tasks] This task's worktree was removed when the task finished. If this message asks for changes to ${task.project.root}, call mcp__magpie-tasks__open_project again first; it gives you a working directory of the project as it is now.`
+}
+
+// The person's words reached a daily task outside a reply to a decision message: a terminal
+// follow-up, a Telegram message forwarded to the task, or a reply to another of its messages. When the
+// task has an open decision and the words answer it, the decision is carried out, the words recorded
+// and the person told under their message. Answers what the person was told, or null when the words
+// do not answer the decision and go on to the task's agent.
+async function decisionByFollowUp(ctx: Ctx, task: TaskRecord, body: string, messageId: number): Promise<string | null> {
+  if (task.kind !== 'daily') return null
+  const open = openDailyDecision(task)
+  if (open === undefined) return null
+  const answer = await applyDailyDecision(ctx, task, open, body, 'pass')
+  if (answer === null) return null
+  await recordFollowUp(ctx, task.id, body, false, false)
+  await tell(ctx, task, answer, { kind: 'decision', notify: false, replyTo: messageId, decisionId: open.id })
+  return answer
 }
 
 // ---- hand-over to an architect ---------------------------------------------------------------
@@ -482,7 +523,8 @@ async function forwardLong(ctx: Ctx, args: Record<string, unknown>): Promise<str
   const messageId = str(args, 'message_id')
   const { task } = await namedTask(ctx, str(args, 'task'))
   if (task.kind !== 'long' || task.owner.kind !== 'session') throw new Error(`task ${task.id} is not a long task with an architect session`)
-  if (task.state === 'done' || task.state === 'abandoned') throw new Error(`long task ${task.id} is ${task.state}`)
+  // A done long task reopens with the message (its architect session resumes); an abandoned one does not.
+  if (task.state === 'abandoned') throw new Error(`long task ${task.id} was abandoned`)
   const m = received.get(`${chatId}:${messageId}`)
   if (m === undefined) {
     throw new Error(chatId === TERMINAL_CHAT
@@ -534,12 +576,6 @@ async function promoteTool(ctx: Ctx, args: Record<string, unknown>): Promise<str
   if (task.state === 'abandoned') throw new Error(`task ${task.id} was abandoned`)
   if (worker === null) throw new Error(`task ${task.id} has no worker name`)
 
-  let worktree = task.worktree
-  if (worktree === null && task.project !== null) {
-    const path = `${opts.worktreeDir}/${task.id}`
-    const wt = await createWorktree(io, task.project.root, path, `refs/magpie-tasks/${task.id}/base`, task.project.root)
-    worktree = { path, baseRef: wt.baseRef, baseCommit: wt.baseCommit }
-  }
   const recommendation = recommendations.get(task.id) ?? await recommendArchitect(judgeCtxOf(ctx), recommendationInput(task))
   const now = await io.now()
   // The state stays 'running' while the architect starts: a 'starting' record older than ten minutes
@@ -548,10 +584,10 @@ async function promoteTool(ctx: Ctx, args: Record<string, unknown>): Promise<str
     t.kind = 'long'
     t.state = 'running'
     t.pausedByUser = false
-    t.worktree = worktree
     t.architect = { model: candidate.model, recommendation, userChoice: confirmation, confirmedAt: now, source: 'promoted' }
-  }, { type: 'promote', worker, model: candidate.model, confirmation, worktree: worktree?.path ?? null })
-  const message = architectFirstMessage(promotionBrief(promoted, { worker, confirmation, worktree: worktree?.path ?? null }), task.id, worktree?.path ?? 'none')
+  }, { type: 'promote', worker, model: candidate.model, confirmation, workspace: workspaceOf(task) })
+  const workspace = task.direct != null ? { mode: 'direct' as const, path: task.direct.dir } : task.worktree !== null ? { mode: 'worktree' as const, path: task.worktree.path } : null
+  const message = architectFirstMessage(promotionBrief(promoted, { worker, confirmation }), task.id, workspace)
   const cwd = task.project?.root ?? await home(ctx)
   let shortId: string
   try {
@@ -594,17 +630,29 @@ export async function routerTool(ctx: Ctx, name: RouterToolName, args: Record<st
 
 // ---- follow-ups tg-router sends --------------------------------------------------------------
 
-// Watches tg-router's follow-ups to its workers (delivery unchanged) and records them on the task as
-// the person's words, judged as feedback.
+// A message the Router or tg-router sends to a daily task's executor carries the note on what became
+// of the executor's last result (withOutcome). A tg-router follow-up that answers the task's open
+// decision is carried out here and the send refused with DECISION_HANDLED; any other follow-up goes on
+// (with a note when the task's worktree was removed) and is recorded as the person's words, judged as
+// feedback.
 export async function onSessionSend(ctx: Ctx, e: SessionSendInput, next: Next<'session.send'>): Promise<SessionSendResult> {
-  const r = await next(e)
-  if (!r.isDelivered || e.origin.kind !== 'plugin' || e.origin.name !== 'tg-router') return r
-  const f = followUpBody(e.text)
-  if (f === null) return r
+  const fromTgRouter = e.origin.kind === 'plugin' && e.origin.name === 'tg-router'
+  const fromRouter = e.origin.kind === 'model' && e.agentId === undefined
+  if (!fromTgRouter && !fromRouter) return next(e)
   const index = await ctx.reg.readIndex()
   const worker = index.workers[e.to] !== undefined ? e.to : index.agents[e.to]
   const taskId = worker === undefined ? undefined : index.workers[worker]?.taskId
-  if (taskId === undefined) return r
-  await recordFollowUp(ctx, taskId, f.body, true)
+  if (taskId === undefined) return next(e)
+  const f = fromTgRouter ? followUpBody(e.text) : null
+  const task = await taskOrThrow(ctx, taskId)
+  if (f !== null) {
+    const decided = await decisionByFollowUp(ctx, task, f.body, f.messageId)
+    if (decided !== null) return { isDelivered: false, reason: `${DECISION_HANDLED}${decided}` }
+  }
+  const out = await withOutcome(ctx, taskId, `${e.text}${f === null ? '' : worktreeGoneNote(task) ?? ''}`)
+  const r = await next(out.text === e.text ? e : { ...e, text: out.text })
+  if (!r.isDelivered) return r
+  await out.delivered()
+  if (f !== null) await recordFollowUp(ctx, taskId, f.body, true)
   return r
 }

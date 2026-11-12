@@ -64,12 +64,12 @@ test('a subagent write is judged at the real path, through links and missing dir
   const place = placeWith(p => io.realPath(p), outside)
   const repoOf = repoOfWith(io)
   const sub = (e: { tool: string; [k: string]: unknown }, worktree: string | null) => subagentWriteDeny(e, { worktree, place, repoOf })
-  // No worktree yet: a write into the project asks for open_worktree, naming the project.
+  // No working directory yet: a write into the project asks for open_project, naming the project.
   const before = await sub({ tool: 'Write', file_path: join(project, 'src', 'b.ts') }, null)
-  expect(before).toContain('mcp__magpie-tasks__open_worktree')
+  expect(before).toContain('mcp__magpie-tasks__open_project')
   expect(before).toContain(`"project": "${project}"`)
   // The same through a link from outside every repository.
-  expect(await sub({ tool: 'Edit', file_path: join(outside, 'proj-link', 'src', 'a.ts') }, null)).toContain('open_worktree')
+  expect(await sub({ tool: 'Edit', file_path: join(outside, 'proj-link', 'src', 'a.ts') }, null)).toContain('open_project')
   expect(await sub({ tool: 'Write', file_path: join(outside, 'notes.txt') }, null)).toBeNull()
   // With a worktree: inside it passes (new directories too), the project is outside it, and the
   // architect's records are refused even in the worktree.

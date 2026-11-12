@@ -8,6 +8,13 @@
 /** The Magpie gateway: a session that talks to it was started by claude-magpie. */
 export const MAGPIE_GATEWAY = 'http://127.0.0.1:3425'
 
+/**
+ * The reason magpie-tasks refuses a follow-up's send with when it took the person's words as their
+ * answer to the task's open question (its src/router.ts `DECISION_HANDLED`): the words were handled
+ * and the person told, nothing went to the worker. What follows the prefix is what they were told.
+ */
+export const DECISION_HANDLED = 'magpie-tasks answered a decision: '
+
 export type MessageKind = 'long' | 'magpie' | 'rating' | 'decision'
 
 /** The index as magpie-tasks writes it (its src/types.ts `TelegramIndex`). */

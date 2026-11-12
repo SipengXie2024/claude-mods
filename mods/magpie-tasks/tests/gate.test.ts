@@ -105,16 +105,20 @@ test('the html-plan pack and publish-plan commands pass as single commands', () 
   expect(isPlanCommand('~/sipeng/plans/publish-plan --remove magpie > log', ROOT, HOME)).toBe(false)
 })
 
-test('architectDeny lets the plan commands and read-only Bash run and refuses the rest with the role', async () => {
+test('architectDeny lets the plan commands, read-only Bash and git add/commit/push in the main directory run and refuses the rest with the role', async () => {
   expect(await deny({ tool: 'Bash', command: '~/sipeng/plans/publish-plan --remove magpie' })).toBeNull()
   expect(await deny({ tool: 'Bash', command: 'git log --oneline -3' })).toBeNull()
   const touch = await deny({ tool: 'Bash', command: 'touch x' })
   expect(touch).toContain('touch is not on the read-only list')
   expect(touch).toContain('Agent tool')
-  expect(await deny({ tool: 'Bash', command: 'git commit -am wip' })).toContain('git commit')
+  expect(await deny({ tool: 'Bash', command: 'git add -A && git commit -m "integrate scheduler" && git push origin master' })).toBeNull()
+  expect(await deny({ tool: 'Bash', command: `git -C ${WT} commit -am wip` })).toContain('git commit')
+  expect(await deny({ tool: 'Bash', command: 'git -c core.pager=sh push' })).toContain('git -c')
+  expect(await deny({ tool: 'Bash', command: 'git reset --hard' })).toContain('git reset')
+  expect(await deny({ tool: 'Bash', command: 'git commit -m x > log' })).toContain('this command has an output redirection')
 })
 
-test('a routed subagent writes inside its worktree, outside every repository, and nowhere else', async () => {
+test('a routed subagent writes inside its working directory, outside every repository, and nowhere else', async () => {
   // The two repositories of this layout: the project and the task worktree.
   const repoOf = async (p: string) => (p.startsWith(`${WT}/`) ? WT : p.startsWith(`${ROOT}/`) ? ROOT : null)
   const sub = (e: { tool: string; [k: string]: unknown }, worktree: string | null) => subagentWriteDeny(e, { worktree, place, repoOf })
@@ -125,8 +129,13 @@ test('a routed subagent writes inside its worktree, outside every repository, an
   expect(await sub({ tool: 'Edit', file_path: `${WT}/.planning/findings.md` }, WT)).toContain('architect writes')
   expect(await sub({ tool: 'NotebookEdit', notebook_path: `${ROOT}/n.ipynb` }, WT)).toContain('outside it')
   const before = await sub({ tool: 'Write', file_path: `${ROOT}/mods/jev/src/a.ts` }, null)
-  expect(before).toContain('mcp__magpie-tasks__open_worktree')
+  expect(before).toContain('mcp__magpie-tasks__open_project')
   expect(before).toContain(`"project": "${ROOT}"`)
   expect(await sub({ tool: 'Write', file_path: '/tmp/scratch.txt' }, null)).toBeNull()
   expect(await sub({ tool: 'Bash', command: `echo x > ${ROOT}/a` }, WT)).toBeNull()
+  // A task that changes the project in place writes in the project directory itself; the
+  // architect's records stay refused there.
+  expect(await sub({ tool: 'Edit', file_path: `${ROOT}/mods/jev/src/a.ts` }, ROOT)).toBeNull()
+  expect(await sub({ tool: 'Edit', file_path: `${WT}/mods/jev/src/a.ts` }, ROOT)).toContain('outside it')
+  expect(await sub({ tool: 'Write', file_path: `${ROOT}/CONTEXT.md` }, ROOT)).toContain('architect writes')
 })

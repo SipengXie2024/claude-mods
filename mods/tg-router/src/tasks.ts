@@ -23,6 +23,8 @@ export type Task = {
   /** request, ack, card, answers and follow-ups: a reply to any of them routes here */
   messageIds: number[]
   state: TaskState
+  /** how the worker's last run ended, once one has: a restart's notice about an answered run is wrong */
+  lastEnd?: 'answer' | 'aborted' | 'refusal' | 'error'
   createdAt: number
   lastAt: number
 }
@@ -132,6 +134,16 @@ export function setState(kv: Kv, name: string, state: TaskState, now: number): P
   return update(kv, (t) => {
     const task = taskOf(t, name)
     task.state = state
+    task.lastAt = now
+  })
+}
+
+/** The worker's run ended: the task is idle, and how the run ended is kept. */
+export function ended(kv: Kv, name: string, end: NonNullable<Task['lastEnd']>, now: number): Promise<void> {
+  return update(kv, (t) => {
+    const task = taskOf(t, name)
+    task.state = 'idle'
+    task.lastEnd = end
     task.lastAt = now
   })
 }

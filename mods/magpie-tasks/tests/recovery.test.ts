@@ -26,7 +26,7 @@ const FP = 'c0ffee00c0ffee00'
 function long(sessionId: string, state: TaskRecord['state'], over: Partial<TaskRecord> = {}): TaskRecord {
   return {
     schema: 1, id: 'l-20261109-a1b2c3', kind: 'long', title: '整理 greet', state, pausedByUser: false, createdAt: NOW - 3600_000, updatedAt: NOW - 60_000,
-    request: '检查 greet.py', followUps: [], project: { root: '/tmp/mt/proj', gitInitByPlugin: false },
+    request: '检查 greet.py', followUps: [], project: { root: '/tmp/mt/proj' },
     worktree: { path: '/tmp/mt/wt/l-20261109-a1b2c3', baseRef: 'refs/magpie-tasks/l-20261109-a1b2c3/base', baseCommit: '0'.repeat(40) }, extraWorktrees: {},
     owner: { kind: 'session', sessionId, jobShortId: sessionId.slice(0, 8), previousSessionIds: [], model: 'claude/claude-opus-5-5', contextMemoryFingerprint: FP },
     architect: { model: 'claude/claude-opus-5-5', recommendation: { model: 'claude/claude-opus-5-5', reason: 'r', limits: 'l', judgment: null }, userChoice: 'Opus 5.5（推荐）', confirmedAt: NOW - 3600_000, source: 'new' },

@@ -163,11 +163,12 @@ export function isReadOnlyBash(command: string): boolean {
   return readOnlyRefusal(command) === null
 }
 
-function readOnlyRefusal(command: string): string | null {
+function readOnlyRefusal(command: string, allow: (words: string[]) => boolean = () => false): string | null {
   const parsed = parseShell(command)
   if ('refused' in parsed) return parsed.refused
   if (parsed.commands.length === 0) return 'an empty command'
   for (const words of parsed.commands) {
+    if (allow(words)) continue
     const why = notReadOnly(words)
     if (why !== null) return why
   }
@@ -206,6 +207,15 @@ function filePath(e: ToolEvent): string | null {
   return typeof v === 'string' && v !== '' ? v : null
 }
 
+// `git add|commit|push …` with the subcommand right after `git`: the architect commits and pushes
+// in the project main directory, where it runs, when the person asks. No -C (a commit in the task
+// worktree would sit on the plugin's snapshot commits, which carry the person's uncommitted files)
+// and no -c (a config value such as core.pager runs a program).
+const ARCHITECT_GIT = new Set(['add', 'commit', 'push'])
+function isArchitectGit(words: string[]): boolean {
+  return words[0] === 'git' && words[1] !== undefined && ARCHITECT_GIT.has(words[1])
+}
+
 const ARCHITECT_ROLE = 'You are the architect of this long task: you discuss goals and design with the person, delegate implementation to subagents with the Agent tool (they work in the task worktree), and accept their results.'
 
 // The refusal for a tool call of the architect's main conversation, or null to let it run.
@@ -225,17 +235,17 @@ export async function architectDeny(e: ToolEvent, a: { projectRoot: string; home
     const root = await a.place(a.projectRoot)
     if (root === null) return `Bash: the project root ${a.projectRoot} could not be resolved.`
     if (isPlanCommand(command, root, a.home)) return null
-    const why = readOnlyRefusal(command)
+    const why = readOnlyRefusal(command, isArchitectGit)
     if (why === null) return null
-    return `${ARCHITECT_ROLE} The architect runs only read-only commands (ls, cat, head, tail, wc, rg, grep, find, stat, du, file, pwd, tree, jq, sed -n with a print script such as '1,40p', git status/diff/log/show/ls-files/rev-parse/blame/worktree list/branch --list, joined by &&, ||, ; or | and without redirection or substitution) and the html-plan pack and publish-plan commands; this command has ${why}. Delegate commands that change files or run builds and tests to a subagent with the Agent tool.`
+    return `${ARCHITECT_ROLE} The architect runs only read-only commands (ls, cat, head, tail, wc, rg, grep, find, stat, du, file, pwd, tree, jq, sed -n with a print script such as '1,40p', git status/diff/log/show/ls-files/rev-parse/blame/worktree list/branch --list, joined by &&, ||, ; or | and without redirection or substitution), git add/commit/push in the project main directory (without -C or -c) when the person asks, and the html-plan pack and publish-plan commands; this command has ${why}. Delegate commands that change files or run builds and tests to a subagent with the Agent tool.`
   }
   return null
 }
 
 // The refusal for a routed subagent's write, or null. A write into a Git repository must land in the
-// agent's worktree (`worktree` null: the agent has none yet); writes outside every repository
-// (/tmp and the like) pass; CONTEXT.md and .planning/findings.md are the architect's even inside
-// the worktree.
+// agent's working directory (`worktree`: the task worktree, or the project directory of a direct
+// task; null: the agent has none yet); writes outside every repository (/tmp and the like) pass;
+// CONTEXT.md and .planning/findings.md are the architect's even there.
 export async function subagentWriteDeny(e: ToolEvent, a: { worktree: string | null; place: (path: string) => Promise<string | null>; repoOf: (path: string) => Promise<string | null> }): Promise<string | null> {
   if (!SUBAGENT_WRITE_TOOLS.has(e.tool)) return null
   const path = filePath(e)
@@ -245,12 +255,12 @@ export async function subagentWriteDeny(e: ToolEvent, a: { worktree: string | nu
   const repo = await a.repoOf(real)
   if (repo === null) return null
   if (a.worktree === null) {
-    return `${path} is inside the Git repository ${repo}, and you have no worktree yet. Call mcp__magpie-tasks__open_worktree with { "project": "${repo}" } first, then make every change in the worktree it returns (cd there before running commands).`
+    return `${path} is inside the Git repository ${repo}, and you have no working directory for it yet. Call mcp__magpie-tasks__open_project with { "project": "${repo}" } first, then make every change in the directory it returns (cd there before running commands).`
   }
   const wt = await a.place(a.worktree)
-  if (wt === null) return `Your worktree ${a.worktree} does not exist; report this and end your turn.`
+  if (wt === null) return `Your working directory ${a.worktree} does not exist; report this and end your turn.`
   const rel = relativeTo(real, wt)
-  if (rel === null) return `Write only inside your worktree ${wt}; ${path} is outside it (in ${repo}). Make the change in the worktree copy of the file instead.`
+  if (rel === null) return `Write only inside your working directory ${wt}; ${path} is outside it (in ${repo}). Make the change in the copy of the file there instead.`
   if (rel === 'CONTEXT.md' || rel === '.planning/findings.md') return `${rel} is a design record the architect writes in the project main directory. Put what you found in your report instead.`
   return null
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # E6 (plan section 12.2; U8): subagents of E3's architect are routed by the rules: an implementation
-# goes to code-change (Opus, in the task worktree, the marker as the brief's first line), a review to
+# goes to code-change (Opus, in the project directory the task changes in place, the marker as the brief's first line), a review to
 # review, a second review by another model to review-second (Sol 6.1); an explicit model without a
 # reason line is refused, with the person's reason it is taken; a Fable 5.1 subagent's own delegation
 # (subagent-opus writes `opus` under a Fable parent) is routed by the rules on the same task.
@@ -18,16 +18,16 @@ start e6 "$E/proj" claude attach "$short"
 wait_ready e6 120
 
 n0=$(count)
-say_and_wait e6 "$tr" '委派一个子代理：在工作副本里给 greet.py 加一个 main 函数并运行验证。等它完成后告诉我结果。' 900
+say_and_wait e6 "$tr" '委派一个子代理：给 greet.py 加一个 main 函数并运行验证。等它完成后告诉我结果。' 900
 a1=$(nth "$n0")
 check '(1) routed by code-change' test "$(jq -r .ruleId <<<"$a1")" = code-change
 check '(1) on Opus 5.5' test "$(jq -r .model <<<"$a1")" = claude/claude-opus-5-5
 check '(1) xhigh or max' grep -qE '^(xhigh|max)$' <<<"$(jq -r .effort <<<"$a1")"
-check '(1) works in the task worktree' test "$(jq -r .cwd <<<"$a1")" = "$E/wt/$id"
+check '(1) works in the project directory' test "$(jq -r .cwd <<<"$a1")" = "$E/proj"
 id1=$(jq -r .agentId <<<"$a1")
 sub1=$(find "$E/cfg/projects" -name "agent-$id1.jsonl" | head -1)
 check '(1) the brief starts with the task marker' bash -c "python3 -I -c 'import json,sys; d=json.loads(open(sys.argv[1]).readline()); c=d[\"message\"][\"content\"]; t=c if isinstance(c,str) else c[0][\"text\"]; sys.exit(0 if t.startswith(\"[magpie-tasks task=$id \") else 1)' '$sub1'"
-check '(1) the worktree greet.py has a main function' grep -q 'def main' "$E/wt/$id/greet.py"
+check '(1) the project greet.py has a main function' grep -q 'def main' "$E/proj/greet.py"
 
 n1=$(count)
 say_and_wait e6 "$tr" '委派子代理对这次修改做独立审查，等它完成后告诉我结论。' 900

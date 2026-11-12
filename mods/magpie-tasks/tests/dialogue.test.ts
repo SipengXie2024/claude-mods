@@ -2,7 +2,7 @@
 // real `$.session.messages({ as: 'api' })` dumps of the 2026-11-09 interface probe and real briefs,
 // copied to tests/data.
 import { expect, test } from 'claude-code/testing'
-import { FILE_HEAD, briefForJev, briefPaths, delegationMessages, spawningDialogue, subagentDialogue } from '../src/dialogue'
+import { FILE_HEAD, briefForJev, briefPaths, delegationMessages, endedTurn, spawningDialogue, subagentDialogue } from '../src/dialogue'
 import type { JevMessage } from '../src/jev'
 import { dump006, dump032, dump034, dump044, dump047, dump048, type Dump } from './data/api-dumps'
 import { briefHey, briefMultisetDesign, briefProviderFeasibility } from './data/briefs'
@@ -38,6 +38,16 @@ test('a coordinator message delivered inside a tool result while the subagent ra
   const d = subagentDialogue(dump048.api)
   expect(d[0]!.content.startsWith('Run this Bash command in the foreground exactly as written')).toBe(true)
   expect(d[1]).toEqual({ role: 'user', content: 'CHK-FOLLOWUP-WORKING: after that, also run echo chk-sub2-extra and report it.' })
+})
+
+test('the turn a subagent ended: the message that resumed it and the tool calls since; a message that arrived while it worked belongs to the turn it arrived in', () => {
+  expect(endedTurn(dump032.api, [])).toEqual({ asked: 'CHK-FOLLOWUP-888: now run echo chk-sub-follow-999 and report what it printed.', tools: 1 })
+  // 048: the brief's command, then two more after the mid-turn message and the background task's event.
+  expect(endedTurn(dump048.api, [])).toEqual({ asked: 'CHK-FOLLOWUP-WORKING: after that, also run echo chk-sub2-extra and report it.', tools: 3 })
+})
+
+test('a message that starts with one of the plugin\'s own heads is not what the person asked: the turn reaches back to the brief', () => {
+  expect(endedTurn(dump032.api, ['CHK-FOLLOWUP-888'])).toEqual({ asked: 'Run the Bash command `echo chk-sub-321` and report exactly what it printed. Do nothing else.', tools: 2 })
 })
 
 test('task events: same id and summary with another result are both kept (034 msg10, msg48); an identical copy is kept once (048 msg0, msg4)', () => {

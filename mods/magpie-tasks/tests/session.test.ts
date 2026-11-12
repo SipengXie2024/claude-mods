@@ -6,7 +6,7 @@
 import { expect, test } from 'claude-code/testing'
 import type { SettingsReadInput } from 'claude-code'
 import { parseRules } from '../src/rules'
-import { architectFirstMessage, askText, bgIsolationAnswer, formatBytes, isOwner, optionModels, roleRule, type RoleFacts } from '../src/session'
+import { architectFirstMessage, askText, bgIsolationAnswer, isOwner, optionModels, roleRule, type RoleFacts } from '../src/session'
 import type { TaskRecord } from '../src/types'
 import { routingRules } from './data/jev-rules'
 
@@ -31,7 +31,7 @@ test('the role table of section 2, in its order', () => {
 
 const owned = (owner: TaskRecord['owner'], source: 'new' | 'takeover' | 'promoted'): TaskRecord => ({
   schema: 1, id: 'l-20261109-a1b2c3', kind: 'long', title: 'greet', state: 'running', pausedByUser: false, createdAt: 0, updatedAt: 0,
-  request: '检查 greet.py', followUps: [], project: { root: '/tmp/p', gitInitByPlugin: true }, worktree: null, extraWorktrees: {}, owner,
+  request: '检查 greet.py', followUps: [], project: { root: '/tmp/p' }, worktree: null, extraWorktrees: {}, owner,
   architect: { model: 'claude/claude-opus-5-5', recommendation: { model: 'claude/claude-opus-5-5', reason: 'r', limits: 'l', judgment: null }, userChoice: 'Opus 5.5（推荐）', confirmedAt: 0, source },
   telegram: null, agents: {}, blockers: {}, decisions: {}, deliverables: [], feedback: [], ratings: [], pendingRelays: {},
 })
@@ -61,34 +61,32 @@ test('merged settings with Magpie\'s flag layer get worktree.bgIsolation none; o
 
 test('the dialog offers exactly the four architect candidates, the recommendation first', () => {
   const sol = rules.architect.candidates.find(c => c.model === 'codex/gpt-6.1-sol')!
-  const { question, options } = askText({ recommendation: { model: sol.model, reason: `Jev 判断这项长期任务符合「${sol.when}」。`, limits: sol.limits }, root: '/tmp/mt/proj', worktree: '/tmp/mt/wt/l-20261109-a1b2c3', git: { files: 1, bytes: 15 }, trusted: false }, rules)
+  const { question, options } = askText({ recommendation: { model: sol.model, reason: `Jev 判断这项长期任务符合「${sol.when}」。`, limits: sol.limits }, root: '/tmp/mt/proj', workspace: '直接修改：/tmp/mt/proj（不是 Git 仓库，没有差异记录）', trusted: false }, rules)
   expect(options).toEqual(['Sol 6.1（推荐）', 'Opus 5.5', 'Mythos 5.2', 'Astra'])
   expect(optionModels(sol.model, rules)).toEqual(['codex/gpt-6.1-sol', 'claude/claude-opus-5-5', 'claude/claude-mythos-5-2', 'codex/gpt-6-astra'])
   expect(question).toContain(sol.limits)
   expect(question).toContain('项目根目录：/tmp/mt/proj')
-  expect(question).toContain('任务工作副本：/tmp/mt/wt/l-20261109-a1b2c3')
-  expect(question).toContain('确认后会在 /tmp/mt/proj 建立 Git 仓库并提交一份基线快照：1 个文件，共 15 字节。')
+  expect(question).toContain('直接修改：/tmp/mt/proj（不是 Git 仓库，没有差异记录）')
+  expect(question).not.toContain('建立 Git 仓库')
   expect(question).toContain('Claude Code 还没有把 /tmp/mt/proj 记为受信任的目录，后台会话不能在那里启动。确认即表示你信任这个目录')
   expect(question.split('\n').at(-1)).toContain('不需要登记的临时操作请使用普通 claude')
-  const repo = askText({ recommendation: { model: 'claude/claude-opus-5-5', reason: 'r', limits: 'l' }, root: '/home/ubuntu/sipeng/claude-mods', worktree: '/w', git: null, trusted: true }, rules)
+  const repo = askText({ recommendation: { model: 'claude/claude-opus-5-5', reason: 'r', limits: 'l' }, root: '/home/ubuntu/sipeng/claude-mods', workspace: '直接修改：/home/ubuntu/sipeng/claude-mods', trusted: true }, rules)
   expect(repo.options).toEqual(['Opus 5.5（推荐）', 'Mythos 5.2', 'Astra', 'Sol 6.1'])
   expect(repo.question).not.toContain('Git 仓库')
   expect(repo.question).not.toContain('受信任')
   expect(() => optionModels('claude/claude-haiku-5-5', rules)).toThrow('not an architect candidate')
 })
 
-test('sizes in the dialog read in bytes, KB, MB and GB', () => {
-  expect(formatBytes(15)).toBe('15 字节')
-  expect(formatBytes(2048)).toBe('2.0 KB')
-  expect(formatBytes(5 * 1024 * 1024 + 300 * 1024)).toBe('5.3 MB')
-  expect(formatBytes(3 * 1024 ** 3)).toBe('3.0 GB')
-})
-
 test('the architect\'s first message carries the task marker on its own line after the request', () => {
-  const m = architectFirstMessage('检查 greet.py 并只回复 ok', 'l-20261109-a1b2c3', '/tmp/mt/wt/l-20261109-a1b2c3')
+  const m = architectFirstMessage('检查 greet.py 并只回复 ok', 'l-20261109-a1b2c3', { mode: 'worktree', path: '/tmp/mt/wt/l-20261109-a1b2c3' })
   const lines = m.split('\n')
   expect(lines[0]).toBe('检查 greet.py 并只回复 ok')
   expect(lines[1]).toBe('')
   expect(lines[2]).toBe('[magpie-tasks architect task=l-20261109-a1b2c3 worktree=/tmp/mt/wt/l-20261109-a1b2c3]')
-  expect(m).toContain('Do not commit or push')
+  expect(m).toContain('Commit and push only when the person asks')
+  expect(m).toContain('never in the task worktree')
+  const direct = architectFirstMessage('检查 greet.py 并只回复 ok', 'l-20261109-a1b2c3', { mode: 'direct', path: '/tmp/mt/proj' })
+  expect(direct.split('\n')[2]).toBe('[magpie-tasks architect task=l-20261109-a1b2c3 direct=/tmp/mt/proj]')
+  expect(direct).toContain('work directly in the project directory /tmp/mt/proj')
+  expect(direct).not.toContain('worktree')
 })

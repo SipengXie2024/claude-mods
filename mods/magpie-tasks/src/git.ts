@@ -1,6 +1,6 @@
-// Git operations behind task worktrees (plan section 9.9): repository detection, `git init` with a
-// baseline, snapshot trees taken through a temporary index, base commits under refs/magpie-tasks/,
-// worktree creation and removal, and diffs against a base.
+// Git operations behind task workspaces (plan section 9.9): repository detection, snapshot trees
+// taken through a temporary index, base commits under refs/magpie-tasks/, worktree creation and
+// removal, and diffs against a base.
 //
 // The user's index, branches and working tree are never touched by a snapshot: every snapshot goes
 // through a temporary index file (GIT_INDEX_FILE) and every commit the plugin makes hangs only off
@@ -55,34 +55,6 @@ export async function repoRoot(io: Io, dir: string): Promise<string | null> {
   return real
 }
 
-// Files and total bytes `git init` plus a baseline would record in a directory that is not a
-// repository: regular files and symbolic links, the size of a link being that of its target text.
-// Counted by find and summed by awk in one pipeline, so the count does not pass the 4 MiB output limit.
-export async function projectStats(io: Io, dir: string): Promise<{ files: number; bytes: number }> {
-  const script = 'set -o pipefail; find "$1" -name .git -prune -o \\( -type f -o -type l \\) -printf "%s\\n" | awk \'{ n++; b += $1 } END { printf "%d %d\\n", n, b }\''
-  const r = await io.run(['bash', '-c', script, 'bash', dir], { env: { LC_ALL: 'C' }, timeoutMs: LONG_MS })
-  if (r.exitCode !== 0) throw new Error(`counting files under ${dir} exited ${r.exitCode}: ${firstLines(r.stderr)}`)
-  const m = /^(\d+) (\d+)$/.exec(r.stdout.trim())
-  if (!m) throw new Error(`counting files under ${dir}: unexpected output ${JSON.stringify(r.stdout)}`)
-  return { files: Number(m[1]), bytes: Number(m[2]) }
-}
-
-// `git init` in a directory outside any repository and a baseline commit 'magpie-tasks baseline' of
-// every file in it, on the default branch. The commit is made with plumbing (no hooks, no signing,
-// works for an empty directory); the real index is then set to the baseline so `git status` is clean.
-export async function initRepo(io: Io, dir: string): Promise<void> {
-  const existing = await repoRoot(io, dir)
-  if (existing !== null) throw new Error(`initRepo: ${dir} is already inside the repository ${existing}`)
-  await git(io, ['-C', dir, 'init', '-q'])
-  const tmpIndex = await scratchPath(io, dir, 'index')
-  const tree = await snapshotTree(io, dir, tmpIndex)
-  const commit = await snapshotCommit(io, dir, tree, null, 'magpie-tasks baseline')
-  await git(io, ['-C', dir, 'update-ref', 'HEAD', commit])
-  await git(io, ['-C', dir, 'read-tree', 'HEAD'])
-  // read-tree leaves no stat data; refreshing it saves the next `git status` from rehashing every file.
-  await git(io, ['-C', dir, 'update-index', '-q', '--refresh'], { timeoutMs: LONG_MS })
-}
-
 // The tree of everything in the working tree of `dir`'s repository: tracked files as they are on
 // disk, plus untracked files that are not ignored. Built in the temporary index `tmpIndex` (an
 // absolute path that must not be inside the work tree; see scratchPath), which is removed afterwards.
@@ -105,18 +77,30 @@ export async function snapshotCommit(io: Io, repo: string, tree: string, parent:
   return (await git(io, args)).trim()
 }
 
-// A worktree at `path` holding a snapshot of `from` (the project directory, or a task worktree when
-// making an agent's separate copy). The snapshot becomes base commit B (parent: HEAD of `from`, none
-// in a repository without commits), `ref` is set to B, and the worktree is checked out detached at B.
-// `ref` is refs/magpie-tasks/<taskId>/base or refs/magpie-tasks/<taskId>/<agentId>/base (baseRefName).
-export async function createWorktree(io: Io, repo: string, path: string, ref: string, from: string): Promise<{ baseCommit: string; baseRef: string }> {
+// Base commit B of the directory `from` as it is now: its snapshot tree, with HEAD of `from` as
+// parent (none in a repository without commits), made in `repo` and named by `ref`, which must not
+// exist yet (an existing one belongs to another task or copy of the same name). `ref` is
+// refs/magpie-tasks/<taskId>/base or refs/magpie-tasks/<taskId>/<agentId>/base (baseRefName).
+export async function snapshotBase(io: Io, repo: string, ref: string, from: string): Promise<{ baseCommit: string; baseRef: string }> {
   const label = refLabel(ref)
-  if (await io.exists(path)) throw new Error(`createWorktree: ${path} already exists`)
   const tree = await snapshotTree(io, from, await scratchPath(io, from, 'index'))
   const parent = await hasHead(io, from) ? (await git(io, ['-C', from, 'rev-parse', '--verify', 'HEAD^{commit}'])).trim() : null
   const baseCommit = await snapshotCommit(io, repo, tree, parent, `magpie-tasks base ${label}`)
-  // The ref must not exist yet: an existing one belongs to another worktree of the same name.
   await git(io, ['-C', repo, 'update-ref', ref, baseCommit, ''])
+  return { baseCommit, baseRef: ref }
+}
+
+// Deletes a base ref the plugin made, when it still names `commit`.
+export async function dropBase(io: Io, repo: string, ref: string, commit: string): Promise<void> {
+  refLabel(ref)
+  await git(io, ['-C', repo, 'update-ref', '-d', ref, commit])
+}
+
+// A worktree at `path` holding a snapshot of `from` (the project directory, or a task worktree when
+// making an agent's separate copy): the base commit of snapshotBase, checked out detached.
+export async function createWorktree(io: Io, repo: string, path: string, ref: string, from: string): Promise<{ baseCommit: string; baseRef: string }> {
+  if (await io.exists(path)) throw new Error(`createWorktree: ${path} already exists`)
+  const { baseCommit } = await snapshotBase(io, repo, ref, from)
   try {
     const parentDir = path.replace(/\/+[^/]+\/*$/, '')
     if (parentDir !== '' && parentDir !== path) {
@@ -143,6 +127,14 @@ export async function removeWorktree(io: Io, repo: string, path: string): Promis
     return
   }
   await git(io, ['-C', repo, 'worktree', 'remove', '--force', path], { timeoutMs: LONG_MS })
+}
+
+// Removes a plugin worktree together with its base ref, so the same path and ref can be made again
+// (createWorktree refuses an existing ref). The snapshot commits left without a ref go with git gc.
+export async function removeWorktreeAndRef(io: Io, repo: string, path: string, ref: string): Promise<void> {
+  refLabel(ref)
+  await removeWorktree(io, repo, path)
+  await git(io, ['-C', repo, 'update-ref', '-d', ref])
 }
 
 // The change in `dir` since `base` (a commit or a ref naming one): the current snapshot tree, the

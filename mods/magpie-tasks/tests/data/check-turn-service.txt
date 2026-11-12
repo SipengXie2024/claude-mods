@@ -1,0 +1,21 @@
+Fast 已经打开，codex 账号的额度用完后会接着用 credits。我实际发了一条经 magpie 转到 codex 账号的请求，记录里出现了 `tier_sent: "priority"`，说明 Fast 已经生效。
+
+Fast 的设置在 magpie 的 `~/.config/magpie/settings.json` 的 `fastPicks` 里，按智能体分开记录：
+- **Claude Code** 经 magpie 选 codex 模型时，8 个 codex 模型全部打开了 Fast（gpt-6-astra、gpt-6.1-sol、gpt-6.1-terra、gpt-6-sol、gpt-6-luna、gpt-5.6-sol、gpt-5.6-terra、gpt-5.6-luna）。
+- **Qwen Code** 选 codex 模型时，同样这 8 个模型都打开了 Fast。
+- **Codex CLI** 本来就在 `~/.codex/config.toml` 里写了 `service_tier = "priority"`。magpie 里也给它的 gpt-6-astra 记上了 Fast，两边一致。
+
+credits 的设置：这个 codex 账号现在设为 `on`，意思是额度用完后由 OpenAI 继续扣 credits，任务不会中断。这本来就是 magpie 的默认值，现在改成了明确写下的设置。目前额度剩 95%，credits 剩 35950.81。
+
+要注意的是，Fast 每次请求消耗的额度更多，所以额度会更早用完，之后开始扣 credits。
+
+magpie 的命令行没有开关 Fast 的命令，所以我临时启动了一个只在本机能访问的 magpie 网页界面，调用它的 `/api/agent-fast` 接口完成设置，用完已经关闭。
+
+验证：
+- 17 次 `POST /api/agent-fast`（Claude Code 8 个、Qwen Code 8 个、Codex 1 个）→ 每次都返回 `{"fast":true}`，状态码 200
+- 读取 `settings.json` 的 `fastPicks` → claude 8 个、qwen 8 个、codex 1 个，全部写入
+- `magpie quota credits <账号> on` → "spends its credits once its allowance is used up"
+- `magpie claude run -p ... --model codex/gpt-6-luna` → 回复 OK；`usage.jsonl` 里这条最新的 codex 记录带 `tier_sent: "priority"`，状态码 200
+- `pgrep -af 'magpie web'` → 临时网页界面已经关闭
+
+状态：已完成

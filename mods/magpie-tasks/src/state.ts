@@ -15,7 +15,7 @@ export interface Host {
   session: { id: E['session']['id']; model: E['session']['model']; messages: E['session']['messages']; append: E['session']['append']; send: E['session']['send'] }
   ui: { log: E['ui']['log']; ask: E['ui']['ask']; toast: E['ui']['toast'] }
   model: { complete: E['model']['complete'] }
-  agent: { spawn: E['agent']['spawn'] }
+  agent: { spawn: E['agent']['spawn']; list: E['agent']['list'] }
   prompt: { submit: E['prompt']['submit'] }
   command: { run: E['command']['run'] }
   clock: { after: E['clock']['after'] }
@@ -42,7 +42,7 @@ export function hostEngine($: EngineInterface): Host {
       toast: (text, options) => $.ui.toast(text, options),
     },
     model: { complete: (request, options) => $.model.complete(request, options) },
-    agent: { spawn: args => $.agent.spawn(args) },
+    agent: { spawn: args => $.agent.spawn(args), list: () => $.agent.list() },
     prompt: { submit: args => $.prompt.submit(args) },
     command: { run: args => $.command.run(args) },
     clock: { after: (ms, fn) => $.clock.after(ms, fn) },

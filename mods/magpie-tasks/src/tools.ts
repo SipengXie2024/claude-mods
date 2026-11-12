@@ -1,19 +1,19 @@
 // The tools magpie-tasks registers, by session role (plan sections 9.5, 9.11, 9.12). Their calls are
 // served by register.ts's tool.call hook: architect tools by architect.ts, Router tools by router.ts,
-// open_worktree by daily.ts. Descriptions are for the model and in English.
+// open_project by daily.ts. Descriptions are for the model and in English.
 import type { Ctx } from './state'
 import type { Role } from './types'
 
 export type ArchitectToolName = 'model_route' | 'task_status' | 'report_outcome' | 'integrate' | 'notify_user' | 'resolve_conflict'
 export type RouterToolName = 'forward_long' | 'recommend_architect' | 'promote_task'
-export type SubagentToolName = 'open_worktree'
+export type SubagentToolName = 'open_project'
 type ToolName = ArchitectToolName | RouterToolName | SubagentToolName
 
 const PREFIX = 'mcp__magpie-tasks__'
 
 const ARCHITECT_TOOLS: readonly ArchitectToolName[] = ['model_route', 'task_status', 'report_outcome', 'integrate', 'notify_user', 'resolve_conflict']
 const ROUTER_TOOLS: readonly RouterToolName[] = ['forward_long', 'recommend_architect', 'promote_task']
-const SUBAGENT_TOOLS: readonly SubagentToolName[] = ['open_worktree']
+const SUBAGENT_TOOLS: readonly SubagentToolName[] = ['open_project']
 
 const string = (description: string) => ({ type: 'string', description })
 
@@ -57,10 +57,10 @@ export const TOOL_SPECS: Record<ToolName, { description: string; inputSchema: Re
     inputSchema: { type: 'object', properties: { note: string('What is being integrated, in one sentence.') }, additionalProperties: false },
   },
   notify_user: {
-    description: 'Send the person a Telegram notification. kind decision: a key design change or anything else they must decide. kind done: the task or a clear result is finished (recorded as the completion time). Do not send ordinary progress, and do not answer a message from Telegram with it: the host sends your final answer of that turn as the reply. Write text in Chinese, plain text without Markdown.',
+    description: 'Send the person a Telegram notification. kind decision: a key design change or anything else they must decide. kind result: a finished part of the task worth their attention. kind done: the whole task is finished; the task closes (recorded as the completion time), this session is stopped after ten idle minutes and the task worktree removed, and the person\'s next message reopens it. Do not send ordinary progress, and do not answer a message from Telegram with it: the host sends your final answer of that turn as the reply. Write text in Chinese, plain text without Markdown.',
     inputSchema: {
       type: 'object',
-      properties: { kind: { type: 'string', enum: ['decision', 'done'] }, text: string('The message, in Chinese.') },
+      properties: { kind: { type: 'string', enum: ['decision', 'result', 'done'] }, text: string('The message, in Chinese.') },
       required: ['kind', 'text'],
       additionalProperties: false,
     },
@@ -104,13 +104,12 @@ export const TOOL_SPECS: Record<ToolName, { description: string; inputSchema: Re
       additionalProperties: false,
     },
   },
-  open_worktree: {
-    description: 'Before changing a project for this task, get the task\'s Git worktree of it: change files only in the returned directory and cd there before Bash commands. Returns the worktree path. When the directory is not a Git repository, ask the person whether to create one and end the turn with 状态：需要用户决定; once they agree, call again with init_git true.',
+  open_project: {
+    description: 'Before changing a project for this task, name it here and change files only in the directory this returns (cd there before Bash commands): the project directory itself while no other task changes that project in place, or a Git worktree of it when another task does. Outside Git the task always works in the directory itself.',
     inputSchema: {
       type: 'object',
       properties: {
         project: string('The project\'s absolute path.'),
-        init_git: { type: 'boolean', description: 'true only after the person agreed to create a Git repository there.' },
       },
       required: ['project'],
       additionalProperties: false,
@@ -118,7 +117,7 @@ export const TOOL_SPECS: Record<ToolName, { description: string; inputSchema: Re
   },
 }
 
-// architect: the architect tools and open_worktree; router: the Router tools and open_worktree.
+// architect: the architect tools and open_project; router: the Router tools and open_project.
 // Other roles register nothing.
 export async function registerTools(ctx: Ctx, role: Role): Promise<void> {
   const names: readonly ToolName[] = role === 'architect' ? [...ARCHITECT_TOOLS, ...SUBAGENT_TOOLS]

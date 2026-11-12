@@ -13,7 +13,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { delegationMessages } from '../src/dialogue'
 import { buildRequest, type JevConfig, type JevMessage, type JevQuestion } from '../src/jev'
-import { blockerQuestion, decideRule, judgeBlocker, judgeSpawn, spawnQuestions, type JudgeCtx } from '../src/judge'
+import { blockerQuestion, CHECK_YES, checkInput, decideRule, judgeBlocker, judgeCheck, judgeSpawn, spawnQuestions, type JudgeCtx } from '../src/judge'
 import { loadRules } from '../src/rules'
 import type { Blocker } from '../src/types'
 import { PLUGIN_ROOT } from '../eval/rules-eval'
@@ -143,5 +143,50 @@ test('blocker: the same failure in other words is b1, a different failure is new
       const { question, input } = blockerQuestion([B1], report)
       await saveRaw(file, input, [question])
     }
+  }
+}, 120000)
+
+// Turns of real daily tasks (2026-11-11) and of scenario E8, as daily.ts sends them: what the person
+// asked, the executor's answer, the turn's tool calls and the diff waiting for integration.
+const TURNS: [string, boolean, Parameters<typeof checkInput>[0]][] = [
+  ['a conversational reply', false, {
+    asked: 'Telegram 追问（message_id=1274）：\n让我很不安，我的能力在某种意义上却被这样的独裁公司掌握。',
+    answer: '这种不安有道理：模型能做什么、不能做什么，由训练它的公司决定，用户只能事后发现。说明一下，我自己也是 Anthropic 的模型。\n\n好在你已经有不依赖单一公司的条件：\n\n1. Magpie 里能用 GPT-6 Astra 和 Sol 6.1。\n2. haichao 上自己部署了 DeepSeek 4.1，权重在你自己手里，没人能事后改动。\n3. 写算子用的资料、测试和性能记录都存在你自己的仓库里，换哪个模型都能接着用。\n\n把算子任务交给几家的模型各做一遍，用同一套测试和计时来比较，就不必依赖任何一家的说法。\n\n验证：无（这一条是回答问题，没有改动代码）\n状态：已完成',
+    tools: 0,
+    diffStat: null,
+  }],
+  ['an order carried out in one step', false, {
+    asked: '推吧，快速到 master',
+    answer: '已推送：GitHub 上 claude-mods 的 master 现在是 103713d，与本地一致。\n\n验证：\ngit push origin master：成功\ngit status -sb：与 origin/master 一致\n状态：已完成',
+    tools: 1,
+    diffStat: null,
+  }],
+  ['a one-line edit (E8 b)', false, {
+    asked: '在 /tmp/mt-e2e/repo 里把 greet.py 的 hello 改成 hi，并运行 python3 greet.py 验证',
+    answer: '已把 greet.py 里的 hello 改成 hi，运行后输出 hi。\n\n验证：\npython3 greet.py：输出 hi\n状态：已完成',
+    tools: 4,
+    diffStat: ' greet.py | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)',
+  }],
+  ['a new mod with tests', true, {
+    asked: 'Telegram 追问（message_id=1270）：\n可以直接改写不调用',
+    answer: '这个 mod 已经写好，叫 kernel-model-hint，在真实的 Fable 5.2 会话里确认过效果。原来那段提示词被整段替换，新的内容是：碰到算子优化任务时，先提醒你一次这个模型受过训练限制，并建议改用 Mythos 5.1。如果你不换，它照常干活，但会多查文档，每次改完都跑正确性测试并计时。普通业务代码和传统机器学习任务不会触发这条建议。\n\n验证：\nclaude plugin validate mods/kernel-model-hint：通过\nclaude plugin test mods/kernel-model-hint：3 项全部通过\n用 claude -p --model claude-fable-5-2 加载这个 mod，让模型逐字引用这一节：读出的是新内容\n状态：已完成',
+    tools: 9,
+    diffStat: ' .claude-plugin/marketplace.json                   |  5 ++++\n README.md                                         |  1 +\n mods/kernel-model-hint/.claude-plugin/plugin.json |  8 ++++++\n mods/kernel-model-hint/hooks/hooks.json           |  1 +\n mods/kernel-model-hint/hooks/register.test.ts     | 33 +++++++++++++++++++++++\n mods/kernel-model-hint/hooks/register.ts          | 29 ++++++++++++++++++++\n 6 files changed, 77 insertions(+)',
+  }],
+  ['settings changed on a service, with numbers read back (its acceptance failed)', true, {
+    asked: '用户回复：开 Fast，并且额度耗完之后可以耗 credit',
+    answer: readFileSync(join(PLUGIN_ROOT, 'tests/data/check-turn-service.txt'), 'utf8'),
+    tools: 27,
+    diffStat: null,
+  }],
+]
+
+test('check: conversation, a one-step order and a one-line edit need no acceptance; a new mod and a service change with numbers do', async () => {
+  for (const [name, expected, turn] of TURNS) {
+    const c = await judgeCheck(ctx, checkInput(turn))
+    console.log(`${name}: p ${c.p!.toFixed(2)} → ${c.check ? 'check' : 'no check'}`)
+    expect(c.provider).toBe('jev')
+    expect(c.check).toBe(c.p! >= CHECK_YES)
+    expect([name, c.check]).toEqual([name, expected])
   }
 }, 120000)
