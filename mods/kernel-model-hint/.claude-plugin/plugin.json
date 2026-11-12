@@ -1,0 +1,8 @@
+{
+  "name": "kernel-model-hint",
+  "version": "0.1.0",
+  "description": "Under Fable 5.2 or Mythos 5.2, rewrite the system-prompt note on their kernel-optimization training limits so the model suggests Mythos 5.1 for accelerator kernel work.",
+  "author": {
+    "name": "sipeng"
+  }
+}
