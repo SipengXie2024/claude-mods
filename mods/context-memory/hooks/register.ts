@@ -183,6 +183,12 @@ export const register: Register = on => {
     return line === null ? next(e) : next({ ...e, props: { ...e.props, text: line } })
   })
 
+  // The model sent and reads the whole note; the row draws the call without it until ctrl+o.
+  // Its result line already gives the note's length.
+  on('ui.render', { component: 'ToolUse', props: { tool: NOTES_TOOL } }, async ($, e, next) => {
+    return e.props.isExpanded ? next(e) : next({ ...e, props: { ...e.props, input: {} } })
+  })
+
   on('tool.call', { tool: NOTES_TOOL }, async ($, e) => {
     const text = (e as unknown as { text?: unknown }).text
     const problem = noteProblem(text)
