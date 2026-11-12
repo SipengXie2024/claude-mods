@@ -288,6 +288,14 @@ export async function onDailyComplete(ctx: Ctx, e: TurnCompleteInput): Promise<v
   if (agent === undefined) throw new Error(`agent ${id} is not on task ${taskId}`)
   // An API error is onAgentError's (plan section 9.16); it asks for no status line.
   if (e.reason === 'error') return
+  // A check (acceptance, diagnosis) concludes once, with its first answer that carries the conclusion
+  // line, recorded as its 'done' report. A later turn of it answers a message another agent sent it
+  // (SendMessage reaches every agent of the session, finished ones included, and the turn's first step
+  // marks the agent running again): the conclusion stands, and the turn is only logged.
+  if ((agent.role === 'acceptance' || agent.role === 'diagnosis') && agent.reports.some(r => r.status === 'done')) {
+    await ctx.reg.update(task.id, t => { t.agents[id]!.state = 'done' }, { type: 'turn-end', agentId: id, reason: e.reason, afterConclusion: true })
+    return
+  }
   if (e.reason !== 'answer') {
     await ctx.reg.update(task.id, t => { t.agents[id]!.state = 'idle' }, { type: 'turn-end', agentId: id, reason: e.reason })
     return
