@@ -864,14 +864,23 @@ export const register: Register = (on) => {
   // transcript is in view; the main loop's model is the session's until its
   // first request. Nothing for a subagent before its first request or for one
   // magpie-tasks routes (that plugin, inside this one, draws its line), and
-  // nothing over a survey.
+  // nothing over a survey. The line sits on top of what the hooks beneath
+  // draw: where the engine nests every plugin's hook in one chain (2.1.322 and
+  // earlier), user plugins wrap the built-in ones, so a band that skipped
+  // next() would hide the built-in You should know plugin's Heads up offers.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const key = e.props.view.agentId ?? MAIN
     const s = band.get(key) ?? (key === MAIN ? { model: await $.session.model(), trail: [], phase: null, source: null, done: false } : undefined)
     if (!s) return next(e)
-    const { Text } = $.ui.resolve(e)
-    return <Text color="warning">{bandLine(s)}</Text>
+    const below = await next(e)
+    const { Box, Text } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column">
+        <Text color="warning">{bandLine(s)}</Text>
+        {below}
+      </Box>
+    )
   })
 
   // A turn's outcome is journaled; a subagent run's routing state ends with

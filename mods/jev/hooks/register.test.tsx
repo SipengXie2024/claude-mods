@@ -207,12 +207,16 @@ async function failEditFail($: any, w: World, from: number, model = OPUS, comman
 }
 
 const BAND = { plugin: 'jev', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: true, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 10 }, view: {} } } as const
-/** The band's line for the transcript in view (the main conversation unless an agent is named); `engine` where the mod left the band to the engine. */
-async function bandText($: any, view: { agentId?: string } = {}, surface: 'terminal' | 'desktop' = 'terminal', hasSurvey = false): Promise<string | undefined> {
+/** Every text the band draws for the transcript in view (the main conversation unless an agent is named), top to bottom; `engine` is what the hooks beneath the mod draw. */
+async function bandTexts($: any, view: { agentId?: string } = {}, surface: 'terminal' | 'desktop' = 'terminal', hasSurvey = false): Promise<string[]> {
   const ui = await $.ui.mount({ ...BAND, surface, props: { ...BAND.props, hasSurvey, view } })
-  const text = (await ui.find({ type: 'Text' }))?.text
+  const texts = (await ui.findAll({ type: 'Text' })).map((t: { text: string }) => t.text)
   await ui.unmount()
-  return text
+  return texts
+}
+/** The band's line for the transcript in view; `engine` where the mod left the band to the engine. */
+async function bandText($: any, view: { agentId?: string } = {}, surface: 'terminal' | 'desktop' = 'terminal', hasSurvey = false): Promise<string | undefined> {
+  return (await bandTexts($, view, surface, hasSurvey))[0]
 }
 
 describe('task routing', () => {
@@ -1259,6 +1263,15 @@ describe('band above the prompt', () => {
     expect(w.invalidates).toBe(2)
     expect(await bandText($)).toBe('Opus 5.5 · ◆ Jev · HIGH · code')
     expect(await bandText($, {}, 'terminal', true)).toBe('engine')
+  })
+
+  test('the band line sits above what the hooks beneath draw, so a built-in plugin\'s offer stays on screen, on terminal and desktop', async ($, on) => {
+    world(on)
+    await submit($, 'fix the crash in parser.ts')
+    await step($, 0)
+    for (const surface of ['terminal', 'desktop'] as const) {
+      expect(await bandTexts($, {}, surface)).toEqual(['Opus 5.5 · ◆ Jev · HIGH · code', 'engine'])
+    }
   })
 
   test('the subagent view draws that subagent\'s model and trail and the main view the main loop\'s, on terminal and desktop', async ($, on) => {
