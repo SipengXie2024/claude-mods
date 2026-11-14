@@ -25,6 +25,7 @@ export interface Options {
   claudeBin: string           // claude
   telegramStateDir: string    // ~/.claude/channels/telegram-live
   telegramChatId: string      // empty: read the single allowFrom entry of access.json
+  telegramAfterMinutes: number // 10: how long a long task's question or notice waits in the window before it also goes to Telegram
   timezone: string            // Asia/Shanghai
   ratingHour: number          // 21
 }
@@ -87,9 +88,11 @@ export interface Decision {
   createdAt: number
   question: string
   options: string[]
+  askedAt?: number                      // a long task's question: when it was first put in the architect's window; Telegram follows telegramAfterMinutes later
   telegram?: { chatId: string; messageId: number }
   resolvedAt?: number
   answer?: string
+  via?: 'window' | 'telegram' | 'architect'   // a long task's decision: where the answer that was carried out came from
   data: Record<string, string>
 }
 
@@ -155,6 +158,9 @@ export interface TaskRecord {
   feedback: { at: number; source: 'telegram' | 'window'; text: string; unsuitable: boolean | null; modelOpinion: boolean | null }[]
   ratings: { at: number; score: number; raw: string; invited: boolean }[]
   pendingRelays: Record<string, RelayRequest>
+  // A long task's notify_user lines shown in the window that Telegram has not had yet (src/channel.ts):
+  // each goes there telegramAfterMinutes after `at` unless the person sends this session something first.
+  notices?: Record<string, { id: string; at: number; text: string }>
   completedAt?: number
   error?: string
 }
@@ -172,8 +178,8 @@ export interface Claim {
   cwd: string
   createdAt: number
   expiresAt: number                     // launch claims 10 minutes, takeover claims 2 minutes
-  promptHash?: string                   // launch: FNV-1a of the whole message passed to --bg
   fromSessionId?: string                // takeover
+  handoff?: string                      // takeover: the launcher's hand-over file of the window, when it has one
 }
 
 export interface TelegramIndex {
@@ -199,6 +205,7 @@ export interface SessionState {
   stopFailures: Map<string, string>                // agentId → classic.StopFailure error category
   replyTargets: { chatId: string; messageId: number }[]
   relay: Map<string, RelayRequest>
+  routed: Map<string, RelayRequest>                // tool_use_id of a model_route call → the subagent its PostToolUse hook starts
   touches: Map<string, Set<string>>                // agentId → absolute paths it changed
   debugOffset: number
 }

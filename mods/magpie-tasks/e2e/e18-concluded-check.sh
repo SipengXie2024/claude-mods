@@ -14,10 +14,10 @@ repo="$E/repo"
 mkdir -p "$repo"
 ( cd "$repo" && git init -q && printf 'print("hello")\n' > greet.py && git add . \
   && git -c user.email=e2e@magpie -c user.name=e2e commit -qm init )
-dailies() { ls "$E"/state/tasks/d-*.json 2>/dev/null | grep -v '\.log\.jsonl$' || true; }
-newest_daily() { dailies | xargs -r ls -t | head -1; }
 dbg="$E/e18.log"
-all_settled() { for f in $(dailies); do settled "$f" || return 1; done; }
+# Every daily task created since this scenario began; earlier scenarios' tasks in the same environment stay out.
+mine() { tasks_with d- | grep -vxF -f <(printf '%s\n' "$tasks0") || true; }
+all_settled() { for f in $(mine); do settled "$f" || return 1; done; }
 # The task's turn is over and nothing of it runs: done, or waiting for the person after a failed acceptance.
 settled() { jq -e '(.state == "done" or .state == "waiting-user") and ([.agents[] | select(.state == "running")] | length == 0)' "$1"; }
 
@@ -26,9 +26,13 @@ wait_ready e18
 check 'the Router session has role router' wait_for 60 debug_has "$dbg" 'magpie-tasks: role router'
 
 # (a)
-type_line e18 "在 $repo 里给 greet.py 加一个 --name 参数（默认 world），输出 hello <name>；再补一个 test_greet.py，用 subprocess 检查带参数和不带参数两种调用；运行测试验证"
-check '(a) a daily task is recorded' wait_for 300 more_tasks d- 0
-ta=$(newest_daily)
+# The request of (a) needs Jev's check judgment (CHECK_QUESTION, CHECK_YES 0.3) to call its result
+# worth a check. A --name option with a two-case test drew p 0.12 to 0.85 on 6-tool rounds; with
+# --times and its error exit, five recorded rounds replayed five times each gave 0.86 to 0.94.
+tasks0=$(tasks_with d-)
+type_line e18 "在 $repo 里给 greet.py 加一个 --name 参数（默认 world），输出 hello <name>；再加一个 --times 参数把这一行输出 N 次（默认 1，N 不是正整数时以退出码 2 结束并在 stderr 写明原因）；补一个 test_greet.py，用 subprocess 覆盖这些情况；运行测试验证"
+check '(a) a daily task is recorded' wait_for 300 has_new_task d- "$tasks0"
+ta=$(new_task d- "$tasks0")
 check '(a) its acceptance gives a verdict' wait_for 1500 log_has "$ta" 'map(select(.type == "acceptance")) | length > 0'
 check '(a) the task settles' wait_for 1500 settled "$ta"
 acc=$(jq -r '[.agents[] | select(.role == "acceptance")][0].agentId' "$ta")
@@ -45,7 +49,7 @@ type_line e18 "请用 SendMessage 工具给名为 $accname 的代理发一条消
 check '(b) the acceptance agent'"'"'s turn ends, logged after its conclusion' wait_for 900 after_verdict 'map(select(.type == "turn-end" and .agentId == $a and .afterConclusion == true)) | length == 1'
 check '(b) that turn went through the plugin'"'"'s first-step hook' after_verdict 'map(select(.type == "effort" and .agentId == $a)) | length > 0'
 check '(b) every daily task settles' wait_for 900 all_settled
-no_error() { ! cat "$E"/state/tasks/d-*.log.jsonl | jq -e -s 'map(select(.type == "error")) | length > 0'; }
+no_error() { ! for f in $(mine); do cat "$(log_of "$f")"; done | jq -e -s 'map(select(.type == "error")) | length > 0'; }
 verdicts() { jq -s --arg a "$acc" 'map(select(.type == "acceptance" and .agentId == $a)) | length' "$(log_of "$ta")"; }
 no_router_error() { ! tmux capture-pane -p -J -t e18 -S - | grep -F 'magpie-tasks' | grep -qF '出错'; }
 check '(b) no error is logged' no_error

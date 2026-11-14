@@ -13,7 +13,7 @@ type E = EngineInterface
 // `$.noun.method` call at its call site. Each closure below is such a call site.
 export interface Host {
   session: { id: E['session']['id']; model: E['session']['model']; messages: E['session']['messages']; append: E['session']['append']; send: E['session']['send'] }
-  ui: { log: E['ui']['log']; ask: E['ui']['ask']; toast: E['ui']['toast'] }
+  ui: { log: E['ui']['log']; ask: E['ui']['ask']; toast: E['ui']['toast']; notify: E['ui']['notify'] }
   model: { complete: E['model']['complete'] }
   agent: { spawn: E['agent']['spawn']; list: E['agent']['list'] }
   prompt: { submit: E['prompt']['submit'] }
@@ -40,6 +40,7 @@ export function hostEngine($: EngineInterface): Host {
       log: (text, options) => $.ui.log(options?.to === 'debug' ? text : text.replace(/^magpie-tasks(: | ·| (?=出错))/, ''), options),
       ask: (question, options) => $.ui.ask(question, options),
       toast: (text, options) => $.ui.toast(text, options),
+      notify: (text, options) => $.ui.notify(text, options),
     },
     model: { complete: (request, options) => $.model.complete(request, options) },
     agent: { spawn: args => $.agent.spawn(args), list: () => $.agent.list() },
@@ -75,6 +76,7 @@ export function freshState(): SessionState {
     stopFailures: new Map(),
     replyTargets: [],
     relay: new Map(),
+    routed: new Map(),
     touches: new Map(),
     debugOffset: 0,
   }

@@ -2,8 +2,10 @@
 // hand-overs with reply targets and decision answers, window messages, the per-turn context), the
 // end of its turns (Telegram replies, the debug-log check), its main conversation's tool limits, its
 // subagents' write range and file conflicts, their reports and separate-copy merges, the architect
-// tools, and the execution of every decision of a long task.
+// tools, and the execution of every decision of a long task. Where its questions and notices reach
+// the person is src/channel.ts.
 import type { Next, PromptSubmitInput, ToolCallInput, ToolCallResult, TurnCompleteInput } from 'claude-code'
+import { answerDecision, architectQuestions, askInWindow, asksInWindow, decidedLine, isOwnDialog, openWindowDecision, personActed, questionFromTelegram, resumeChannels, routeNote, SEPARATE, showNotice, WAIT, type DecisionFlow, type Route, type Via } from './channel'
 import { parseStatus } from './brief'
 import { findConflict, isCheckCommand, porcelainChanged, touchedPaths } from './conflict'
 import { relay } from './daily'
@@ -12,10 +14,10 @@ import { baseRefName, createWorktree, gitRun } from './git'
 import { integrate, integrateTask, projectRootOf, recordIntegration, type IntegrationResult } from './integrate'
 import { newId } from './io'
 import { agentLabel } from './model'
-import { MODEL_OPINION_QUESTION, predicate, UNSUITABLE_QUESTION } from './judge'
+import { MODEL_OPINION_QUESTION, predicate, readLongAnswer, readOptionLabel, UNSUITABLE_QUESTION, type LongAnswer } from './judge'
 import { isRecoveryMessage, scanDebugLog } from './recovery'
 import { modelRoute } from './route'
-import { architectContext, judgeCtxOf, notice, onTakeoverTurnEnd, telegramReport } from './session'
+import { architectContext, judgeCtxOf, notice, onTakeoverTurnEnd } from './session'
 import type { Ctx, PromptResult } from './state'
 import { clip, send } from './telegram'
 import type { ArchitectToolName } from './tools'
@@ -23,7 +25,6 @@ import type { AgentRecord, Blocker, Decision, TaskRecord, Workspace } from './ty
 import { directHolders, firstPlaced, isLive, pathOf, workspaceOf, workspacePaths, workspaces, worktreePath, writeRange } from './workspace'
 
 type ToolEvent = { tool: string; [k: string]: unknown }
-type LongAnswer = 'separate' | 'wait' | 'approve' | 'reject' | 'unclear'
 
 const TELEGRAM_MARK = /^\[magpie-tasks telegram chat=(\S+) message=(\d+)(?: decision=(\S+) answer=(separate|wait|approve|reject|unclear))?\][ \t]*$/
 
@@ -60,22 +61,53 @@ function agentName(a: AgentRecord): string {
   return a.name ? `${a.name} (${a.agentId})` : a.agentId
 }
 
-// Telegram (or the transcript) for a long-task decision, its message stored on the decision.
-async function askPerson(ctx: Ctx, task: TaskRecord, decision: Decision): Promise<void> {
-  const text = `${decision.question}\n回复：${decision.options.join(' / ')}`
-  const messageId = await telegramReport(ctx, task, text, { decisionId: decision.id })
-  if (messageId !== null && task.telegram !== null) {
-    const chatId = task.telegram.chatId
-    await ctx.reg.update(task.id, t => { const d = t.decisions[decision.id]; if (d) d.telegram = { chatId, messageId } }, { type: 'telegram', decision: decision.id, messageId })
-  }
+// How the answer to one of this task's decisions is read from the person's words and carried out.
+// A model-unavailable question is answered by one of its options as it stands.
+const FLOW: DecisionFlow = {
+  read: (ctx, decision, text) => decision.kind === 'model-unavailable' ? readOptionLabel(judgeCtxOf(ctx), decision, text) : readLongAnswer(judgeCtxOf(ctx), decision, text),
+  apply: (ctx, task, decision, answer, via) => applyLongDecision(ctx, task, decision, answer, via),
+}
+
+// Asks the person a long-task decision: a dialog in the window, Telegram when nobody answers there
+// (src/channel.ts). Answers where the question went.
+async function askPerson(ctx: Ctx, task: TaskRecord, decision: Decision): Promise<Route> {
+  return askInWindow(ctx, FLOW, task.id, decision.id)
+}
+
+// Records a new decision of this session's task, sets the task's state, and asks it like the
+// plugin's other questions. For the flows outside this module that ask the person (src/unavailable.ts).
+export async function askLongDecision(ctx: Ctx, task: TaskRecord, d: Pick<Decision, 'kind' | 'question' | 'options' | 'data'>, state: TaskRecord['state']): Promise<{ decision: Decision; route: Route }> {
+  const now = await ctx.io.now()
+  const decision: Decision = { id: newId('q', now), createdAt: now, ...d }
+  const updated = await ctx.reg.update(task.id, t => { t.decisions[decision.id] = decision; t.state = state }, { type: 'decision', decision: decision.id, kind: decision.kind, state })
+  return { decision, route: await askPerson(ctx, updated, decision) }
+}
+
+// The open 'interrupted' decision of a task: startup recovery found its working directory or an
+// integration in a state it cannot resume from, or the Router could not hand it a message. Until the
+// person answers it the task stays paused: no delegation and no integration.
+export function openInterruption(task: TaskRecord): Decision | undefined {
+  return Object.values(task.decisions).find(d => d.kind === 'interrupted' && d.resolvedAt === undefined)
+}
+
+export function interruptionRefusal(task: TaskRecord, what: string): string | null {
+  const d = openInterruption(task)
+  if (d === undefined) return null
+  return `Refused: ${what} waits for decision ${d.id} (interrupted: ${d.data['reason'] ?? 'the task was interrupted'}). The task stays paused until the person answers it in this window or on Telegram: 继续 lets the task run again, 暂停 keeps it paused. Do not delegate or integrate until then; you may discuss it with the person.`
+}
+
+// The open questions and notices of this session's task, after the session started (src/channel.ts).
+export async function resumeArchitectChannels(ctx: Ctx): Promise<void> {
+  await resumeChannels(ctx, FLOW, (await taskOf(ctx)).id)
 }
 
 // Marks a decision resolved; a task that waited only on it runs again.
-function resolve(t: TaskRecord, id: string, answer: string, at: number): void {
+function resolve(t: TaskRecord, id: string, answer: string, at: number, via: Via): void {
   const d = t.decisions[id]
   if (d === undefined) throw new Error(`decision ${id} does not exist in task ${t.id}`)
   d.resolvedAt = at
   d.answer = answer
+  d.via = via
   if (t.state === 'waiting-user' && Object.values(t.decisions).every(x => x.resolvedAt !== undefined)) t.state = 'running'
 }
 
@@ -108,6 +140,10 @@ export async function onArchitectPrompt(ctx: Ctx, e: PromptSubmitInput, next: Ne
   const context = [...(e.context ?? [])]
   const marker = parseTelegramMarker(e.text)
   const source = marker !== null ? 'telegram' : e.origin.kind === 'composer' && !isRecoveryMessage(e.text) ? 'window' : null
+  if (marker?.decision !== undefined) {
+    const late = await lateTelegramAnswer(ctx, task, marker.decision.id, { chatId: marker.chatId, messageId: marker.messageId })
+    if (late !== null) return { drop: `magpie-tasks: ${late}` }
+  }
   if (marker !== null) {
     // A message delivered into a running turn is answered by that turn's answer too.
     st.replyTargets.push({ chatId: marker.chatId, messageId: marker.messageId })
@@ -124,11 +160,28 @@ export async function onArchitectPrompt(ctx: Ctx, e: PromptSubmitInput, next: Ne
       if (t.state === 'error' || t.state === 'done') t.state = 'running'
     }, from === 'error' || from === 'done' ? { type: 'state', from, to: 'running', source } : { type: 'follow-up', source })
     const taskId = task.id
+    await personActed(ctx, taskId, source)
+    if (source === 'window') {
+      const carried = await decisionFromWindow(ctx, task, text)
+      if (carried !== null) context.push(carried)
+    }
     // Runs after the prompt has gone on; a failure to record the feedback is reported here.
     void judgeFeedback(ctx, taskId, source, text, at).catch((err: unknown) => notice(ctx, `magpie-tasks 出错（任务 ${taskId}）：记录反馈失败：${firstLine(err instanceof Error ? err.message : String(err))}`))
   }
-  context.push(architectContext(task, ctx.opts))
+  // The decisions carried out above changed the record the context is written from.
+  context.push(architectContext(await taskOf(ctx), ctx.opts))
   return next({ ...e, context })
+}
+
+// A Telegram delivery reached the architect session (session.receive, before it is queued). While
+// the architect's own question waits, a Telegram message answers it (src/channel.ts) and is taken
+// out of the queue: the reason to consume it with, or null to let the delivery go on.
+export async function onArchitectReceive(ctx: Ctx, text: string): Promise<string | null> {
+  const marker = parseTelegramMarker(text)
+  if (marker === null || marker.decision !== undefined) return null
+  const task = await taskOf(ctx)
+  const answered = await questionFromTelegram(ctx, task.id, marker.body, { chatId: marker.chatId, messageId: marker.messageId })
+  return answered ? `magpie-tasks: the Telegram message ${marker.messageId} answers the architect's question` : null
 }
 
 // The person's message to a done long task reopens it. Its worktrees were removed once the session
@@ -145,19 +198,34 @@ async function reopen(ctx: Ctx, task: TaskRecord): Promise<string> {
   return `[magpie-tasks] This long task was done; the person's message reopens it. Its worktree was removed when it closed and is made again at ${path} from the project as it is now; delegate changes there as before.${further}`
 }
 
+// A Telegram reply to a question of the window that was answered before it arrived: the person gets
+// one line under their reply saying how it was decided, and nothing is carried out or handed to the
+// architect. Answers that line, or null when the decision is still open or is not a window question.
+async function lateTelegramAnswer(ctx: Ctx, task: TaskRecord, decisionId: string, tg: { chatId: string; messageId: number }): Promise<string | null> {
+  const d = task.decisions[decisionId]
+  if (d === undefined) throw new Error(`the Telegram reply names decision ${decisionId}, which task ${task.id} does not have`)
+  if (d.resolvedAt === undefined || !asksInWindow(d)) return null
+  const line = decidedLine(d)
+  const messageId = await send(ctx.io, ctx.opts, tg.chatId, line, tg.messageId, false)
+  await ctx.reg.updateIndex(x => { x.messages[`${tg.chatId}:${messageId}`] = { taskId: task.id, kind: 'long' } })
+  await ctx.reg.log(task.id, { type: 'decision', decision: d.id, kind: d.kind, stage: 'late-answer', from: 'telegram', messageId })
+  return line
+}
+
 async function decisionFromTelegram(ctx: Ctx, task: TaskRecord, a: { id: string; answer: LongAnswer }, body: string): Promise<string> {
   const d = task.decisions[a.id]
   if (d === undefined) throw new Error(`the Telegram reply names decision ${a.id}, which task ${task.id} does not have`)
   if (d.resolvedAt !== undefined) return `[magpie-tasks] Decision ${d.id} (${d.kind}) was already resolved: ${d.answer}. The person's reply below is for your information.`
   if (d.kind === 'model-unavailable' || d.kind === 'model-change-confirm' || d.kind === 'route-confirm') {
-    const at = await ctx.io.now()
-    await ctx.reg.update(task.id, t => resolve(t, d.id, body.trim(), at), { type: 'decision', decision: d.id, kind: d.kind, answer: 'person-words' })
+    // The person's words are the answer; the window may have answered first.
+    const r = await answerDecision(ctx, FLOW, task.id, d.id, body.trim(), 'telegram')
+    if ('already' in r) return `[magpie-tasks] Decision ${d.id} (${d.kind}) was resolved while the person's Telegram reply arrived: ${decidedLine(r.already)} The reply below is for your information.`
     if (d.kind === 'route-confirm') {
       // A routing assessment asked before the daily task was promoted: its subagent belonged to the
       // Router session, so the architect delegates the work itself.
       return `[magpie-tasks] Decision ${d.id} (route-confirm: the routing assessment of the daily task this long task was promoted from) is resolved with the person's words below; the assessment subagent ran in the Router session and does not continue. Delegate the work as they say, with "[model-reason user: <their words>]" for a model they named.`
     }
-    return `[magpie-tasks] Decision ${d.id} (${d.kind}: ${d.question}) is resolved with the person's words below. Arrange the hand-over as they say: delegate with "[model-reason user: <their words>]" for a model they named, or wait if they chose to wait.`
+    return `[magpie-tasks] Decision ${d.id} (${d.kind}: ${d.question}) is resolved with the person's words below: ${r.result}`
   }
   if (a.answer === 'unclear') {
     const how = d.kind === 'file-conflict'
@@ -165,8 +233,22 @@ async function decisionFromTelegram(ctx: Ctx, task: TaskRecord, a: { id: string;
       : 'Ask the person to reply to that Telegram question again with one of its options; the reply is carried out when it arrives.'
     return `[magpie-tasks] The person replied to decision ${d.id} (${d.kind}: ${d.question}), but the reply could not be read as one of its options (${d.options.join(' / ')}). ${how}`
   }
-  const result = await applyLongDecision(ctx, task, d, a.answer)
-  return `[magpie-tasks] Decision ${d.id} (${d.kind}) was carried out on the person's Telegram reply (${a.answer}): ${result}`
+  const r = await answerDecision(ctx, FLOW, task.id, d.id, a.answer, 'telegram')
+  if ('already' in r) return `[magpie-tasks] Decision ${d.id} (${d.kind}) was resolved while the person's Telegram reply arrived: ${decidedLine(r.already)} The reply below is for your information.`
+  return `[magpie-tasks] Decision ${d.id} (${d.kind}) was carried out on the person's Telegram reply (${a.answer}): ${r.result}`
+}
+
+// Words the person typed in the window while a question of the window is open: when they read as
+// its answer it is carried out, and the architect reads what happened beside the message; null when
+// they do not, and the message is the architect's alone.
+async function decisionFromWindow(ctx: Ctx, task: TaskRecord, text: string): Promise<string | null> {
+  const d = openWindowDecision(task)
+  if (d === undefined) return null
+  const answer = await FLOW.read(ctx, d, text)
+  if (answer === 'unclear') return null
+  const r = await answerDecision(ctx, FLOW, task.id, d.id, answer, 'window')
+  if ('already' in r) return null
+  return `[magpie-tasks] The person's message below answers decision ${d.id} (${d.kind}: ${firstLine(d.question)}) with ${answer}; it was carried out: ${r.result}`
 }
 
 // Section 9.14 feedback: the person's words, judged for "unsuitable" and "model opinion" after the
@@ -201,6 +283,7 @@ export async function onArchitectComplete(ctx: Ctx, e: TurnCompleteInput): Promi
     ? `架构师会话 ${st.sessionId} 的主对话因 API 错误结束${st.stopFailures.get('main') ? `（${st.stopFailures.get('main')}）` : ''}；模型由你决定${shortId ? `，打开会话：claude attach ${shortId}` : ''}。`
     : null
   const targets = st.replyTargets.splice(0)
+  const telegramTurn = targets.length > 0
   if (targets.length > 0) {
     const target = targets[0]!
     const text = e.reason === 'answer'
@@ -210,12 +293,12 @@ export async function onArchitectComplete(ctx: Ctx, e: TurnCompleteInput): Promi
     await reg.updateIndex(x => { x.messages[`${target.chatId}:${messageId}`] = { taskId: task.id, kind: 'long' } })
     await reg.log(task.id, { type: 'telegram', messageId, replyTo: target.messageId, reason: e.reason, targets: targets.length })
   } else if (errorNote !== null) {
-    await telegramReport(ctx, task, `长期任务「${task.title}」（${task.id}）：${errorNote}`)
+    await showNotice(ctx, task, `长期任务「${task.title}」（${task.id}）：${errorNote}`)
   }
   const hit = await scanDebugLog(ctx)
   if (hit !== null) {
     await reg.log(task.id, { type: 'error', during: 'context-memory', error: hit.slice(0, 500) })
-    await telegramReport(ctx, task, `长期任务「${task.title}」（${task.id}）的架构师会话报告 context-memory 归档失败，压缩没有生效：${clip(hit, 500)}`)
+    await showNotice(ctx, task, `长期任务「${task.title}」（${task.id}）的架构师会话报告 context-memory 归档失败，压缩没有生效：${clip(hit, 500)}`, { telegramTurn })
   }
 }
 
@@ -223,10 +306,26 @@ export async function onArchitectComplete(ctx: Ctx, e: TurnCompleteInput): Promi
 
 export async function onArchitectToolCall(ctx: Ctx, e: ToolCallInput, next: Next<'tool.call'>): Promise<ToolCallResult> {
   const task = await taskOf(ctx)
+  const ev = e as unknown as ToolEvent
+  if (e.tool === 'AskUserQuestion' && isArchitectQuestion(ev)) return await architectQuestions(ctx, task, ev['questions']) as ToolCallResult
+  if (e.tool === 'Agent') {
+    const refused = interruptionRefusal(task, 'Delegating with the Agent tool')
+    if (refused !== null) return { deny: refused }
+  }
   const home = await ctx.io.env('HOME')
   if (home === undefined || home === '') throw new Error('HOME is not set')
-  const deny = await architectDeny(e as unknown as ToolEvent, { projectRoot: task.project?.root ?? ctx.st.cwd, home, place: placeFor(ctx) })
+  const deny = await architectDeny(ev, { projectRoot: task.project?.root ?? ctx.st.cwd, home, place: placeFor(ctx) })
   return deny === null ? next(e) : { deny }
+}
+
+// Whether an AskUserQuestion call is the architect model's own. A plugin's `$.ui.ask` raises the same
+// tool call under an ID the engine makes (`toolu_plugin_…`, seen 2026-11-13), and this plugin's
+// dialogs are known by their text: both go on to the engine's dialog untouched.
+export function isArchitectQuestion(e: ToolEvent): boolean {
+  if (typeof e['tool_use_id'] === 'string' && e['tool_use_id'].startsWith('toolu_plugin_')) return false
+  const questions = e['questions']
+  const first = Array.isArray(questions) ? (questions[0] as { question?: unknown } | undefined)?.question : undefined
+  return !(typeof first === 'string' && isOwnDialog(first))
 }
 
 // ---- subagents: write range, touched files and conflicts (sections 9.5, 9.9) ----------------------
@@ -387,7 +486,7 @@ async function fileConflict(ctx: Ctx, task: TaskRecord, a: string, b: string, wh
     question: copy === null
       ? `长期任务「${task.title}」（${task.id}）：${what}。已暂停后启动的${label(later)}。让它在单独的工作副本中继续，还是等${label(earlier)}完成后再继续？`
       : `长期任务「${task.title}」（${task.id}）：${what}。已暂停后启动的${label(later)}，等${label(earlier)}完成后它再继续（${copy.zh}，没有单独副本可用）。`,
-    options: copy === null ? ['单独副本', '等待前一方'] : ['等待前一方'],
+    options: copy === null ? [SEPARATE, WAIT] : [WAIT],
     data: { agentId: later.agentId, otherAgentId: earlier.agentId, path: why.path, cause: why.cause },
   }
   const updated = await reg.update(task.id, t => {
@@ -398,8 +497,8 @@ async function fileConflict(ctx: Ctx, task: TaskRecord, a: string, b: string, wh
   }, { type: 'decision', decision: decision.id, kind: 'file-conflict', paused: later.agentId, other: earlier.agentId, path: why.path, cause: why.cause })
   task.agents[later.agentId] = updated.agents[later.agentId]!
   task.decisions[decision.id] = decision
-  await appendForArchitect(ctx, `[magpie-tasks] File conflict in the task's working directory: subagent ${agentName(later)} was paused (it started later) because ${cause}. Decision ${decision.id}: discuss it with the person if needed, then call mcp__magpie-tasks__resolve_conflict with agent_id ${later.agentId} and decision ${copy === null ? 'separate (it continues in its own Git worktree copied from the working directory) or wait' : `wait (${copy.en}, so there is no separate copy)`} (it continues after ${earlier.agentId} finishes). The person was asked on Telegram as well.`)
-  await askPerson(ctx, updated, decision)
+  const route = await askPerson(ctx, updated, decision)
+  await appendForArchitect(ctx, `[magpie-tasks] File conflict in the task's working directory: subagent ${agentName(later)} was paused (it started later) because ${cause}. Decision ${decision.id}: ${routeNote(route, ctx.opts)} Their answer is carried out as it arrives. You may also discuss it with them and call mcp__magpie-tasks__resolve_conflict with agent_id ${later.agentId} and decision ${copy === null ? 'separate (it continues in its own Git worktree copied from the working directory) or wait' : `wait (${copy.en}, so there is no separate copy)`} (it continues after ${earlier.agentId} finishes).`)
   return later.agentId
 }
 
@@ -486,7 +585,7 @@ async function release(ctx: Ctx, task: TaskRecord, d: Decision): Promise<void> {
 
 // ---- integration and its conflicts ----------------------------------------------------------------
 
-async function integrationConflict(ctx: Ctx, task: TaskRecord, a: { source: string; target: string; baseRef: string; agentId?: string }, r: Extract<IntegrationResult, { status: 'conflict' }>): Promise<Decision> {
+async function integrationConflict(ctx: Ctx, task: TaskRecord, a: { source: string; target: string; baseRef: string; agentId?: string }, r: Extract<IntegrationResult, { status: 'conflict' }>): Promise<{ decision: Decision; route: Route }> {
   const now = await ctx.io.now()
   const detail = clip(r.detail, 800)
   const decision: Decision = {
@@ -498,9 +597,9 @@ async function integrationConflict(ctx: Ctx, task: TaskRecord, a: { source: stri
     data: { source: a.source, target: a.target, baseRef: a.baseRef, files: r.files.join('\n'), ...(a.agentId ? { agentId: a.agentId } : {}) },
   }
   const updated = await ctx.reg.update(task.id, t => { t.decisions[decision.id] = decision; t.state = 'waiting-user' }, { type: 'decision', decision: decision.id, kind: 'integration-conflict', target: a.target, files: r.files })
-  await appendForArchitect(ctx, `[magpie-tasks] Integration conflict (decision ${decision.id}): applying ${a.source} to ${a.target} failed on ${r.files.join(', ')}:\n${detail}\nThe person was asked on Telegram whether to retry after resolving it or to give up.`)
-  await askPerson(ctx, updated, decision)
-  return decision
+  const route = await askPerson(ctx, updated, decision)
+  await appendForArchitect(ctx, `[magpie-tasks] Integration conflict (decision ${decision.id}): applying ${a.source} to ${a.target} failed on ${r.files.join(', ')}:\n${detail}\n${routeNote(route, ctx.opts)} They choose between retrying after the conflict is resolved and giving up.`)
+  return { decision, route }
 }
 
 // Integrates after the person approved: the one integration the decision recorded (its source,
@@ -516,7 +615,7 @@ async function integrateApproved(ctx: Ctx, task: TaskRecord, decision: Decision)
   if (root !== null) await recordIntegration(ctx.io, ctx.reg, task.id, [{ root, status: r.status, files: r.status === 'empty' ? [] : r.files }])
   if (r.status === 'conflict') {
     const again = await integrationConflict(ctx, (await ctx.reg.get(task.id))!, a, r)
-    return `${integrationText(r, target)} New decision ${again.id}; the person was asked on Telegram.`
+    return `${integrationText(r, target)} New decision ${again.decision.id}. ${routeNote(again.route, ctx.opts)}`
   }
   return integrationText(r, target)
 }
@@ -533,8 +632,8 @@ async function integrateAll(ctx: Ctx, task: TaskRecord): Promise<string> {
     else if (o.status === 'applied') lines.push(integrationText({ status: 'applied', files: o.files, newBase: '' }, o.root))
     else {
       const r = { status: 'conflict' as const, files: o.files, detail: o.conflict!.detail }
-      const decision = await integrationConflict(ctx, (await ctx.reg.get(task.id))!, { source: o.conflict!.source, target: o.root, baseRef: o.conflict!.baseRef }, r)
-      lines.push(`${integrationText(r, o.root)}\n${r.detail}\nNothing was applied there. The task waits for the person (decision ${decision.id}); they were asked on Telegram.`)
+      const asked = await integrationConflict(ctx, (await ctx.reg.get(task.id))!, { source: o.conflict!.source, target: o.root, baseRef: o.conflict!.baseRef }, r)
+      lines.push(`${integrationText(r, o.root)}\n${r.detail}\nNothing was applied there. The task waits for the person (decision ${asked.decision.id}). ${routeNote(asked.route, ctx.opts)}`)
     }
   }
   return lines.join('\n')
@@ -548,13 +647,14 @@ function integrationText(r: IntegrationResult, target: string): string {
 
 // ---- decisions of a long task --------------------------------------------------------------------
 
-// Carries out a long task's decision in the architect session (resolve_conflict and Telegram replies
-// share it); returns what happened, for the architect to read.
-export async function applyLongDecision(ctx: Ctx, task: TaskRecord, decision: Decision, answer: string): Promise<string> {
+// Carries out a long task's decision in the architect session (answers from the window and from
+// Telegram and the architect's resolve_conflict share it, one at a time through answerDecision);
+// returns what happened, for the architect to read. `via` is where the answer came from.
+export async function applyLongDecision(ctx: Ctx, task: TaskRecord, decision: Decision, answer: string, via: Via): Promise<string> {
   const { reg, io, opts } = ctx
   if (decision.resolvedAt !== undefined) return `Decision ${decision.id} was already resolved (${decision.answer ?? ''}).`
   const now = await io.now()
-  const log = { type: 'decision', decision: decision.id, kind: decision.kind, answer }
+  const log = { type: 'decision', decision: decision.id, kind: decision.kind, answer, via }
   switch (decision.kind) {
     case 'file-conflict': {
       const agentId = decision.data['agentId']
@@ -572,7 +672,7 @@ export async function applyLongDecision(ctx: Ctx, task: TaskRecord, decision: De
           a.worktree = path
           a.state = 'idle'
           delete a.pausedFor
-          resolve(t, decision.id, 'separate', now)
+          resolve(t, decision.id, 'separate', now, via)
         }, { ...log, path })
         // Its touches were in the shared worktree; from now on it cannot conflict there.
         ctx.st.touches.delete(agentId)
@@ -583,7 +683,7 @@ export async function applyLongDecision(ctx: Ctx, task: TaskRecord, decision: De
         return `separate worktree ${path} created for agent ${agentId}, which is woken to continue there; its changes are merged into ${from} when it reports done.`
       }
       if (answer === 'wait') {
-        const updated = await reg.update(task.id, t => resolve(t, decision.id, 'wait', now), log)
+        const updated = await reg.update(task.id, t => resolve(t, decision.id, 'wait', now, via), log)
         const other = decision.data['otherAgentId']
         const otherAgent = other === undefined ? undefined : updated.agents[other]
         if (otherAgent === undefined || otherAgent.state !== 'running') {
@@ -596,24 +696,24 @@ export async function applyLongDecision(ctx: Ctx, task: TaskRecord, decision: De
     }
     case 'integration-conflict': {
       if (answer === 'reject') {
-        await reg.update(task.id, t => resolve(t, decision.id, 'reject', now), log)
+        await reg.update(task.id, t => resolve(t, decision.id, 'reject', now, via), log)
         return 'the person gave up this integration; the worktree keeps the changes.'
       }
       if (answer !== 'approve') throw new Error(`an integration-conflict decision takes approve or reject, not ${answer}`)
-      const updated = await reg.update(task.id, t => resolve(t, decision.id, 'approve', now), log)
+      const updated = await reg.update(task.id, t => resolve(t, decision.id, 'approve', now, via), log)
       return `retried: ${await integrateApproved(ctx, updated, decision)}`
     }
     case 'fix-confirm': {
       // A daily task's fixed result, asked about before the task was promoted (section 9.11).
       const changed = decision.data['change'] === 'yes'
       if (answer === 'reject') {
-        await reg.update(task.id, t => resolve(t, decision.id, 'reject', now), log)
+        await reg.update(task.id, t => resolve(t, decision.id, 'reject', now, via), log)
         return changed
           ? `the person declined to integrate the fixed result of the daily task this long task was promoted from; the changes stay in ${workspaces(task).flatMap(w => (w.worktree !== null ? [w.worktree.path] : [])).join(', ') || 'the worktree'}.`
           : 'the person did not accept the fixed result of the daily task this long task was promoted from.'
       }
       if (answer !== 'approve') throw new Error(`a fix-confirm decision takes approve or reject, not ${answer}`)
-      const updated = await reg.update(task.id, t => resolve(t, decision.id, 'approve', now), log)
+      const updated = await reg.update(task.id, t => resolve(t, decision.id, 'approve', now, via), log)
       if (!changed) return 'the person accepted the fixed result of the daily task this long task was promoted from (it changed no files).'
       return `the person approved integrating the fixed result of the daily task this long task was promoted from: ${await integrateApproved(ctx, updated, decision)}`
     }
@@ -621,20 +721,24 @@ export async function applyLongDecision(ctx: Ctx, task: TaskRecord, decision: De
     case 'interrupted': {
       if (answer !== 'approve' && answer !== 'reject') throw new Error(`a ${decision.kind} decision takes approve or reject, not ${answer}`)
       await reg.update(task.id, t => {
-        resolve(t, decision.id, answer, now)
+        resolve(t, decision.id, answer, now, via)
         if (decision.kind === 'interrupted' && answer === 'reject') { t.state = 'paused'; t.pausedByUser = true }
       }, log)
       if (decision.kind === 'interrupted') {
+        // The Router's interruption keeps the message it could not hand over.
+        const lost = decision.data['message']
         return answer === 'approve'
-          ? `the person checked the interrupted step (${decision.data['reason'] ?? ''}) and asks you to continue.`
-          : 'the person keeps the task paused after the interruption.'
+          ? `the person checked the interrupted step (${decision.data['reason'] ?? ''}) and asks you to continue; the task runs again.${lost !== undefined ? ` The message that did not reach you then:\n${lost}` : ''}`
+          : 'the person keeps the task paused after the interruption; delegation and integration wait until they say more.'
       }
       return answer === 'approve' ? 'the person agrees with the proposal in the no-progress report.' : 'the person does not agree with the proposal in the no-progress report; discuss the next step with them.'
     }
     case 'model-unavailable':
+      await reg.update(task.id, t => resolve(t, decision.id, answer, now, via), log)
+      return `the person answered "${answer}" for the subagent ${decision.data['agentId'] ?? ''} whose model is unavailable. Arrange it as they say: for another model, delegate the remaining work with "[model <its Magpie model ID>]" and "[model-reason user: ${answer.replace(/\]/g, '）').replace(/\n+/g, ' ')}]" in the brief; to wait, delegate nothing for that work until they say more.`
     case 'model-change-confirm':
     case 'route-confirm':
-      await reg.update(task.id, t => resolve(t, decision.id, answer, now), log)
+      await reg.update(task.id, t => resolve(t, decision.id, answer, now, via), log)
       return `recorded the person's answer: ${answer}`
     default:
       throw new Error(`decision ${decision.id} of task ${task.id} has the unknown kind ${String((decision as { kind: unknown }).kind)}`)
@@ -660,6 +764,8 @@ function str(args: Record<string, unknown>, name: string, required: boolean): st
 
 export async function architectTool(ctx: Ctx, name: ArchitectToolName, args: Record<string, unknown>): Promise<string> {
   const task = await taskOf(ctx)
+  const refused = name === 'model_route' || name === 'integrate' ? interruptionRefusal(task, name === 'model_route' ? 'Delegating with model_route' : 'Integrating') : null
+  if (refused !== null) throw new Error(refused)
   switch (name) {
     case 'model_route': return modelRoute(ctx, task, args)
     case 'task_status': return taskStatus(task)
@@ -674,7 +780,8 @@ export async function architectTool(ctx: Ctx, name: ArchitectToolName, args: Rec
       if (agent === undefined) throw new Error(`agent ${agentId} is not a subagent of task ${task.id}`)
       const decision = agent.pausedFor === undefined ? undefined : task.decisions[agent.pausedFor]
       if (decision === undefined || decision.kind !== 'file-conflict') throw new Error(`agent ${agentId} has no pending file-conflict decision`)
-      return applyLongDecision(ctx, task, decision, answer)
+      const r = await answerDecision(ctx, FLOW, task.id, decision.id, answer, 'architect')
+      return 'already' in r ? `Decision ${decision.id} was resolved already: ${decidedLine(r.already)}` : r.result
     }
     default:
       throw new Error(`${String(name)} is not an architect tool`)
@@ -792,8 +899,8 @@ async function noProgress(ctx: Ctx, task: TaskRecord, blocker: Blocker, outcome:
     data: { blockerId: blocker.id, agentId, outcome },
   }
   const updated = await ctx.reg.update(task.id, t => { t.decisions[decision.id] = decision }, { type: 'decision', decision: decision.id, kind: 'no-progress', blocker: blocker.id, outcome, agentId })
-  await askPerson(ctx, updated, decision)
-  return `Refused: blocker ${blocker.id} already had its ${outcome === 'diagnosis' ? 'one independent diagnosis' : 'one model change'}. Pause the work this blocker affects and discuss the next step with the person; they were notified on Telegram (decision ${decision.id}).`
+  const route = await askPerson(ctx, updated, decision)
+  return `Refused: blocker ${blocker.id} already had its ${outcome === 'diagnosis' ? 'one independent diagnosis' : 'one model change'}. Pause the work this blocker affects and discuss the next step with the person (decision ${decision.id}). ${routeNote(route, ctx.opts)}`
 }
 
 async function integrateTool(ctx: Ctx, task: TaskRecord, note: string | undefined): Promise<string> {
@@ -802,23 +909,25 @@ async function integrateTool(ctx: Ctx, task: TaskRecord, note: string | undefine
   return integrateAll(ctx, task)
 }
 
-// kind decision: a question the person must answer; result: a finished part worth their attention;
-// done: the whole task is finished, so it closes. A closed task's architect session is stopped once it
-// has been idle for ten minutes and its worktree removed (src/reclaim.ts); the person's next message
-// reopens the task and resumes the session.
+// kind result: a finished part worth the person's attention; done: the whole task is finished, so it
+// closes. A closed task's architect session is stopped once it has been idle for ten minutes and its
+// worktree removed (src/reclaim.ts); the person's next message reopens the task and resumes the session.
+// The line shows in the window and goes to Telegram when the person sends nothing (src/channel.ts).
 async function notifyUser(ctx: Ctx, task: TaskRecord, args: Record<string, unknown>): Promise<string> {
   const kind = str(args, 'kind', true)
-  if (kind !== 'decision' && kind !== 'result' && kind !== 'done') throw new Error('kind must be decision, result or done')
+  if (kind === 'decision') throw new Error('kind is result or done. Ask the person what they must decide with AskUserQuestion: magpie-tasks shows the question in the window and sends it to Telegram when nobody answers there')
+  if (kind !== 'result' && kind !== 'done') throw new Error('kind must be result or done')
   const text = str(args, 'text', true)
   const now = await ctx.io.now()
-  const heading = kind === 'done' ? '完成' : kind === 'result' ? '有了结果' : '需要你决定'
-  const messageId = await telegramReport(ctx, task, `长期任务「${task.title}」${heading}：\n${text}`)
+  const route = await showNotice(ctx, task, `长期任务「${task.title}」${kind === 'done' ? '完成' : '有了结果'}：\n${text}`)
   await ctx.reg.update(task.id, t => {
     if (kind !== 'done') return
     t.completedAt = now
     t.state = 'done'
-  }, { type: 'notify', kind, messageId, ...(kind === 'done' ? { state: 'done' } : {}) })
-  const where = messageId === null ? 'Shown in this window (the task has no Telegram chat)' : 'Sent to the person on Telegram'
+  }, { type: 'notify', kind, route, ...(kind === 'done' ? { state: 'done' } : {}) })
+  const where = route === 'both' ? 'Shown in the window and sent to the person on Telegram'
+    : route === 'window' ? 'Shown in the window (the task has no Telegram chat)'
+    : `Shown in the window; it goes to Telegram as well if the person sends this session nothing within ${ctx.opts.telegramAfterMinutes} minutes`
   if (kind === 'done') return `${where}. The task is closed: once you have been idle for ten minutes this session is stopped and the task worktree removed; the person's next message reopens the task.`
-  return kind === 'decision' ? `${where}; their reply comes back to this session.` : `${where}.`
+  return `${where}.`
 }

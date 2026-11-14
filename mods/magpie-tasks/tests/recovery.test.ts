@@ -6,7 +6,8 @@
 import { expect, test } from 'claude-code/testing'
 import { fnv1a64 } from '../src/io'
 import { parseAgents } from '../src/launch'
-import { CONTEXT_MEMORY_RELOADED, fingerprintOf, isRecoveryMessage, needsReload, recoveryAction, unfinishedIntegrations } from '../src/recovery'
+import { interruptionRefusal } from '../src/architect'
+import { CONTEXT_MEMORY_RELOADED, fingerprintOf, interruptedDecision, interruptedMessage, isRecoveryMessage, needsReload, recoveryAction, reportPlace, unfinishedIntegrations, waitingMessage } from '../src/recovery'
 import type { TaskRecord } from '../src/types'
 import { agentsAll20261109 } from './data/agents'
 import { installedPluginsHome, installedPluginsProbe } from './data/installed-plugins'
@@ -129,4 +130,42 @@ test('the context-memory fingerprint is the hash of its installs\' four fields, 
   const fpBoth = fingerprintOf(both)
   both.plugins['context-memory@sipeng-mods'] = [user, { ...local, version: '0.4.0' }]
   expect(fingerprintOf(both)).not.toBe(fpBoth)
+})
+
+test('a task recovery cannot resume as it was gets an interruption asked in its resumed architect\'s window, and its delegation waits for the answer', () => {
+  const task = long(BG_DONE, 'running', { agents: {} })
+  const unfinished = [{ target: '/tmp/mt/proj', tree: 't2', files: ['greet.py', 'README.md'] }]
+  const d = interruptedDecision(task, '一次整合开始后没有完成记录：目标 /tmp/mt/proj，文件 greet.py、README.md', unfinished, NOW, 'q-20261109-c3d4e5')
+  expect(d).toEqual({
+    id: 'q-20261109-c3d4e5', kind: 'interrupted', createdAt: NOW, askedAt: NOW,
+    question: '长期任务「整理 greet」（l-20261109-a1b2c3）中断后无法自动恢复：一次整合开始后没有完成记录：目标 /tmp/mt/proj，文件 greet.py、README.md。请检查后选择“继续”，任务接着运行；选择“暂停”则保持暂停。',
+    options: ['继续', '暂停'],
+    data: { reason: '一次整合开始后没有完成记录：目标 /tmp/mt/proj，文件 greet.py、README.md', target: '/tmp/mt/proj', tree: 't2', files: 'greet.py\nREADME.md' },
+  })
+  const message = interruptedMessage(task, d)
+  // The resumed architect reads it as the plugin's message, not the person's.
+  expect(isRecoveryMessage(message)).toBe(true)
+  expect(message).toContain('decision q-20261109-c3d4e5: 继续 / 暂停')
+  expect(message).toContain('mcp__magpie-tasks__model_route and the Agent tool) and mcp__magpie-tasks__integrate are refused')
+  const waiting = { ...task, state: 'waiting-user' as const, decisions: { [d.id]: d } }
+  expect(interruptionRefusal(waiting, 'Delegating with model_route')).toBe('Refused: Delegating with model_route waits for decision q-20261109-c3d4e5 (interrupted: 一次整合开始后没有完成记录：目标 /tmp/mt/proj，文件 greet.py、README.md). The task stays paused until the person answers it in this window or on Telegram: 继续 lets the task run again, 暂停 keeps it paused. Do not delegate or integrate until then; you may discuss it with the person.')
+  expect(interruptionRefusal({ ...waiting, decisions: { [d.id]: { ...d, resolvedAt: NOW + 60_000, answer: 'approve', via: 'window' } } }, 'Integrating')).toBeNull()
+  expect(interruptionRefusal(task, 'Integrating')).toBeNull()
+})
+
+test('a task waiting for the person is resumed with a message naming its open questions', () => {
+  const q = { id: 'q-20261109-f00001', kind: 'model-unavailable' as const, createdAt: NOW, askedAt: NOW, question: '模型不可用', options: ['等待', '改用 Sol 6.1'], data: {} }
+  const message = waitingMessage(long(GONE, 'waiting-user', { decisions: { [q.id]: q } }))
+  expect(isRecoveryMessage(message)).toBe(true)
+  expect(message).toContain('The task waits for the person: decision q-20261109-f00001 (model-unavailable). magpie-tasks has put its questions back in this window; one that has waited its time goes to Telegram at once.')
+  expect(recoveryAction(long(GONE, 'waiting-user', { decisions: { [q.id]: q } }), rows, as)).toBe('keep-waiting')
+})
+
+test('a long task\'s recovery report shows in the claude-magpie window that ran recovery, and goes to Telegram from the Router', () => {
+  expect(reportPlace('candidate', long(GONE, 'starting'))).toBe('window')
+  expect(reportPlace('router', long(GONE, 'starting'))).toBe('telegram')
+  expect(reportPlace('router', long(GONE, 'starting', { telegram: { chatId: 'tui' } }))).toBe('window')
+  // Daily tasks are the Router's: Telegram whoever runs recovery, the transcript for a terminal one.
+  expect(reportPlace('candidate', daily(GONE, 'running'))).toBe('telegram')
+  expect(reportPlace('candidate', { ...daily(GONE, 'running'), telegram: null })).toBe('window')
 })

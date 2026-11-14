@@ -21,7 +21,7 @@ const OPTS: Options = {
   launcher: 'claude-magpie',
   claudeBin: 'claude',
   telegramStateDir: '/home/ubuntu/.claude/channels/telegram-live',
-  telegramChatId: '',
+  telegramChatId: '', telegramAfterMinutes: 10,
   timezone: 'Asia/Shanghai',
   ratingHour: 21,
 }

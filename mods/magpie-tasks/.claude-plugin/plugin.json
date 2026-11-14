@@ -78,6 +78,12 @@
       "description": "从窗口开始的长期任务发送通知的聊天；留空时使用 access.json 中 allowFrom 的唯一一项。",
       "default": ""
     },
+    "telegramAfterMinutes": {
+      "type": "number",
+      "title": "转发到 Telegram 前等待的分钟数",
+      "description": "长期任务的问题和通知先显示在架构师的窗口里；这么多分钟内没有回答，再发到 Telegram。",
+      "default": 10
+    },
     "timezone": {
       "type": "string",
       "title": "时区",

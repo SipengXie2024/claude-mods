@@ -1,7 +1,7 @@
 // Background sessions (plan sections 9.2 steps 8–10, 9.12, 9.13): starting an architect with
 // `claude-magpie --bg` and waiting for it to claim its task, resuming a stopped session under its own
 // ID, stopping one, and reading `claude agents --json --all`.
-import { expandHome, fnv1a64, newId, wait, type Io } from './io'
+import { expandHome, newId, wait, type Io } from './io'
 import { requestId } from './model'
 import type { Ctx } from './state'
 import type { Claim, Options, TaskRecord } from './types'
@@ -82,13 +82,32 @@ function firstLine(text: string): string {
   return text.trim().split('\n')[0]?.trim() ?? ''
 }
 
+// The architect marker line architectFirstMessage puts after the request. The task ID has the shape
+// of a registry file name (Registry.checkId), so a claim lookup by it cannot throw.
+const ARCHITECT_MARK = /\[magpie-tasks architect task=([A-Za-z0-9][A-Za-z0-9._-]*) /g
+
+// The task a background session's first prompt names: the last architect marker line, which is the
+// one architectFirstMessage puts after the request, so a marker the request itself quotes never
+// wins; null when the prompt has none (a background session the person started). The launch claim
+// is found by this task and not by a hash of the whole text, because the engine rewrites a prompt on
+// its way into a background session: a pasted request arrives with its paste tags escaped
+// (`<pasted_content` becomes `<\pasted_content`), and no text the launcher could hash in advance
+// stays equal to what the hook reads.
+export function architectMarkTask(text: string): string | null {
+  let task: string | null = null
+  for (const found of text.matchAll(ARCHITECT_MARK)) task = found[1]!
+  return task
+}
+
 // Writes the launch claim, starts the architect with `<launcher> --bg` in `cwd`, and waits until the
-// background session has claimed the task (section 9.3). On failure: the session is stopped, the
-// leftover claim removed, the task set to 'error', and a LaunchError thrown.
+// background session has claimed the task (section 9.3). The session finds the claim by the task ID
+// in the architect marker line of `message` (architectFirstMessage). On failure: the session is
+// stopped, the leftover claim removed, the task set to 'error', and a LaunchError thrown.
 export async function launchArchitect(ctx: Ctx, a: { task: TaskRecord; model: string; message: string; cwd: string }): Promise<{ shortId: string; sessionId: string }> {
   const { io, reg, opts } = ctx
+  if (architectMarkTask(a.message) !== a.task.id) throw new Error(`the architect's first message does not name task ${a.task.id} in its last architect marker line`)
   const now = await io.now()
-  const claim: Claim = { id: newId('c', now), kind: 'launch', taskId: a.task.id, cwd: a.cwd, createdAt: now, expiresAt: now + LAUNCH_CLAIM_MS, promptHash: fnv1a64(a.message) }
+  const claim: Claim = { id: newId('c', now), kind: 'launch', taskId: a.task.id, cwd: a.cwd, createdAt: now, expiresAt: now + LAUNCH_CLAIM_MS }
   await reg.putClaim(claim)
   const pluginDir = pluginDirArg(ctx.host.plugin.root, await installedPlugins(io))
   const debug = debugFile(opts, a.task.id)

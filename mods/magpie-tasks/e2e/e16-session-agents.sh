@@ -14,7 +14,6 @@ mkdir -p "$repo"
 ( cd "$repo" && git init -q && printf 'print("hello")\n' > greet.py && git add . \
   && git -c user.email=e2e@magpie -c user.name=e2e commit -qm init )
 dailies() { ls "$E"/state/tasks/d-*.json 2>/dev/null | grep -v '\.log\.jsonl$' || true; }
-newest_daily() { dailies | xargs -r ls -t | head -1; }
 dbg="$E/e16.log"
 # Every session_agents call of the session, oldest first: "<time> <agent name, or router for the main
 # conversation> <answer>", the answer's lines joined by " / ".
@@ -58,14 +57,16 @@ wait_ready e16
 check 'the Router session has role router' wait_for 60 debug_has "$dbg" 'magpie-tasks: role router'
 
 # (a)
+tasks0=$(tasks_with d-)
 type_line e16 "依次运行三次命令 python3 -c 'import time; time.sleep(100)'，每次都在前台等它结束再运行下一次，不要放到后台；全部结束后只回答三个退出码"
-check '(a) the long-running task is recorded' wait_for 300 more_tasks d- 0
-ta=$(newest_daily)
+check '(a) the long-running task is recorded' wait_for 300 has_new_task d- "$tasks0"
+ta=$(new_task d- "$tasks0")
 check '(a) its executor has started' wait_for 300 bash -c "jq -e '[.agents[] | select(.role == \"executor\")] | length > 0' '$ta'"
 wa=$(jq -r .owner.workerName "$ta")
+tasks0=$(tasks_with d-)
 type_line e16 "统计 $repo/greet.py 有几行。另外我马上要重启这个 Router 会话，告诉我重启会不会打断别的正在运行的后台任务"
-check '(a) the question is a task of its own' wait_for 300 more_tasks d- 1
-tb=$(newest_daily)
+check '(a) the question is a task of its own' wait_for 300 has_new_task d- "$tasks0"
+tb=$(new_task d- "$tasks0")
 check '(a) its worker asks for the session'"'"'s agents' wait_for 600 more_worker_calls 0
 check '(a) the first worker is listed as running' worker_has " / - $wa \\([^)]*\\): RUNNING, "
 check '(a) the count names a running agent' worker_has ': [1-9][0-9]* of [0-9]+ running\.'

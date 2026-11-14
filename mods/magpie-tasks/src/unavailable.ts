@@ -2,6 +2,8 @@
 // already retried and switched accounts, and the agent's turn ended on an API error. A substitute
 // the routing table supports takes over after the person is told; with none, the person decides.
 import type { ClassicHookInputs, TurnCompleteInput } from 'claude-code'
+import { askLongDecision } from './architect'
+import { routeNote, showNotice } from './channel'
 import { askDecision, handOver, tell } from './daily'
 import { agentLabel, canonical, displayName, isAvailable, sameModel } from './model'
 import { isHardWork, ownModels, ruleById, ruleModel, startEffort, substituteEffort, type Rule, type Rules } from './rules'
@@ -188,24 +190,25 @@ function roleName(agent: AgentRecord): string {
 }
 
 // A long task's implementers are the architect's to replace: it is told the failure and the
-// routing table's suggestion; the person is told too, and decides when there is no substitute.
+// routing table's suggestion. The person reads a notice when a substitute exists, and otherwise
+// decides in a question asked like the plugin's others (the window first, Telegram when nobody
+// answers); the option they pick is handed to the architect as their answer.
 async function longTask(ctx: Ctx, task: TaskRecord, agent: AgentRecord, kind: string, action: UnavailableAction): Promise<void> {
   const label = agent.name ?? agent.agentId
-  const advice = action.action === 'substitute'
-    ? `The routing table's takeover: ${action.model} at effort ${action.effort} (${action.substituteId}). To use it, delegate the remaining work with mcp__magpie-tasks__model_route, recommended_model ${action.model}, recommended_effort ${action.effort} and the reason "${canonical(agent.model, ctx.catalog)} is unavailable (${kind}); the routing table's substitute ${action.substituteId} takes over".`
-    : action.reason === 'user-chosen'
-      ? `The person chose this model, so it is not replaced automatically; the person decides (candidates: ${action.candidates.join(', ') || 'none'}).`
-      : `No automatic substitute exists for rule ${agent.ruleId ?? 'none'}; the person decides (candidates: ${action.candidates.join(', ') || 'none'}).`
-  await appendNote(ctx, `magpie-tasks: the subagent ${label} (${agent.model}) stopped because its model is unavailable (${kind}). ${advice}`)
-  const failedName = displayName(agent.model, ctx.rules)
+  const stopped = `magpie-tasks: the subagent ${label} (${agent.model}) stopped because its model is unavailable (${kind}).`
   if (action.action === 'substitute') {
-    await tell(ctx, task, `「${task.title}」的${agentLabel(agent, ctx.rules)}不可用（${kind}）。路由表建议由 ${displayName(action.model, ctx.rules)}/${action.effort} 接手，由架构师安排。`, { kind: 'long', notify: true })
+    await appendNote(ctx, `${stopped} The routing table's takeover: ${action.model} at effort ${action.effort} (${action.substituteId}). To use it, delegate the remaining work with mcp__magpie-tasks__model_route, recommended_model ${action.model}, recommended_effort ${action.effort} and the reason "${canonical(agent.model, ctx.catalog)} is unavailable (${kind}); the routing table's substitute ${action.substituteId} takes over".`)
+    await showNotice(ctx, task, `「${task.title}」的${agentLabel(agent, ctx.rules)}不可用（${kind}）。路由表建议由 ${displayName(action.model, ctx.rules)}/${action.effort} 接手，由架构师安排。`)
     return
   }
-  await askDecision(ctx, task, {
+  const { decision, route } = await askLongDecision(ctx, task, {
     kind: 'model-unavailable',
     question: `「${task.title}」的${agentLabel(agent, ctx.rules)}不可用（${kind}）${action.reason === 'user-chosen' ? '，这是你指定的模型' : '，路由规则中没有可以自动接手的模型'}。可以等待，或改用其他模型（可选：${candidateNames(ctx, action.candidates)}）。`,
     options: ['等待', ...action.candidates.map(m => `改用 ${displayName(m, ctx.rules)}`)],
     data: { agentId: agent.agentId, error: kind, effort: agent.effort, candidates: action.candidates.join(',') },
   }, 'waiting-user')
+  const why = action.reason === 'user-chosen'
+    ? 'The person chose this model, so it is not replaced automatically'
+    : `No automatic substitute exists for rule ${agent.ruleId ?? 'none'}`
+  await appendNote(ctx, `${stopped} ${why}; the person decides (decision ${decision.id}, candidates: ${action.candidates.join(', ') || 'none'}). ${routeNote(route, ctx.opts)} The option they pick (等待, or 改用 <model>) comes back to you as their answer; arrange it then.`)
 }

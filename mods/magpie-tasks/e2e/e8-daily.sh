@@ -6,8 +6,10 @@
 # change in place and moves the task's base; (b) a one-line edit: no acceptance, the change is
 # recorded at once; (c) an answer with no change: no acceptance, no integration. The
 # Router pane shows no acceptance or integration report for any of them: the executor is told with
-# the next message that reaches it. (d) a request no rule matches: the routing assessment (Opus, xhigh)
-# recommends, the person confirms, the executor runs on the recommendation.
+# the next message that reaches it. (d) a request no rule matches, on a model the person names: no
+# rule gives that model's effort, so the routing assessment (the route-assessment rule's model and
+# effort) recommends one, the person confirms, the executor runs on the confirmed recommendation. A
+# request no rule matches without a named model runs on daily-default, with no assessment (plan 9.6).
 source "$(dirname "$0")/lib.sh"
 repo="$E/repo"
 mkdir -p "$repo"
@@ -35,9 +37,13 @@ wait_ready e8
 check 'the Router session has role router' wait_for 60 debug_has "$dbg" 'magpie-tasks: role router'
 
 # (a)
-type_line e8 "在 $repo 里给 greet.py 加一个 --name 参数（默认 world），输出 hello <name>；再补一个 test_greet.py，用 subprocess 检查带参数和不带参数两种调用；运行测试验证"
-check '(a) a daily task is recorded' wait_for 300 more_tasks d- 0
-ta=$(newest_daily)
+# The request of (a) needs Jev's check judgment (CHECK_QUESTION, CHECK_YES 0.3) to call its result
+# worth a check. A --name option with a two-case test drew p 0.12 to 0.85 on 6-tool rounds; with
+# --times and its error exit, five recorded rounds replayed five times each gave 0.86 to 0.94.
+before=$(tasks_with d-)
+type_line e8 "在 $repo 里给 greet.py 加一个 --name 参数（默认 world），输出 hello <name>；再加一个 --times 参数把这一行输出 N 次（默认 1，N 不是正整数时以退出码 2 结束并在 stderr 写明原因）；补一个 test_greet.py，用 subprocess 覆盖这些情况；运行测试验证"
+check '(a) a daily task is recorded' wait_for 300 has_new_task d- "$before"
+ta=$(new_task d- "$before")
 check '(a) its executor is routed by code-change' wait_for 120 bash -c "jq -e '[.agents[] | select(.role == \"executor\")][0].ruleId == \"code-change\"' '$ta'"
 check '(a) the executor works in the repository in place' wait_for 900 bash -c "jq -e --arg r \"$(realpath "$repo")\" '.direct.dir == \$r and .worktree == null' '$ta'"
 # Hold the project lock from here (an acceptance takes seconds) until the integration has waited on
@@ -85,15 +91,24 @@ check '(c) no acceptance subagent' test "$(count_log "$ACCEPTANCES")" -eq "$acce
 check '(c) no integration' test "$(count_log "$INTEGRATIONS")" -eq "$integrations"
 check '(c) the Router pane has no acceptance or integration report' test "$(reports)" -eq 0
 
-# (d)
-daily=$(dailies | wc -l)
-type_line e8 '帮我为一个混合任务挑选模型：先读一份 PDF 论文的定理证明，再据此写一段 Rust 模拟代码，并画一张结果图。'
-check '(d) a daily task of its own' wait_for 300 more_tasks d- "$daily"
-td=$(newest_daily)
-check '(d) the routing assessment runs on Opus at xhigh or above' wait_for 300 bash -c "jq -e '[.agents[] | select(.role == \"assessment\")][0] | .model == \"claude/claude-opus-5-5\" and (.effort == \"xhigh\" or .effort == \"max\")' '$td'"
+# (d) Naming cat names fits no rule: on 2026-11-13 the real Jev judged this request none (0.74, and
+# 0.66 with (a)–(c) before it in the conversation), three times each. The judgment the plugin got is
+# printed and checked: a rule at ruleConfidence would take the named model at its own effort instead.
+before=$(tasks_with d-)
+type_line e8 '用 Sonnet 5.5 给我起三个适合橘猫的名字，只列名字（Sonnet 5.5 是我指定的模型）'
+check '(d) a daily task of its own' wait_for 300 has_new_task d- "$before"
+td=$(new_task d- "$before")
+assessment() { jq -c '[.agents[] | select(.role == "assessment")][0]' "$td"; }
+check '(d) a routing assessment is started' wait_for 300 bash -c "jq -e '[.agents[] | select(.role == \"assessment\")] | length > 0' '$td'"
+echo "(d) judgment: $(assessment | jq -c '.judgment | {provider, ruleChoice, confidence, deep}'); assessment: $(assessment | jq -r '"\(.model) \(.effort)"'); requested: $(jq -c .requestedModel "$td")"
+check '(d) no rule reaches ruleConfidence' bash -c "jq -e --slurpfile R '$RULES' '[.agents[] | select(.role == \"assessment\")][0].judgment | .ruleChoice == \"none\" or .confidence < \$R[0].thresholds.ruleConfidence' '$td'"
+check '(d) the person'"'"'s model waits for an effort' jq -e '.requestedModel.model == "claude/claude-sonnet-5-5"' "$td"
+want=$(rule_start "$(assessment)")
+check "(d) the assessment runs on the route-assessment rule's model and effort ($want)" test "$(assessment | jq -r '"\(.model) \(.effort)"')" = "$want"
 check '(d) the task waits for the person' wait_for 900 bash -c "jq -e '.state == \"waiting-user\"' '$td'"
 type_line e8 '确认'
 check '(d) the executor runs on the confirmed recommendation' wait_for 900 bash -c "jq -e '[.agents[] | select(.role == \"executor\")][0].selection.kind == \"assessment-confirmed\"' '$td'"
+check '(d) on the model the person named' jq -e '[.agents[] | select(.role == "executor")][0].model == "claude/claude-sonnet-5-5"' "$td"
 echo "tasks: $ta $tb $tc $td"
 cleanup e8
 finish

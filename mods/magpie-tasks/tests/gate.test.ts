@@ -60,7 +60,6 @@ test('read-only Bash passes; redirection, substitution, sed beyond print scripts
   ]) expect(isReadOnlyBash(ok)).toBe(true)
   for (const no of [
     'ls > files.txt',
-    'cat a 2>&1',
     'echo $(rm -rf x)',
     'cat `which ls`',
     "sed -i 's/a/b/' f",
@@ -85,8 +84,53 @@ test('read-only Bash passes; redirection, substitution, sed beyond print scripts
     'ls & rm -rf x',
     'diff <(ls a) <(ls b)',
     "cat 'unterminated",
-    'cd /tmp && ls',
     'ls \\; rm x',
+  ]) expect(isReadOnlyBash(no)).toBe(false)
+})
+
+test('one leading cd, the redirections 2>/dev/null and 2>&1, and a backslash inside single quotes pass; every other use of them does not', () => {
+  for (const ok of [
+    'cd /tmp && ls',
+    `cd ${WT} && git status && rg -n 'askPerson' src | head -5`,
+    'ls 2>/dev/null',
+    'ls missing 2>/dev/null || ls',
+    'cat a 2>&1',
+    'git status 2>&1 | head -3',
+    `cd ${WT} && ls 2>/dev/null; cat a 2>&1`,
+    String.raw`rg '\('`,
+    String.raw`rg -n 'foo\.bar\(' src`,
+    String.raw`sed -n '/a\.b/p' f`,
+    String.raw`grep -n 'a\\b' "notes file.md"`,
+  ]) expect(isReadOnlyBash(ok)).toBe(true)
+  for (const no of [
+    'cd x && rm y',
+    'cd x',
+    'cd x; ls',
+    'cd x || ls',
+    'cd x | ls',
+    'cd -P x && ls',
+    'ls && cd x && ls',
+    'cd x && cd y && ls',
+    '> file',
+    'ls > file',
+    'ls >> file',
+    'ls 1>/dev/null',
+    'ls >/dev/null',
+    'ls 2> /dev/null',
+    'ls 2>/dev/nullx',
+    'ls 2>/dev/null/x',
+    'ls 2>err.txt',
+    'ls 2>>/dev/null',
+    'ls 2>&2x',
+    'ls a2>/dev/null',
+    'ls "2">/dev/null',
+    'ls &>/dev/null',
+    'ls >&2',
+    'cat < in.txt',
+    String.raw`rg "\("`,
+    String.raw`rg \(`,
+    String.raw`ls a\ b`,
+    String.raw`rg 'a' \; rm x`,
   ]) expect(isReadOnlyBash(no)).toBe(false)
 })
 
@@ -115,7 +159,22 @@ test('architectDeny lets the plan commands, read-only Bash and git add/commit/pu
   expect(await deny({ tool: 'Bash', command: `git -C ${WT} commit -am wip` })).toContain('git commit')
   expect(await deny({ tool: 'Bash', command: 'git -c core.pager=sh push' })).toContain('git -c')
   expect(await deny({ tool: 'Bash', command: 'git reset --hard' })).toContain('git reset')
-  expect(await deny({ tool: 'Bash', command: 'git commit -m x > log' })).toContain('this command has an output redirection')
+  expect(await deny({ tool: 'Bash', command: 'git commit -m x > log' })).toContain('this command has a redirection other than 2>/dev/null and 2>&1')
+  // A leading cd goes with read-only commands only: what follows it is checked as before, and git
+  // add, commit and push stay in the project main directory.
+  expect(await deny({ tool: 'Bash', command: `cd ${WT} && git diff --stat 2>/dev/null` })).toBeNull()
+  expect(await deny({ tool: 'Bash', command: 'cd x && rm y' })).toContain('this command has rm is not on the read-only list')
+  expect(await deny({ tool: 'Bash', command: `cd ${WT} && git commit -am wip` })).toContain('this command has git commit')
+  expect(await deny({ tool: 'Bash', command: `cd ${ROOT} && ~/sipeng/plans/publish-plan --remove magpie` })).toContain('is not on the read-only list')
+  expect(await deny({ tool: 'Bash', command: '> file' })).toContain('a redirection other than 2>/dev/null and 2>&1')
+  expect(await deny({ tool: 'Bash', command: String.raw`rg "\("` })).toContain('a backslash outside single quotes')
+  expect(await deny({ tool: 'Bash', command: String.raw`rg '\('` })).toBeNull()
+  expect(await deny({ tool: 'Bash', command: 'ls 2>/dev/null' })).toBeNull()
+  const text = await deny({ tool: 'Bash', command: 'cd x' })
+  expect(text).toContain('cd other than one leading `cd <dir> &&`')
+  expect(text).toContain('after one leading "cd <dir> &&"')
+  expect(text).toContain('the only redirections are 2>/dev/null and 2>&1')
+  expect(text).toContain('a backslash goes inside single quotes only')
 })
 
 test('a routed subagent writes inside its working directory, outside every repository, and nowhere else', async () => {

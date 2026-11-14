@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# claude-magpie: Claude Code through Magpie (`magpie claude run`), plus the hand-over of a terminal
+# window to a long task's background session.
+#
+# magpie-tasks gives every long task a background session as its architect. When the first message
+# of a window becomes a long task, the plugin writes that session's short ID to the file named by
+# MAGPIE_TASKS_HANDOFF and ends the foreground session; this launcher then opens the background
+# session in the same terminal with `claude attach`, so the window goes on showing the task. When a
+# resumed session is taken over, the plugin writes `pending` before it sends the session to the
+# background, and the background copy writes its short ID once it has claimed the task.
+#
+# Without a terminal (-p, a --bg launch from a script) this is `magpie claude run` and nothing else.
+if [ ! -t 0 ] || [ ! -t 1 ]; then
+  unset MAGPIE_TASKS_HANDOFF
+  exec magpie claude run "$@"
+fi
+
+handoff=$(mktemp "${TMPDIR:-/tmp}/magpie-tasks-handoff.XXXXXX") || exit 1
+trap 'rm -f "$handoff"' EXIT
+MAGPIE_TASKS_HANDOFF=$handoff magpie claude run "$@"
+status=$?
+
+short_id() { [[ $id =~ ^[0-9a-f]{8}$ ]]; }
+id=
+read -r id < "$handoff"
+if [ "$id" = pending ]; then
+  echo 'magpie-tasks: 正在切换到后台会话…'
+  # The background copy claims the task in its session start, a few seconds after /bg.
+  for ((n = 0; n < 150; n++)); do
+    short_id && break
+    sleep 0.2
+    read -r id < "$handoff"
+  done
+fi
+if short_id; then
+  rm -f "$handoff"
+  exec claude attach "$id"
+fi
+if [ "$id" = pending ]; then
+  echo 'magpie-tasks: 后台会话 30 秒内没有认领任务；用 claude agents 找到它并打开' >&2
+fi
+exit "$status"

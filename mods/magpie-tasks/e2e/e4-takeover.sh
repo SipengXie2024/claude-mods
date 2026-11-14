@@ -3,7 +3,8 @@
 # over as a long task. (a) Declined: recorded by session ID, and the next resume of the same session
 # is not asked again (interactive --resume keeps the session ID). (b) Accepted: after the answer the
 # session goes to the background with /bg; the copy claims the task (new session ID as owner, the old
-# one in previousSessionIds) and gets the architect context.
+# one in previousSessionIds), the launcher switches the window to the copy, and the copy gets the
+# architect context.
 source "$(dirname "$0")/lib.sh"
 p2="$E/proj2"
 mkdir -p "$p2"
@@ -39,25 +40,30 @@ type_line e4a2 '/exit'; sleep 3; cleanup e4a2
 
 # (b) accept
 n0=$(tasks_with l- | wc -l)
-start e4b "$p2" claude-magpie --resume "$B" --model claude/claude-opus-5-5 --debug-file "$E/e4b.log"
+start e4b "$p2" "$LAUNCHER" --resume "$B" --model claude/claude-opus-5-5 --debug-file "$E/e4b.log"
 wait_ready e4b
 type_line e4b '回复 ok'
 check '(b) the takeover dialog opens' wait_for 60 dialog_open e4b
 key e4b Enter
 check '(b) a task is recorded' wait_for 120 more_tasks l- "$n0"
 t=$(tasks_with l- | xargs -r ls -t | head -1)
-check '(b) the session goes to the background' wait_for 300 pane_has e4b 'backgrounded · '
-short=$(pane e4b | grep -oE 'backgrounded · [0-9a-f]{8}' | tail -1 | awk '{print $3}')
-check '(b) the copy claimed the task (U6)' wait_for 120 bash -c "jq -e --arg b '$B' '.owner.previousSessionIds | index(\$b) != null' '$t'"
+check '(b) the copy claimed the task (U6)' wait_for 420 bash -c "jq -e --arg b '$B' '.owner.previousSessionIds | index(\$b) != null' '$t'"
 newsid=$(task_field "$t" .owner.sessionId)
+short=$(task_field "$t" .owner.jobShortId)
 check '(b) the new owner is the background copy' test "${newsid:0:8}" = "$short"
+check '(b) the window switches to the background copy' wait_for 60 attached "$short"
 cleanup e4b
 start e4c "$p2" claude attach "$short"
 wait_ready e4c 120
-wait_for 60 bash -c "find '$E/cfg/projects' -name '$newsid.jsonl' | grep -q ."
+# The copy writes its own transcript file when its first prompt arrives. The history it copied
+# holds the takeover turn: one completed turn and one architect context.
+type_line e4c '现在你的职责是什么？一句话回答。'
+check '(b) the copy writes its transcript' wait_for 120 bash -c "find '$E/cfg/projects' -name '$newsid.jsonl' | grep -q ."
 tr=$(transcript_of "$newsid")
-say_and_wait e4c "$tr" '现在你的职责是什么？一句话回答。' 300
-check '(b) the next prompt carries the architect context' grep -q 'You are the architect of long task' "$tr"
+answered_b() { [ "$(turns "$tr")" -ge 2 ]; }
+check '(b) the copy answers the prompt' wait_for 300 answered_b
+contexts() { jq -s '[.[] | select(.type == "attachment") | tostring | select(contains("You are the architect of long task"))] | length' "$tr"; }
+check '(b) the next prompt carries the architect context' test "$(contexts)" -ge 2
 cleanup e4c
 claude stop "$short" >/dev/null
 finish

@@ -7,6 +7,11 @@
 #                             so no bot token is found
 #   e2e/setup.sh --telegram   the real channel directory (~/.claude/channels/telegram-live): the
 #                             scenarios' notifications reach the person's chat; ask them first
+#   e2e/setup.sh --forward    for E20: tasks get a Telegram chat nobody reads. telegramChatId is `1`
+#                             and the channel directory holds a bot token Telegram refuses, so what
+#                             the plugin sends to Telegram is a real request that reaches no one,
+#                             answered `401 Unauthorized`; telegramAfterMinutes is 1, so a question
+#                             left unanswered in the window goes there after a minute
 #
 # Plugins are installed the way they are installed for real, in the same order: subagent-opus, jev,
 # context-memory, then magpie-tasks (section 9.15). JEV writes its journal under $E/jev.
@@ -14,18 +19,23 @@ set -euo pipefail
 REPO=${REPO:-$HOME/sipeng/claude-mods}
 telegram=off
 [ "${1:-}" = --telegram ] && telegram=live
+[ "${1:-}" = --forward ] && telegram=refused
 
 E=$(mktemp -d /tmp/mt-e2e-XXXX)
 mkdir -p "$E/cfg" "$E/state" "$E/wt" "$E/tg" "$E/jev"
 cp "$HOME/.config/jev-opus/.env" "$E/jev/.env"
+after=10
 if [ $telegram = live ]; then
   tg_dir="$HOME/.claude/channels/telegram-live"; chat=""
+elif [ $telegram = refused ]; then
+  tg_dir="$E/tg"; chat="1"; after=1
+  printf 'TELEGRAM_BOT_TOKEN=1:e2e-refused-token\n' > "$E/tg/.env"
 else
   tg_dir="$E/tg"; chat="tui"
 fi
-jq -n --arg state "$E/state" --arg wt "$E/wt" --arg tg "$tg_dir" --arg chat "$chat" '{
+jq -n --arg state "$E/state" --arg wt "$E/wt" --arg tg "$tg_dir" --arg chat "$chat" --argjson after "$after" '{
   skipDangerousModePermissionPrompt: true,
-  pluginConfigs: { "magpie-tasks@sipeng-mods": { options: { stateDir: $state, worktreeDir: $wt, telegramStateDir: $tg, telegramChatId: $chat } } }
+  pluginConfigs: { "magpie-tasks@sipeng-mods": { options: { stateDir: $state, worktreeDir: $wt, telegramStateDir: $tg, telegramChatId: $chat, telegramAfterMinutes: $after } } }
 }' > "$E/cfg/settings.json"
 # A fresh config directory would open onboarding and folder-trust dialogs in the first pane.
 jq -n --arg e "$E" --arg home "$HOME" '{

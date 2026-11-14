@@ -3,10 +3,10 @@
 // message of a new long task, the launch claim of a background architect, the takeover of an
 // existing session and its claim in the /bg copy, and the architect's per-turn context.
 import type { Next, PromptSubmitInput, SessionStartInput, Settings, SettingsReadInput } from 'claude-code'
-import { fnv1a64, newId } from './io'
+import { newId } from './io'
 import type { JudgeCtx } from './judge'
 import { recommendArchitect } from './judge'
-import { claudeConfigDir, launchArchitect, LaunchError } from './launch'
+import { architectMarkTask, claudeConfigDir, launchArchitect, LaunchError } from './launch'
 import { canonical, displayName, sameModel } from './model'
 import { contextMemoryFingerprint } from './recovery'
 import type { Rules } from './rules'
@@ -72,6 +72,15 @@ function titleOf(text: string): string {
 // recovery is reported where recovery is started and does not belong to the step that waited.
 function recoverySettled(st: SessionState): Promise<void> {
   return (st.recovery ?? Promise.resolve()).then(() => undefined, () => undefined)
+}
+
+// The window's hand-over file, when the claude-magpie launcher (bin/claude-magpie) started this
+// session in a terminal: the launcher opens the background session whose short ID the file holds
+// once this process has ended, so the window goes on showing the task. Null under a launcher
+// without the hand-over; the window then ends and `claude attach` reopens the task.
+async function handoffFile(ctx: Ctx): Promise<string | null> {
+  const path = await ctx.io.env('MAGPIE_TASKS_HANDOFF')
+  return path === undefined || path === '' ? null : path
 }
 
 // ---- role detection (section 2) ----------------------------------------------------------------
@@ -222,7 +231,7 @@ export function optionModels(recommended: string, rules: Rules): string[] {
   return [recommended, ...others]
 }
 
-export function askText(a: { recommendation: { model: string; reason: string; limits: string }; root: string; workspace: string; trusted: boolean }, rules: Rules): { question: string; options: string[] } {
+export function askText(a: { recommendation: { model: string; reason: string; limits: string }; root: string; workspace: string; trusted: boolean; handoff: boolean }, rules: Rules): { question: string; options: string[] } {
   const models = optionModels(a.recommendation.model, rules)
   const name = (m: string) => displayName(m, rules)
   const options = models.map((m, i) => (i === 0 ? `${name(m)}（推荐）` : name(m)))
@@ -234,13 +243,16 @@ export function askText(a: { recommendation: { model: string; reason: string; li
     a.workspace,
   ]
   if (!a.trusted) lines.push(UNTRUSTED(a.root))
-  lines.push('确认后这条消息交给后台的架构师会话，当前窗口随即关闭，之后用 claude attach 重新打开。不需要登记的临时操作请使用普通 claude。')
+  lines.push(a.handoff
+    ? '确认后这条消息交给后台的架构师会话，这个窗口随即切换到那个会话，继续显示它的工作；离开窗口后任务仍在后台运行，用 claude attach 重新打开。不需要登记的临时操作请使用普通 claude。'
+    : '确认后这条消息交给后台的架构师会话，当前窗口随即关闭，之后用 claude attach 重新打开。不需要登记的临时操作请使用普通 claude。')
   return { question: lines.join('\n'), options }
 }
 
 // The architect's first message: the request, the task marker line, and its standing instructions.
 // `workspace` is where the subagents work: the project directory itself (`direct`) or the task
-// worktree.
+// worktree. The background session finds its launch claim by the task the marker line names
+// (architectMarkTask), so the line stays right after the request.
 export function architectFirstMessage(request: string, taskId: string, workspace: { mode: 'direct' | 'worktree'; path: string } | null): string {
   const where = workspace === null
     ? 'The task has no project yet; once the person names one, magpie-tasks gives the task its working directory.'
@@ -263,7 +275,8 @@ async function newLongTask(ctx: Ctx, e: PromptSubmitInput, next: Next<'prompt.su
   const taskId = newId('l', await io.now())
   const trusted = await projectTrusted(io, root)
   const preview = await previewPlacement(io, reg, opts, taskId, root)
-  const { question, options } = askText({ recommendation: rec, root, workspace: placementLine(preview), trusted }, rules)
+  const handoff = await handoffFile(ctx)
+  const { question, options } = askText({ recommendation: rec, root, workspace: placementLine(preview), trusted, handoff: handoff !== null }, rules)
   const models = optionModels(rec.model, rules)
   let answer: string
   try {
@@ -310,13 +323,13 @@ async function newLongTask(ctx: Ctx, e: PromptSubmitInput, next: Next<'prompt.su
     if (!(error instanceof LaunchError)) throw error
     st.taskId = null
     if (error.kind === 'not-started') return { drop: `magpie-tasks: 后台会话没有启动：${error.reason}` }
-    const text = `magpie-tasks: 长期任务「${ready.title}」（${ready.id}）的架构师会话 ${error.shortId} 没有完成认领（${error.reason}），已停止；任务已标为出错`
-    notice(ctx, text)
-    await telegramReport(ctx, ready, text)
+    // The person just sent this message here: the failure is shown in this window only.
+    notice(ctx, `magpie-tasks: 长期任务「${ready.title}」（${ready.id}）的架构师会话 ${error.shortId} 没有完成认领（${error.reason}），已停止；任务已标为出错`)
     return { drop: `magpie-tasks: 架构师会话没有完成认领（${error.reason}），已停止；消息已放回输入框` }
   }
   st.firstPromptSeen = true
-  const done = `magpie-tasks: 已登记长期任务「${ready.title}」（${ready.id}），架构师 ${displayName(model, rules)} 已在后台运行。重新打开：claude attach ${shortId}`
+  if (handoff !== null) await io.write(handoff, `${shortId}\n`)
+  const done = `magpie-tasks: 已登记长期任务「${ready.title}」（${ready.id}），架构师 ${displayName(model, rules)} 已在后台运行。${handoff !== null ? '这个窗口随即切换到它；离开后重新打开' : '重新打开'}：claude attach ${shortId}`
   notice(ctx, done)
   // $.command.run is refused inside prompt.submit; a timer scheduled from here may run it. The exit
   // waits for this session's startup recovery, which `claude --bg --resume` calls must not lose.
@@ -350,7 +363,7 @@ async function takeover(ctx: Ctx, e: PromptSubmitInput, next: Next<'prompt.submi
   const chatId = await defaultChat(io, opts)
   const taskId = newId('l', await io.now())
   const lines = [
-    `接管这个会话，作为长期任务继续吗？接管后：登记为长期任务，沿用当前模型 ${candidate.name} 与对话历史，接入 Telegram，启用架构师的工具限制（主对话只写设计记录，实施交给子代理），本轮回答结束后转入后台（之后用 claude attach 重新打开）。`,
+    `接管这个会话，作为长期任务继续吗？接管后：登记为长期任务，沿用当前模型 ${candidate.name} 与对话历史，接入 Telegram，启用架构师的工具限制（主对话只写设计记录，实施交给子代理），本轮回答结束后转入后台${(await handoffFile(ctx)) !== null ? '，这个窗口随即切换到后台会话（离开后用 claude attach 重新打开）' : '（之后用 claude attach 重新打开）'}。`,
     `项目根目录：${root}`,
     placementLine(await previewPlacement(io, reg, opts, taskId, root)),
   ]
@@ -423,35 +436,38 @@ export async function onTakeoverTurnEnd(ctx: Ctx): Promise<void> {
   st.pendingBg = false
   const taskId = st.taskId
   if (taskId === null) throw new Error('takeover: the session has no task')
+  let handoff: string | null = null
   void recoverySettled(st).then(async () => {
     const now = await io.now()
     const claimId = newId('c', now)
-    await reg.putClaim({ id: claimId, kind: 'takeover', taskId, cwd: st.cwd, createdAt: now, expiresAt: now + TAKEOVER_CLAIM_MS, fromSessionId: st.sessionId })
+    handoff = await handoffFile(ctx)
+    await reg.putClaim({ id: claimId, kind: 'takeover', taskId, cwd: st.cwd, createdAt: now, expiresAt: now + TAKEOVER_CLAIM_MS, fromSessionId: st.sessionId, ...(handoff !== null ? { handoff } : {}) })
     const appended = await host.session.append({ message: { type: 'user', content: [{ type: 'text', text: `[magpie-tasks takeover task=${taskId} claim=${claimId}]` }] } })
     if (appended.deny !== undefined) throw new Error(`appending the takeover marker was refused: ${appended.deny}`)
     await reg.log(taskId, { type: 'takeover', claim: claimId })
+    // The launcher waits for the copy's short ID once this process has ended.
+    if (handoff !== null) await io.write(handoff, 'pending\n')
     await host.command.run({ command: 'bg' })
   }).catch(async (err: unknown) => {
     const line = firstLine(err instanceof Error ? err.message : String(err))
     host.ui.log(`magpie-tasks 出错（任务 ${taskId}）：没有转入后台：${line}`)
     await reg.update(taskId, t => { t.state = 'error'; t.error = `takeover: ${line}` }, { type: 'error', during: 'takeover', error: line })
+    // The session stays in this window; a later exit hands nothing over.
+    if (handoff !== null) await io.write(handoff, '')
   }).catch((err: unknown) => host.ui.log(`magpie-tasks 出错（任务 ${taskId}）：没有记下接管失败：${firstLine(err instanceof Error ? err.message : String(err))}`))
 }
 
 // ---- claims ------------------------------------------------------------------------------------
 
-async function takeLaunchClaim(ctx: Ctx, text: string): Promise<{ task: TaskRecord } | { mismatch: TaskRecord } | null> {
+// The launch claim the first prompt of a background session answers: the task it claims, `lost` with
+// the task ID the prompt names when no unexpired claim of that task waits for this directory, or
+// null when the prompt names no task (a background session the person started).
+async function takeLaunchClaim(ctx: Ctx, text: string): Promise<{ task: TaskRecord } | { lost: string } | null> {
   const { io, st, reg } = ctx
-  const hash = fnv1a64(text)
-  const now = await io.now()
-  const claim = await reg.takeClaim(c => c.kind === 'launch' && c.cwd === st.cwd && c.promptHash === hash && c.expiresAt > now, now)
-  if (claim === undefined) {
-    const other = await reg.takeClaim(c => c.kind === 'launch' && c.cwd === st.cwd && c.expiresAt > now, now)
-    if (other === undefined) return null
-    const error = 'launch claim hash mismatch'
-    const t = await reg.update(other.taskId, x => { x.state = 'error'; x.error = error }, { type: 'claim-failed', error, claim: other.id, sessionId: st.sessionId })
-    return { mismatch: t }
-  }
+  const taskId = architectMarkTask(text)
+  if (taskId === null) return null
+  const claim = await reg.takeClaim(c => c.kind === 'launch' && c.taskId === taskId && c.cwd === st.cwd, await io.now())
+  if (claim === undefined) return { lost: taskId }
   const jobDir = await io.env('CLAUDE_JOB_DIR')
   const fingerprint = await contextMemoryFingerprint(io, await claudeConfigDir(io))
   const model = canonical(await ctx.host.session.model(), ctx.catalog)
@@ -462,27 +478,17 @@ async function takeLaunchClaim(ctx: Ctx, text: string): Promise<{ task: TaskReco
   return { task }
 }
 
-// Section 9.3: the claim a background session makes with its first prompt. The task, 'mismatch' when
-// only a claim with another hash waits in this directory (the task is then marked 'error'), or null
-// when no launch claim waits here (a background session the person started).
-export async function claimLaunch(ctx: Ctx, text: string): Promise<TaskRecord | 'mismatch' | null> {
-  const r = await takeLaunchClaim(ctx, text)
-  if (r === null) return null
-  return 'mismatch' in r ? 'mismatch' : r.task
-}
-
 // The whole of section 9.3 for a 'bg-unclaimed' session's first prompt.
 export async function onClaimPrompt(ctx: Ctx, e: PromptSubmitInput, next: Next<'prompt.submit'>): Promise<PromptResult> {
   const { st } = ctx
   const r = await takeLaunchClaim(ctx, e.text)
   if (r === null) return unmanaged(ctx, e, next)
-  if ('mismatch' in r) {
+  if ('lost' in r) {
     st.role = 'unmanaged'
     st.firstPromptSeen = true
-    const t = r.mismatch
-    notice(ctx, `magpie-tasks: 启动认领不符，这个会话没有登记为架构师；任务 ${t.id} 已标为出错`)
-    await telegramReport(ctx, t, `magpie-tasks：长期任务「${t.title}」（${t.id}）的后台会话 ${st.sessionId} 认领失败（启动消息的散列不符），任务已标为出错，会话由启动方停止。`)
-    return { drop: `magpie-tasks: 启动认领不符，这个会话没有登记为架构师；任务 ${t.id} 已标为出错` }
+    const line = `magpie-tasks: 没有找到任务 ${r.lost} 在 ${st.cwd} 的启动认领（已被取走、已过期，或启动方记下的是别的目录），这个会话没有登记为架构师`
+    notice(ctx, line)
+    return { drop: line }
   }
   st.role = 'architect'
   st.firstPromptSeen = true
@@ -513,21 +519,23 @@ export async function claimTakeover(ctx: Ctx): Promise<TaskRecord | 'failed' | n
   if (claim === undefined) {
     const error = `takeover claim ${claimId} is missing, expired or for another directory`
     const t = await reg.update(taskId, x => { x.state = 'error'; x.error = error }, { type: 'claim-failed', error, claim: claimId, sessionId: st.sessionId })
-    notice(ctx, `magpie-tasks: 接管认领失败（${error}）；这个会话没有登记为长期任务「${t.title}」（${t.id}）的架构师，按普通会话处理`)
-    await telegramReport(ctx, t, `magpie-tasks：长期任务「${t.title}」（${t.id}）接管后转入后台的会话 ${st.sessionId} 认领失败（${error}），任务已标为出错。这个会话按普通会话运行：claude attach ${shortId}`)
+    // The takeover's own window shows it; nothing goes to Telegram.
+    notice(ctx, `magpie-tasks: 接管认领失败（${error}）；这个会话没有登记为长期任务「${t.title}」（${t.id}）的架构师，任务已标为出错，这个会话按普通会话运行（claude attach ${shortId}）`)
     return 'failed'
   }
-  return reg.update(taskId, t => {
+  const task = await reg.update(taskId, t => {
     if (t.owner.kind !== 'session') throw new Error(`task ${taskId} is not owned by a session`)
     t.owner.previousSessionIds.push(t.owner.sessionId)
     t.owner.sessionId = st.sessionId
     t.owner.jobShortId = shortId
   }, { type: 'rekey', claim: claimId, from: claim.fromSessionId, to: st.sessionId, jobShortId: shortId })
+  if (claim.handoff !== undefined) await io.write(claim.handoff, `${shortId}\n`)
+  return task
 }
 
 // ---- the architect's per-turn context -----------------------------------------------------------
 
-export function architectContext(task: TaskRecord, opts: { worktreeDir: string }): string {
+export function architectContext(task: TaskRecord, opts: { worktreeDir: string; telegramAfterMinutes: number }): string {
   const root = task.project?.root ?? '(none)'
   const whereOf = (w: Workspace): string | null => {
     const direct = w.direct ?? null
@@ -552,7 +560,7 @@ export function architectContext(task: TaskRecord, opts: { worktreeDir: string }
     'You write only .planning/findings.md, CONTEXT.md, .planning/plan-*.md and .planning/*.html in the project main directory, and Bash runs only read-only commands and the html-plan pack and publish-plan commands. Delegate implementation, builds and tests to subagents with the Agent tool; a subagent whose work changes another project as well opens it with mcp__magpie-tasks__open_project, and the task then changes that project too. After you accept a result, mcp__magpie-tasks__integrate brings the change of every project of the task into its project directory: a task worktree\'s changes are applied there, and a change subagents made there directly is recorded; when the person asks for a commit or a push, run git add, git commit and git push there yourself, never in a task worktree.',
     'Delegation: delegate each piece of work with mcp__magpie-tasks__model_route (description, and the full brief as prompt). Jev judges which routing rule fits and whether the work needs deep reasoning, and the routing table gives the model and effort. When you think another model suits the work better, add recommended_model (a Magpie model ID), reason (the concrete evidence) and, if you like, recommended_effort; Jev weighs your recommendation against the table\'s choice and its notes on both models, and the table\'s choice stands unless Jev prefers yours. The subagent starts in the task\'s working directory and runs in the background. When the person names a model, delegate with the Agent tool and put "[model <Magpie model ID>]" and "[model-reason user: <the person\'s words>]" on their own lines in the brief, with "[effort <low|medium|high|xhigh|max>]" when no rule gives its effort. For a second review by a different model, put "[review-of agent=<agentId>]" or "[review-of model=<id>,<id>]" in the brief.',
     'After checking a subagent\'s result, call mcp__magpie-tasks__report_outcome: accepted, or rejected (it goes back for fixes). Report diagnosis, diagnosis-redelegate and model-change too, with blocker_id: the ID of an existing blocker (mcp__magpie-tasks__task_status lists them) for the same problem, or new with a one-sentence blocker only for a different problem. The plugin raises that subagent\'s effort on its next run and counts diagnoses and model changes per blocker; a second one for the same blocker is refused, and you then pause that work and discuss it with the person.',
-    'mcp__magpie-tasks__notify_user reaches the person on Telegram: kind decision for what they must decide, result for a finished part, done when the whole task is finished (the task closes; this session is stopped after ten idle minutes and the worktree removed; their next message reopens it); ordinary progress is not sent. mcp__magpie-tasks__resolve_conflict answers a file-conflict question (separate or wait). Keep progress in context-memory\'s notes_write and lasting findings in .planning/findings.md.',
+    `The person reads this window first. Ask what they must decide with AskUserQuestion: magpie-tasks shows the question in the window and, when nobody answers within ${opts.telegramAfterMinutes} minutes, sends it to Telegram too; the first answer from either side comes back as the tool's result. Put results and conclusions in your answer, where Markdown is fine. mcp__magpie-tasks__notify_user is for what is worth their coming back for: kind result for a finished part, done when the whole task is finished (the task closes; this session is stopped after ten idle minutes and the worktree removed; their next message reopens it). It shows in the window and goes to Telegram when they send this session nothing within ${opts.telegramAfterMinutes} minutes; ordinary progress is not sent. The plugin's own questions (file conflicts, integration conflicts, a blocker out of diagnoses or model changes) go the same way, and the person's answer is carried out as it arrives; mcp__magpie-tasks__resolve_conflict answers a file-conflict question yourself (separate or wait). Keep progress in context-memory's notes_write and lasting findings in .planning/findings.md.`,
   )
   const blockers = Object.values(task.blockers)
   if (blockers.length > 0) lines.push(`Blockers: ${blockers.map(b => `${b.id} "${b.description}" (diagnoses ${b.diagnoses}, model changes ${b.modelChanges})`).join('; ')}.`)

@@ -8,7 +8,7 @@
 import type { Next, PromptSubmitInput, SessionSendInput, SessionSendResult } from 'claude-code'
 import { parseRating } from './calibration'
 import { applyDailyDecision, askDecision, openDailyDecision, tell, withOutcome } from './daily'
-import { CONFLICT_CHOICE, choose, MODEL_OPINION_QUESTION, predicate, recommendArchitect, UNSUITABLE_QUESTION } from './judge'
+import { MODEL_OPINION_QUESTION, predicate, readLongAnswer, recommendArchitect, UNSUITABLE_QUESTION, type LongAnswer } from './judge'
 import { launchArchitect, listAgents, resumeSession } from './launch'
 import { displayName, sameModel } from './model'
 import { architectFirstMessage, judgeCtxOf } from './session'
@@ -19,7 +19,6 @@ import type { Decision, JevJudgment, TaskRecord, TelegramIndex } from './types'
 import type { Rules } from './rules'
 import { firstPlaced, pathOf, workspacePaths, workspaces } from './workspace'
 
-type LongAnswer = 'separate' | 'wait' | 'approve' | 'reject' | 'unclear'
 type Tg = { chatId: string; messageId: number }
 type Recommendation = { model: string; reason: string; limits: string; judgment: JevJudgment | null }
 
@@ -37,15 +36,6 @@ const OPEN: readonly TaskRecord['state'][] = ['starting', 'running', 'paused', '
 // States of a daily task that the person's words to its agent set running again.
 const RESUMED: readonly TaskRecord['state'][] = ['paused', 'waiting-user', 'done']
 const REMEMBERED = 200
-
-const APPROVE = {
-  instructions: 'How does the person answer the question in the previous message: approve what it proposes (go on, apply, accept), reject it, or neither?',
-  choices: [
-    { value: 'approve', description: 'Approves, agrees, or asks to go on (继续, 整合, 接受, 同意)' },
-    { value: 'reject', description: 'Rejects or declines (不整合, 不接受, 不同意, 暂停)' },
-    { value: 'unclear', description: 'Neither, or cannot be read as a yes or no' },
-  ],
-}
 
 // Messages this Router received, by `chat:message`, for forward_long: channel messages, and messages
 // typed in its terminal under chat 'tui' and the message_id tg-router gave them.
@@ -311,25 +301,6 @@ async function judgeFeedback(ctx: Ctx, taskId: string, text: string, at: number)
   await ctx.reg.update(taskId, t => { t.feedback.push({ at, source: 'telegram', text, unsuitable: unsuitable.yes, modelOpinion: opinion.yes }) }, { type: 'feedback', source: 'telegram', unsuitable: unsuitable.p, modelOpinion: opinion.p, provider: unsuitable.provider })
 }
 
-// The person's answer to a long task's decision, as the hand-over marker carries it. Model choices
-// are left to the architect, who reads the person's words.
-async function longAnswer(ctx: Ctx, decision: Decision, text: string): Promise<LongAnswer> {
-  const input = [{ role: 'assistant' as const, content: `${decision.question}\n${decision.options.join(' / ')}` }, { role: 'user' as const, content: text }]
-  switch (decision.kind) {
-    case 'file-conflict':
-      return (await choose(judgeCtxOf(ctx), CONFLICT_CHOICE.instructions, CONFLICT_CHOICE.choices, input)).choice as LongAnswer
-    case 'integration-conflict':
-    case 'fix-confirm':
-    case 'no-progress':
-    case 'interrupted':
-      return (await choose(judgeCtxOf(ctx), APPROVE.instructions, APPROVE.choices, input)).choice as LongAnswer
-    case 'model-unavailable':
-    case 'model-change-confirm':
-    case 'route-confirm':
-      return 'unclear'
-  }
-}
-
 async function withContext(ctx: Ctx, e: PromptSubmitInput, next: Next<'prompt.submit'>): Promise<PromptResult> {
   const longTasks = await ctx.reg.list(t => t.kind === 'long' && OPEN.includes(t.state))
   return next({ ...e, context: [...(e.context ?? []), routerContext(longTasks, await ctx.io.now(), ctx.rules)] })
@@ -401,7 +372,7 @@ export async function onRouterPrompt(ctx: Ctx, e: PromptSubmitInput, next: Next<
 async function longDecisionReply(ctx: Ctx, task: TaskRecord, decisionId: string, tag: { body: string; imagePath?: string }, tg: Tg): Promise<PromptResult> {
   const decision = task.decisions[decisionId]
   if (decision === undefined) throw new Error(`task ${task.id} has no decision ${decisionId}`)
-  const answer = await longAnswer(ctx, decision, tag.body)
+  const answer = await readLongAnswer(judgeCtxOf(ctx), decision, tag.body)
   await ctx.io.log(`decision ${decision.id} (${decision.kind}) of task ${task.id}: answer ${answer}`)
   await ctx.reg.log(task.id, { type: 'decision', stage: 'answer-judged', decision: decision.id, kind: decision.kind, answer })
   const r = await deliverToArchitect(ctx, task, decisionDelivery(decision, answer, channelText(tag)), tg, { id: decision.id, answer })

@@ -31,7 +31,7 @@ function options(stateDir: string, worktreeDir: string): Options {
     launcher: 'claude-magpie',
     claudeBin: 'claude',
     telegramStateDir: join(process.env.HOME!, '.claude/channels/telegram-live'),
-    telegramChatId: '',
+    telegramChatId: '', telegramAfterMinutes: 10,
     timezone: 'Asia/Shanghai',
     ratingHour: 21,
   }

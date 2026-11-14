@@ -56,20 +56,20 @@ export const TOOL_SPECS: Record<ToolName, { description: string; inputSchema: Re
     },
   },
   integrate: {
-    description: 'Bring the change of every project this task changes into its project directory: the changes in a task worktree since the last integration are applied to that project\'s main directory (only its working tree: nothing is committed or pushed), and a change subagents made in a project directory itself is recorded as the result. Returns, for each project, the files applied or recorded, or the conflicting files and git\'s message, in which case the person is asked on Telegram about that project while the others are applied.',
+    description: 'Bring the change of every project this task changes into its project directory: the changes in a task worktree since the last integration are applied to that project\'s main directory (only its working tree: nothing is committed or pushed), and a change subagents made in a project directory itself is recorded as the result. Returns, for each project, the files applied or recorded, or the conflicting files and git\'s message, in which case the person is asked about that project (in the window, and on Telegram when nobody answers there) while the others are applied.',
     inputSchema: { type: 'object', properties: { note: string('What is being integrated, in one sentence.') }, additionalProperties: false },
   },
   notify_user: {
-    description: 'Send the person a Telegram notification. kind decision: a key design change or anything else they must decide. kind result: a finished part of the task worth their attention. kind done: the whole task is finished; the task closes (recorded as the completion time), this session is stopped after ten idle minutes and the task worktree removed, and the person\'s next message reopens it. Do not send ordinary progress, and do not answer a message from Telegram with it: the host sends your final answer of that turn as the reply. Write text in Chinese, plain text without Markdown.',
+    description: 'Tell the person something worth their coming back for. kind result: a finished part of the task. kind done: the whole task is finished; the task closes (recorded as the completion time), this session is stopped after ten idle minutes and the task worktree removed, and the person\'s next message reopens it. The text shows as a line in the window with a notification, and goes to Telegram as well when the person sends this session nothing within the configured wait (ten minutes by default); in a turn a Telegram message started it goes to both at once. Do not send ordinary progress, do not answer a message from Telegram with it (the host sends your final answer of that turn as the reply), and do not ask with it: a question to the person is an AskUserQuestion call. Write text in Chinese.',
     inputSchema: {
       type: 'object',
-      properties: { kind: { type: 'string', enum: ['decision', 'result', 'done'] }, text: string('The message, in Chinese.') },
+      properties: { kind: { type: 'string', enum: ['result', 'done'] }, text: string('The message, in Chinese.') },
       required: ['kind', 'text'],
       additionalProperties: false,
     },
   },
   resolve_conflict: {
-    description: 'Answer the file-conflict question of a subagent magpie-tasks paused because another subagent changes the same files. separate: it gets a separate worktree copied from the task worktree and is woken to continue there; its changes are merged into the task worktree when it reports done. wait: it stays paused and is woken when the other subagent finishes.',
+    description: 'Answer the file-conflict question of a subagent magpie-tasks paused because another subagent changes the same files. separate: it gets a separate worktree copied from the task worktree and is woken to continue there; its changes are merged into the task worktree when it reports done. wait: it stays paused and is woken when the other subagent finishes. The person is asked the same question in the window (and on Telegram when nobody answers there); whichever answer comes first is carried out.',
     inputSchema: {
       type: 'object',
       properties: { agent_id: string('The paused subagent.'), decision: { type: 'string', enum: ['separate', 'wait'] } },

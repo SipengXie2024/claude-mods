@@ -46,7 +46,7 @@ async function scenario(name: string) {
     gatewayUrl: 'http://127.0.0.1:3425', stateDir: join(dir, 'state'), worktreeDir: join(dir, 'wt'),
     jevUrl: 'https://api.openai.com/v1/decisions', jevModel: 'gpt-6-luna', jevKeyFile: join(homedir(), '.config/jev-opus/openai-jev.key'), jevDeadlineMs: 30_000,
     evaluatorModel: 'claude/claude-opus-5-5', launcher: 'claude-magpie', claudeBin: 'claude',
-    telegramStateDir: join(homedir(), '.claude/channels/telegram-live'), telegramChatId: '', timezone: 'Asia/Shanghai', ratingHour: 21,
+    telegramStateDir: join(homedir(), '.claude/channels/telegram-live'), telegramChatId: '', telegramAfterMinutes: 10, timezone: 'Asia/Shanghai', ratingHour: 21,
   }
   const io = nodeIo()
   const reg = new Registry(io, opts, 'router-session')

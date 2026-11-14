@@ -1,9 +1,9 @@
 // Startup recovery (plan section 9.13): run when a claude-magpie or claude-telegram session starts,
 // at most once in 10 minutes across sessions. Reports launches nobody claimed, resumes stopped
-// architects of unfinished long tasks under their own session IDs, reports integrations that started
-// and may not have finished, hands orphaned daily tasks back to the person, and reloads idle
-// architects after a context-memory update. Also the debug-log check for context-memory archive
-// failures in architect sessions.
+// architects of unfinished long tasks under their own session IDs (those waiting for the person, and
+// those it cannot resume as they were, which then ask the person in the architect's window), hands
+// orphaned daily tasks back to the person, and reloads idle architects after a context-memory update.
+// Also the debug-log check for context-memory archive failures in architect sessions.
 import { resumedSince } from './brief'
 import { diagnosedBlocker, integrateDaily, rerunCheck, tell } from './daily'
 import { gitRun } from './git'
@@ -36,7 +36,7 @@ export type RecoveryAction =
   | 'none'            // nothing to do: finished, still starting within the claim window, or paused by the person
   | 'never-claimed'   // still 'starting' after the launch claim expired: the launcher is gone
   | 'alive'           // the owner session's process runs
-  | 'keep-waiting'    // waits for the person; stays so
+  | 'keep-waiting'    // waits for the person and stays so; its architect is resumed, so the open questions return to its window
   | 'resume'          // stopped and not paused by the person: check the worktree and log, then resume
   | 'orphaned-daily'  // a daily task whose Router is gone
 
@@ -111,9 +111,63 @@ export async function contextMemoryFingerprint(io: Io, configDir: string): Promi
   return fingerprintOf(JSON.parse(await io.read(path)))
 }
 
+// Where a recovery report goes: a long task's report is shown in the window of the claude-magpie
+// session running recovery (the person just opened it) and goes to Telegram when the Router runs it;
+// a daily task's report is the Router's and goes to Telegram (or to the transcript for a terminal
+// task) whoever runs recovery.
+export function reportPlace(role: string, task: Pick<TaskRecord, 'kind' | 'telegram'>): 'window' | 'telegram' {
+  if (task.kind === 'long' && role !== 'router') return 'window'
+  const terminal = task.telegram?.chatId === 'tui' || (task.kind === 'daily' && task.telegram === null)
+  return terminal ? 'window' : 'telegram'
+}
+
+// The 'interrupted' decision of a long task recovery cannot resume as it was. It is asked in the
+// window of the resumed architect, timed from `askedAt` like the plugin's other questions; until it is
+// answered the task's delegation and integration are refused (src/architect.ts openInterruption).
+export function interruptedDecision(task: Pick<TaskRecord, 'id' | 'title'>, problem: string, unfinished: { target: string; tree: string; files: string[] }[], now: number, id: string): Decision {
+  return {
+    id,
+    kind: 'interrupted',
+    createdAt: now,
+    askedAt: now,
+    question: `长期任务「${task.title}」（${task.id}）中断后无法自动恢复：${problem}。请检查后选择“继续”，任务接着运行；选择“暂停”则保持暂停。`,
+    options: ['继续', '暂停'],
+    data: { reason: problem, ...(unfinished[0] ? { target: unfinished[0].target, tree: unfinished[0].tree, files: unfinished[0].files.join('\n') } : {}) },
+  }
+}
+
+function runningLine(task: TaskRecord): string {
+  const running = Object.values(task.agents).filter(a => a.state === 'running' || a.state === 'paused')
+  return running.length === 0
+    ? 'No subagent was running.'
+    : `Subagents that were running or paused when it stopped: ${running.map(a => `${a.agentId}${a.name ? ` (${a.name})` : ''} ${a.model}/${a.effort} ${a.state}`).join('; ')}. Their runs ended with the session; delegate again what is unfinished.`
+}
+
+// The first message of a resumed architect whose task recovery could not resume as it was.
+export function interruptedMessage(task: TaskRecord, decision: Decision): string {
+  return [
+    RECOVERY_HEADER,
+    `It could not be resumed as it was: ${decision.data['reason']}.`,
+    runningLine(task),
+    `magpie-tasks asks the person in this window whether to continue (decision ${decision.id}: 继续 / 暂停); unanswered, the question goes to Telegram too. Until they answer, delegation (mcp__magpie-tasks__model_route and the Agent tool) and mcp__magpie-tasks__integrate are refused and the task stays paused. Tell the person in your answer what you found, then wait for their decision.`,
+  ].join('\n')
+}
+
+// The first message of a resumed architect whose task waits for the person.
+export function waitingMessage(task: TaskRecord): string {
+  const open = Object.values(task.decisions).filter(d => d.resolvedAt === undefined)
+  return [
+    RECOVERY_HEADER,
+    runningLine(task),
+    open.length === 0
+      ? 'The task waits for the person; nothing of it is open in the record.'
+      : `The task waits for the person: ${open.map(d => `decision ${d.id} (${d.kind})`).join(', ')}. magpie-tasks has put its questions back in this window; one that has waited its time goes to Telegram at once. Wait for their answer.`,
+  ].join('\n')
+}
+
 // ---- recovery ---------------------------------------------------------------------------------
 
-type Report = { task: TaskRecord; text: string; decisionId?: string }
+type Report = { task: TaskRecord; text: string }
 
 export async function recover(ctx: Ctx): Promise<{ resumed: string[]; waiting: string[]; reported: string[] }> {
   const result = { resumed: [] as string[], waiting: [] as string[], reported: [] as string[] }
@@ -168,10 +222,14 @@ async function recoverTask(ctx: Ctx, task: TaskRecord, action: RecoveryAction, r
       result.reported.push(t.id)
       return
     }
-    case 'keep-waiting':
-      await reg.log(task.id, { type: 'recovery', action })
+    case 'keep-waiting': {
+      if (task.owner.kind !== 'session') return
+      await resumeSession(ctx, task.owner.sessionId, waitingMessage(task), task.project?.root ?? await home(ctx))
+      await reg.log(task.id, { type: 'recovery', action, resumed: task.owner.sessionId })
       result.waiting.push(task.id)
+      result.resumed.push(task.id)
       return
+    }
     case 'orphaned-daily': {
       const t = await reg.update(task.id, x => { x.state = 'waiting-user' }, { type: 'recovery', action })
       reports.push({ task: t, text: `Router 重启，任务「${t.title}」的执行者已不在；回复这条消息可以继续` })
@@ -227,26 +285,18 @@ async function resumeStopped(ctx: Ctx, task: TaskRecord, result: { resumed: stri
     problem = unfinished.map(u => `一次整合开始后没有完成记录：目标 ${u.target}，文件 ${u.files.join('、') || '（无）'}`).join('；')
   }
   if (problem !== null) {
+    // The architect is resumed all the same: the question is asked in its window.
     const now = await io.now()
-    const decision: Decision = {
-      id: newId('q', now),
-      kind: 'interrupted',
-      createdAt: now,
-      question: `长期任务「${task.title}」（${task.id}）中断后无法自动恢复：${problem}。请检查后回复“继续”，架构师会话会被恢复并按你的回复处理；回复“暂停”则保持暂停。`,
-      options: ['继续', '暂停'],
-      data: { reason: problem, ...(unfinished[0] ? { target: unfinished[0].target, tree: unfinished[0].tree, files: unfinished[0].files.join('\n') } : {}) },
-    }
+    const decision = interruptedDecision(task, problem, unfinished, now, newId('q', now))
     const t = await reg.update(task.id, x => { x.state = 'waiting-user'; x.decisions[decision.id] = decision }, { type: 'decision', decision: decision.id, kind: decision.kind, during: 'recovery' })
-    reports.push({ task: t, text: decision.question, decisionId: decision.id })
-    result.reported.push(t.id)
+    await resumeSession(ctx, task.owner.sessionId, interruptedMessage(t, decision), task.project?.root ?? await home(ctx))
+    await reg.log(task.id, { type: 'recovery', action: 'resume', reason: 'interrupted', decision: decision.id, sessionId: task.owner.sessionId })
+    result.resumed.push(task.id)
     return
   }
-  const running = Object.values(task.agents).filter(a => a.state === 'running' || a.state === 'paused')
   const message = [
     RECOVERY_HEADER,
-    running.length === 0
-      ? 'No subagent was running.'
-      : `Subagents that were running or paused when it stopped: ${running.map(a => `${a.agentId}${a.name ? ` (${a.name})` : ''} ${a.model}/${a.effort} ${a.state}`).join('; ')}. Their runs ended with the session; delegate again what is unfinished.`,
+    runningLine(task),
     ...(dirs.length === 0 ? ['The task has no working directory.'] : dirs),
     `Check the working ${dirs.length > 1 ? 'directories' : 'directory'} and the subagents\' reports against the task, then continue.`,
   ].join('\n')
@@ -255,28 +305,20 @@ async function resumeStopped(ctx: Ctx, task: TaskRecord, result: { resumed: stri
   result.resumed.push(task.id)
 }
 
-// Long tasks: the message is indexed as 'long', so a reply reaches the architect; a long task with
-// no chat reports to the default chat. A daily task's report is a reply to its original message and
-// is left out of the index: its executor is gone, and tg-router's handling of a lost worker takes
-// the reply. A terminal daily task (no Telegram link, or chat 'tui') reports to this session's
-// transcript.
+// Where a report goes is reportPlace. On Telegram a long task's message is indexed as 'long', so a
+// reply reaches the architect, and a long task with no chat reports to the default chat. A daily
+// task's report is a reply to its original message and is left out of the index: its executor is
+// gone, and tg-router's handling of a lost worker takes the reply.
 async function report(ctx: Ctx, r: Report): Promise<void> {
-  const terminal = r.task.telegram?.chatId === 'tui' || (r.task.kind === 'daily' && r.task.telegram === null)
-  if (terminal) {
+  if (reportPlace(ctx.st.role, r.task) === 'window') {
     ctx.host.ui.log(r.text)
     await ctx.reg.log(r.task.id, { type: 'recovery', reported: 'transcript' })
     return
   }
   const chatId = r.task.telegram?.chatId ?? await defaultChat(ctx.io, ctx.opts)
   const messageId = await send(ctx.io, ctx.opts, chatId, r.text, r.task.telegram?.rootMessageId, true)
-  if (r.task.kind === 'long') {
-    await ctx.reg.updateIndex(x => { x.messages[`${chatId}:${messageId}`] = { taskId: r.task.id, kind: 'long', ...(r.decisionId ? { decisionId: r.decisionId } : {}) } })
-  }
-  if (r.decisionId !== undefined) {
-    await ctx.reg.update(r.task.id, t => { const d = t.decisions[r.decisionId!]; if (d) d.telegram = { chatId, messageId } }, { type: 'telegram', decision: r.decisionId, messageId })
-  } else {
-    await ctx.reg.log(r.task.id, { type: 'telegram', messageId, during: 'recovery' })
-  }
+  if (r.task.kind === 'long') await ctx.reg.updateIndex(x => { x.messages[`${chatId}:${messageId}`] = { taskId: r.task.id, kind: 'long' } })
+  await ctx.reg.log(r.task.id, { type: 'telegram', messageId, during: 'recovery' })
 }
 
 // ---- the Router's own daily tasks after a restart ---------------------------------------------

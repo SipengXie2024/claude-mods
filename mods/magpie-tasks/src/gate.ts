@@ -49,20 +49,26 @@ export function isRecordPath(realPath: string, projectRoot: string): boolean {
 
 // ---- shell commands ---------------------------------------------------------------------------
 
-type Parsed = { commands: string[][] } | { refused: string }
+// `joins[i]` is the operator after `commands[i]` ('' after the last).
+type Parsed = { commands: string[][]; joins: string[] } | { refused: string }
 
 // Splits a command line into simple commands (words with quotes removed) at `&&`, `||`, `;`, `|`,
-// `&` and newlines outside quotes. Refuses what a read-only check cannot see through: output
-// redirection, command and process substitution, backticks, unterminated quotes, and escapes
-// (a backslash can hide any of these from a scanner this small).
+// `&` and newlines outside quotes. Refuses what a read-only check cannot see through: redirection
+// other than `2>/dev/null` and `2>&1` (error output to nowhere, or into standard output), command
+// and process substitution, backticks, unterminated quotes, and a backslash outside single quotes
+// (there it can hide any of these from a scanner this small; inside single quotes the shell reads it
+// as a plain character, as a regular expression such as '\(' needs).
 function parseShell(command: string): Parsed {
   const commands: string[][] = []
+  const joins: string[] = []
   let words: string[] = []
   let word = ''
   let inWord = false
+  // The word under way took characters from a quote: `"2">file` is no file-descriptor redirection.
+  let quoted = false
   let quote: '"' | "'" | null = null
-  const endWord = () => { if (inWord) words.push(word); word = ''; inWord = false }
-  const endCommand = () => { endWord(); if (words.length > 0) commands.push(words); words = [] }
+  const endWord = () => { if (inWord) words.push(word); word = ''; inWord = false; quoted = false }
+  const endCommand = (join: string) => { endWord(); if (words.length > 0) { commands.push(words); joins.push(join) } words = [] }
   for (let i = 0; i < command.length; i++) {
     const c = command[i]!
     const next = command[i + 1]
@@ -71,7 +77,7 @@ function parseShell(command: string): Parsed {
       else word += c
       continue
     }
-    if (c === '\\') return { refused: 'a backslash escape' }
+    if (c === '\\') return { refused: 'a backslash outside single quotes' }
     if (c === '`') return { refused: 'a backtick command substitution' }
     if (c === '$' && next === '(') return { refused: 'a $( ) command substitution' }
     if (quote === '"') {
@@ -79,14 +85,22 @@ function parseShell(command: string): Parsed {
       else word += c
       continue
     }
-    if (c === "'" || c === '"') { quote = c; inWord = true; continue }
-    if (c === '>') return { refused: 'an output redirection' }
+    if (c === "'" || c === '"') { quote = c; inWord = true; quoted = true; continue }
+    if (c === '>') {
+      const target = inWord && !quoted && word === '2' ? /^(?:\/dev\/null|&1)(?=$|[\s;|&])/.exec(command.slice(i + 1)) : null
+      if (target === null) return { refused: 'a redirection other than 2>/dev/null and 2>&1' }
+      word = ''
+      inWord = false
+      i += target[0].length
+      continue
+    }
     if (c === '<' && next === '(') return { refused: 'a <( ) process substitution' }
     if (c === '<') return { refused: 'an input redirection' }
     if (c === '(' || c === ')' || c === '{' || c === '}') return { refused: 'a subshell or group' }
     if (c === ';' || c === '|' || c === '&' || c === '\n') {
-      endCommand()
-      if ((c === '|' || c === '&') && next === c) i++
+      const doubled = (c === '|' || c === '&') && next === c
+      endCommand(doubled ? c + c : c)
+      if (doubled) i++
       continue
     }
     if (c === ' ' || c === '\t' || c === '\r') { endWord(); continue }
@@ -94,8 +108,8 @@ function parseShell(command: string): Parsed {
     inWord = true
   }
   if (quote !== null) return { refused: 'an unterminated quote' }
-  endCommand()
-  return { commands }
+  endCommand('')
+  return { commands, joins }
 }
 
 const READ_PROGRAMS = new Set(['ls', 'cat', 'head', 'tail', 'wc', 'rg', 'grep', 'find', 'stat', 'du', 'file', 'pwd', 'tree', 'jq'])
@@ -163,12 +177,17 @@ export function isReadOnlyBash(command: string): boolean {
   return readOnlyRefusal(command) === null
 }
 
+// Why a command line is not read-only, or null. One leading `cd <dir> &&` is let through: it changes
+// only the directory the rest runs in. `allow` passes further simple commands (the architect's git
+// add, commit and push), but not after a `cd`: those run in the project main directory.
 function readOnlyRefusal(command: string, allow: (words: string[]) => boolean = () => false): string | null {
   const parsed = parseShell(command)
   if ('refused' in parsed) return parsed.refused
   if (parsed.commands.length === 0) return 'an empty command'
-  for (const words of parsed.commands) {
-    if (allow(words)) continue
+  const moved = parsed.commands[0]![0] === 'cd'
+  if (moved && !(parsed.commands[0]!.length === 2 && parsed.joins[0] === '&&' && parsed.commands.length > 1)) return 'cd other than one leading `cd <dir> &&`'
+  for (const words of moved ? parsed.commands.slice(1) : parsed.commands) {
+    if (!moved && allow(words)) continue
     const why = notReadOnly(words)
     if (why !== null) return why
   }
@@ -237,7 +256,7 @@ export async function architectDeny(e: ToolEvent, a: { projectRoot: string; home
     if (isPlanCommand(command, root, a.home)) return null
     const why = readOnlyRefusal(command, isArchitectGit)
     if (why === null) return null
-    return `${ARCHITECT_ROLE} The architect runs only read-only commands (ls, cat, head, tail, wc, rg, grep, find, stat, du, file, pwd, tree, jq, sed -n with a print script such as '1,40p', git status/diff/log/show/ls-files/rev-parse/blame/worktree list/branch --list, joined by &&, ||, ; or | and without redirection or substitution), git add/commit/push in the project main directory (without -C or -c) when the person asks, and the html-plan pack and publish-plan commands; this command has ${why}. Delegate commands that change files or run builds and tests to a subagent with the Agent tool.`
+    return `${ARCHITECT_ROLE} The architect runs only read-only commands (ls, cat, head, tail, wc, rg, grep, find, stat, du, file, pwd, tree, jq, sed -n with a print script such as '1,40p', git status/diff/log/show/ls-files/rev-parse/blame/worktree list/branch --list, joined by &&, ||, ; or |, after one leading "cd <dir> &&" if you like; the only redirections are 2>/dev/null and 2>&1, a backslash goes inside single quotes only, and there is no substitution), git add/commit/push in the project main directory (without -C or -c, and not after a cd) when the person asks, and the html-plan pack and publish-plan commands; this command has ${why}. Delegate commands that change files or run builds and tests to a subagent with the Agent tool.`
   }
   return null
 }

@@ -2,7 +2,8 @@
 # E15 (plan section 12.2): a flow hook error. The repository's object store is read-only, so the base
 # commit of the project directory fails after the person confirms: the window shows the error line
 # and the drop, the message does not reach the model, the task is in state error with the cause, no
-# background session starts, and the window stays open.
+# background session starts, the window stays open, and nothing goes to Telegram (the failure is
+# shown in this window only; in an environment from `setup.sh --forward` the task has a chat).
 source "$(dirname "$0")/lib.sh"
 mkdir -p "$E/proj3"
 ( cd "$E/proj3" && git init -q && printf 'x\n' > a.txt && git add . \
@@ -22,6 +23,8 @@ check 'the error names the failed snapshot' bash -c "jq -r .error '$t' | grep -q
 check 'the project is the one of this window' test "$(task_field "$t" .project.root)" = "$E/proj3"
 check 'no new background session' test "$(agents_json | jq '[.[] | select(.kind == "background")] | length')" -eq "$bg_before"
 check 'the window is still open' bash -c "source '$(dirname "$0")/lib.sh' >/dev/null; ! pane_dead e15"
+echo "task chat: $(task_field "$t" .telegram.chatId)"
+check 'nothing was sent to Telegram' bash -c "! grep -q 'process.run (magpie-tasks): curl with' '$E/e15.log'"
 chmod -R u+w "$E/proj3/.git/objects"
 type_line e15 '/exit'
 cleanup e15

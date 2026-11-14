@@ -67,6 +67,7 @@ function hostEnv($: EngineInterface, name: string): Promise<string | undefined> 
     case 'HOME': return $.env.get('HOME')
     case 'ANTHROPIC_BASE_URL': return $.env.get('ANTHROPIC_BASE_URL')
     case 'MAGPIE_TASKS_ROLE': return $.env.get('MAGPIE_TASKS_ROLE')
+    case 'MAGPIE_TASKS_HANDOFF': return $.env.get('MAGPIE_TASKS_HANDOFF')
     case 'CLAUDE_JOB_DIR': return $.env.get('CLAUDE_JOB_DIR')
     case 'CLAUDE_BG_SOURCE': return $.env.get('CLAUDE_BG_SOURCE')
     case 'CLAUDE_CONFIG_DIR': return $.env.get('CLAUDE_CONFIG_DIR')
@@ -121,7 +122,7 @@ export function fnv1a64(text: string): string {
 }
 
 // `<prefix>-YYYYMMDD-<6 base36>`; the date is the UTC date of `now`.
-export function newId(prefix: 'l' | 'd' | 'c' | 'r' | 'q', now: number): string {
+export function newId(prefix: 'l' | 'd' | 'c' | 'r' | 'q' | 'n', now: number): string {
   const d = new Date(now)
   const day = `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')}`
   let suffix = ''

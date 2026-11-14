@@ -23,11 +23,13 @@ export function worktreeReclaimable(task: TaskRecord, architect: AgentsRow | und
   return task.kind === 'daily' || architect === undefined || architect.pid == null
 }
 
-// Whether a done long task's architect session is to be stopped: its process runs, idle, and the
-// task has been done for ARCHITECT_GRACE_MS.
+// Whether a done long task's architect session is to be stopped: its process runs, idle, the task
+// has been done for ARCHITECT_GRACE_MS, and no notice of it still waits in the window for its time
+// to go to Telegram (the timer that sends it lives in that process).
 export function architectToStop(task: TaskRecord, row: AgentsRow | undefined, now: number): boolean {
   return task.kind === 'long' && task.state === 'done' && task.owner.kind === 'session'
     && row !== undefined && row.pid != null && row.status === 'idle'
+    && Object.keys(task.notices ?? {}).length === 0
     && (task.completedAt ?? task.updatedAt) <= now - ARCHITECT_GRACE_MS
 }
 

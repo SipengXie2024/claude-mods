@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # E10 (plan section 12.2): E3's architect is stopped while its task is running; the next claude-magpie
 # window's startup recovery resumes it under its own session ID with the recovery message. Runs before
-# E14: E14 leaves the task waiting for the person, and recovery rightly leaves such a task alone.
+# E14, which leaves the task waiting for the person (recovery resumes such a task too, with another
+# message: E22).
 source "$(dirname "$0")/lib.sh"
 task=$(cat "$E/e3.task")
 sid=$(task_field "$task" .owner.sessionId)

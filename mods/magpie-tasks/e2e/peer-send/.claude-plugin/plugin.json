@@ -1,0 +1,6 @@
+{
+  "name": "peer-send",
+  "version": "0.0.1",
+  "description": "Scenario driver of the magpie-tasks e2e scripts: a session loaded with it sends a text to another session, the way the Router hands a Telegram message to an architect.",
+  "author": { "name": "sipeng" }
+}

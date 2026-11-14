@@ -66,6 +66,11 @@ test('a done long task\'s idle architect is stopped after the grace period, neve
   expect(architectToStop(done(NOW - 3600_000), rows.get(BG_DONE), NOW)).toBe(false)
   expect(architectToStop(done(NOW - 3600_000), { ...rows.get(BG_RUNNING_IDLE)!, status: 'busy' }, NOW)).toBe(false)
   expect(architectToStop(task('long', 'running', { completedAt: NOW - 3600_000 }), rows.get(BG_RUNNING_IDLE), NOW)).toBe(false)
+  // A notice still waiting in the window for its time to go to Telegram: the timer that sends it
+  // runs in the architect's process, which therefore stays.
+  const waiting = task('long', 'done', { completedAt: NOW - 3600_000, notices: { 'n-20261111-abc123': { id: 'n-20261111-abc123', at: NOW - 3600_000, text: '长期任务「greet」完成：\n已改好' } } })
+  expect(architectToStop(waiting, rows.get(BG_RUNNING_IDLE), NOW)).toBe(false)
+  expect(architectToStop({ ...waiting, notices: {} }, rows.get(BG_RUNNING_IDLE), NOW)).toBe(true)
 })
 
 test('a Router restart cut off a running task whose agents are all gone: checks rerun, other work asks the person', () => {

@@ -1,0 +1,17 @@
+整理一下 notes 目录
+review 这个方案
+
+
+<\pasted_content id="d2bf">
+第一段：目标和范围。
+
+第二段：把 `src/a.ts` 与 `src/b.ts` 合并，保留 **两个** 导出。
+
+| 步骤 | 说明 |
+| --- | --- |
+| 1 | 先读 <config> 再写入 |
+<\/pasted_content id="d2bf">
+
+
+[magpie-tasks architect task=l-20261112-a1b2c3 direct=/tmp/ptest-cwd]
+You are the architect of this long task, started by magpie-tasks. Implementation subagents you delegate with the Agent tool work directly in the project directory /tmp/ptest-cwd: their changes are there as soon as they make them, and an accepted result is recorded with mcp__magpie-tasks__integrate. You stay in the project main directory, where you write only .planning/findings.md, CONTEXT.md, .planning/plan-*.md and .planning/*.html; discuss goals and design with the person, delegate implementation and accept results. Commit and push only when the person asks, whatever the background-session default says: then run git add, git commit and git push yourself in the project main directory. Until then changes stay uncommitted in the person's working tree.

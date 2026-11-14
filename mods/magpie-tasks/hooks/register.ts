@@ -3,8 +3,9 @@
 // flow hooks report and stop the flow, gate hooks refuse, effort hooks let the request go on.
 import type { EngineInterface, PluginOptions, Register, RenderElement, TurnCompleteInput } from 'claude-code'
 import { onSessionAgents } from '../src/agents'
-import { architectTool, onArchitectComplete, onArchitectPrompt, onArchitectToolCall, onSubagentComplete, onSubagentToolCall } from '../src/architect'
-import { agentBand, bandText, clearBands, isEffort, noteBandDone, noteBandStep } from '../src/band'
+import { architectTool, onArchitectComplete, onArchitectPrompt, onArchitectReceive, onArchitectToolCall, onSubagentComplete, onSubagentToolCall, resumeArchitectChannels } from '../src/architect'
+import { agentBand, bandsRunning, bandText, clearBands, isEffort, noteBandDone, noteBandStep, noteBandTool } from '../src/band'
+import { resetChannels, showNotice } from '../src/channel'
 import { onDailyComplete, onOpenProject } from '../src/daily'
 import { tick } from '../src/calibration'
 import { expandHome, hostIo } from '../src/io'
@@ -13,6 +14,7 @@ import { reclaim } from '../src/reclaim'
 import { recover, recoverRouter } from '../src/recovery'
 import { Registry } from '../src/registry'
 import { onRouterPrompt, onSessionSend, routerTool } from '../src/router'
+import { startRouted, unstartedRoutes } from '../src/route'
 import { loadRules, type Rules } from '../src/rules'
 import { bgIsolationAnswer, detectRole, loadRouter, onClaimPrompt, onFirstPrompt, onTakeoverTurnEnd } from '../src/session'
 import { onAgentSpawn, onTurnStart, onTurnStep, turnRule } from '../src/spawn'
@@ -23,6 +25,8 @@ import type { Options, SessionState, TaskRecord } from '../src/types'
 import { onAgentError, onStopFailure } from '../src/unavailable'
 
 const TICK_MS = 15 * 60_000
+// How often a running subagent's band is drawn again, so the time on it moves between its tool calls.
+const BAND_MS = 10_000
 
 export function errorLine(err: unknown): string {
   const text = err instanceof Error ? err.message : typeof err === 'object' && err !== null && 'message' in err ? String((err as { message?: unknown }).message ?? '') : String(err)
@@ -55,6 +59,7 @@ export function optionsFrom(o: PluginOptions, home: string): Options {
     claudeBin: str('claudeBin'),
     telegramStateDir: expandHome(str('telegramStateDir'), home),
     telegramChatId: str('telegramChatId'),
+    telegramAfterMinutes: num('telegramAfterMinutes'),
     timezone: str('timezone'),
     ratingHour: num('ratingHour'),
   }
@@ -95,8 +100,12 @@ export const register: Register = (on, options) => {
 
   // ---- error reports (section 8) ---------------------------------------------------------------
 
-  // A flow stopped on an error: debug log, task log and state 'error', a transcript line and a
-  // Telegram notification. Each part that fails is named in one more transcript line.
+  // A flow stopped on an error: debug log, task log and state 'error', and a report to the person.
+  // An architect reports its long task's error like the plugin's other notices of that task (the
+  // window first, Telegram when the person sends nothing, src/channel.ts); the Router reports on
+  // Telegram; a claude-magpie window (the first message, a takeover, startup recovery) and a background
+  // session not yet claimed (whose launching window reports the failed claim) report in their own
+  // transcript only. Each part that fails is named in one more transcript line.
   async function reportFlowError(c: Ctx, taskId: string | null, line: string, during: string): Promise<void> {
     const failed: string[] = []
     const step = async (what: string, fn: () => Promise<void>) => {
@@ -109,8 +118,13 @@ export const register: Register = (on, options) => {
         task = await c.reg.update(taskId, t => { t.state = 'error'; t.error = line }, { type: 'error', during, error: line })
       })
     }
-    c.host.ui.log(`magpie-tasks 出错${taskId ? `（任务 ${taskId}）` : ''}：${line}`)
-    await step('Telegram 通知', async () => {
+    if (st.role === 'architect' && task !== undefined && task.kind === 'long') {
+      const long = task
+      await step('窗口通知', async () => { await showNotice(c, long, `magpie-tasks 出错（任务 ${long.id}）：长期任务「${long.title}」的流程停止：${line}`) })
+    } else {
+      c.host.ui.log(`magpie-tasks 出错${taskId ? `（任务 ${taskId}）` : ''}：${line}`)
+    }
+    if (st.role === 'router') await step('Telegram 通知', async () => {
       const own = task?.telegram && task.telegram.chatId !== 'tui' ? task.telegram : null
       const chatId = own?.chatId ?? await defaultChat(c.io, c.opts)
       // A terminal task (chat 'tui') has its report in the transcript line above.
@@ -177,6 +191,18 @@ export const register: Register = (on, options) => {
     }
   }
 
+  // An architect session started with its task's questions and notices still open (a restart, a
+  // takeover's copy, a promoted daily task): they go back into the window with their remaining time.
+  // It runs behind the hook; a failure is reported and leaves the task as it is.
+  function resumeQuestions(c: Ctx): void {
+    void resumeArchitectChannels(c).catch(async (err: unknown) => {
+      const line = errorLine(err)
+      c.host.ui.log(`magpie-tasks 出错${st.taskId ? `（任务 ${st.taskId}）` : ''}：没有把待回答的问题放回窗口：${line}`)
+      await c.io.log(`resuming window questions${st.taskId ? ` (task ${st.taskId})` : ''}: ${line}`)
+      if (st.taskId !== null) await c.reg.log(st.taskId, { type: 'error', during: 'resuming window questions', error: line })
+    }).catch((err: unknown) => c.host.ui.log(`magpie-tasks 出错：没有记下放回问题的失败：${errorLine(err)}`))
+  }
+
   function eventTask(agentId: string | undefined): string | null {
     if (agentId !== undefined) return st.agents.get(agentId) ?? null
     return st.taskId
@@ -213,6 +239,7 @@ export const register: Register = (on, options) => {
     const c = ctxOf($, st, loaded)
     const role = await detectRole(c, e)
     await io.log(`role ${role} (session ${st.sessionId}, cwd ${st.cwd})`)
+    $.clock.every(BAND_MS, () => { if (bandsRunning()) $.ui.invalidate('ui.render') })
     if (role === 'candidate' || role === 'router') {
       const problem = installOrderProblem((await $.settings.read({ source: 'user' }))['enabledPlugins'])
       if (problem !== null) {
@@ -255,7 +282,10 @@ export const register: Register = (on, options) => {
           .finally(() => { ticking = false })
       })
     }
-    if (role === 'architect') await registerTools(c, 'architect')
+    if (role === 'architect') {
+      await registerTools(c, 'architect')
+      resumeQuestions(c)
+    }
     return r
   })
 
@@ -266,7 +296,14 @@ export const register: Register = (on, options) => {
     const c = ctxOf($, st, loaded)
     switch (st.role) {
       case 'candidate': return onFirstPrompt(c, e, next)
-      case 'bg-unclaimed': return onClaimPrompt(c, e, next)
+      case 'bg-unclaimed': {
+        const r = await onClaimPrompt(c, e, next)
+        // The claim made this session an architect; its task may bring open questions along (a
+        // promoted daily task's).
+        const claimed: string = st.role
+        if (claimed === 'architect') resumeQuestions(c)
+        return r
+      }
       case 'architect': return onArchitectPrompt(c, e, next)
       case 'router': return onRouterPrompt(c, e, next)
       default: return next(e)
@@ -292,6 +329,17 @@ export const register: Register = (on, options) => {
       return next(e)
     })
 
+  // A Telegram message that answers the architect's waiting question is taken before it is queued:
+  // the turn is held by that question, and a queued message would be read only after it.
+  on('session.receive', async ($, e, next) => {
+    if (loaded === null || st.role !== 'architect' || e.agentId !== undefined) return next(e)
+    const taken = await onArchitectReceive(ctxOf($, st, loaded), e.text)
+    return taken === null ? next(e) : { consumed: taken }
+  }).catch(async ($, e, next) => {
+    if (loaded !== null) await reportGateError(ctxOf($, st, loaded), st.taskId, errorLine(next.error), 'session.receive').catch(() => undefined)
+    return next(e)
+  })
+
   // ---- subagents: spawn, turns, effort (sections 9.6, 9.7, 9.16) -------------------------------------
 
   on('agent.spawn', async ($, e, next) => (routes() ? onAgentSpawn(ctxOf($, st, loaded), e, next) : next(e)))
@@ -311,16 +359,46 @@ export const register: Register = (on, options) => {
 
   on('turn.step', async function* ($, e, next) {
     let effort: Awaited<ReturnType<typeof onTurnStep>>
+    if (routes() && e.agentId === undefined && st.routed.size > 0) {
+      // The architect's next request goes out and a model_route call's subagent was never started.
+      const c = ctxOf($, st, loaded)
+      for (const left of unstartedRoutes(c)) await reportGateError(c, left.taskId, `PostToolBatch did not run for a model_route call; its subagent (${left.kind === 'spawn' ? left.args.description : left.id}) was not started`, 'model_route')
+    }
     if (routes() && e.agentId !== undefined) {
       const c = ctxOf($, st, loaded)
       try { effort = await onTurnStep(c, e) } catch (err) { await reportEffortError(c, e.agentId, err, 'turn.step') }
       // The band names the effort the request goes out with: the engine's when the hook failed.
       if (st.agents.has(e.agentId)) {
         const step = { model: e.model, effort: effort ?? (isEffort(e.effort) ? e.effort : undefined), ruleId: turnRule(e.agentId) ?? null, engine: effort === undefined }
-        if (noteBandStep(e.agentId, step)) $.ui.invalidate('ui.render')
+        if (noteBandStep(e.agentId, step, await $.clock.now())) $.ui.invalidate('ui.render')
       }
     }
     return yield* next(effort === undefined ? e : { ...e, effort })
+  })
+
+  // A model_route call's subagent is started here, once the calls of the architect's request have
+  // all returned and before its next request: started inside the call's own tool.call hook, the
+  // subagent's tool calls would pass this plugin's tool.call hook by (src/route.ts). The architect
+  // reads how each start went with the calls' results.
+  on('classic.PostToolBatch', async ($, e, next) => {
+    const r = await next(e)
+    if (!routes() || st.role !== 'architect') return r
+    const c = ctxOf($, st, loaded)
+    const notes: string[] = []
+    for (const call of e.tool_calls) {
+      if (!st.routed.has(call.tool_use_id)) continue
+      try {
+        notes.push(await startRouted(c, call.tool_use_id) ?? '')
+      } catch (err) {
+        const line = errorLine(err)
+        await reportGateError(c, st.taskId, line, 'starting the subagent of model_route')
+        notes.push(`[magpie-tasks] The subagent of a model_route call was not started: ${line}`)
+      }
+    }
+    return notes.length === 0 ? r : { ...r, additionalContext: [...(r.additionalContext ?? []), ...notes] }
+  }).catch(async ($, e, next) => {
+    if (loaded !== null) await reportGateError(ctxOf($, st, loaded), st.taskId, errorLine(next.error), 'classic.PostToolBatch').catch(() => undefined)
+    return next(e)
   })
 
   on('classic.StopFailure', async ($, e, next) => {
@@ -335,6 +413,7 @@ export const register: Register = (on, options) => {
 
   on('tool.call', async ($, e, next) => {
     if (!managed()) return next(e)
+    if (e.agentId !== undefined && st.agents.has(e.agentId) && noteBandTool(e.agentId, e.tool, e as unknown as Record<string, unknown>)) $.ui.invalidate('ui.render')
     const owned = toolOwner(e.tool)
     if (owned !== null) {
       const c = ctxOf($, st, loaded)
@@ -397,7 +476,7 @@ export const register: Register = (on, options) => {
 
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
-    if (e.agentId !== undefined && noteBandDone(e.agentId)) $.ui.invalidate('ui.render')
+    if (e.agentId !== undefined && noteBandDone(e.agentId, await $.clock.now())) $.ui.invalidate('ui.render')
     if (!managed()) return r
     const c = ctxOf($, st, loaded)
     try {
@@ -421,11 +500,12 @@ export const register: Register = (on, options) => {
     if (band === undefined || loaded === null) return next(e)
     const { Text } = $.ui.resolve(e)
     // h() of an element constructor builds an element; RenderElement is the type a JSX expression has.
-    return h(Text, { color: 'warning' }, bandText(band, loaded.rules)) as RenderElement
+    return h(Text, { color: 'warning' }, bandText(band, loaded.rules, await $.clock.now())) as RenderElement
   })
 
   on('session.end', ($, e, next) => {
     clearBands()
+    resetChannels()
     return next(e)
   })
 }

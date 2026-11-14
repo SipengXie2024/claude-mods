@@ -17,9 +17,10 @@ start e17 "$E" env MAGPIE_TASKS_ROLE=router TG_ROUTER_STATE_DIR="$E/tg" claude-m
 wait_ready e17
 check 'the Router session has role router' wait_for 60 debug_has "$dbg" 'magpie-tasks: role router'
 
+before=$(tasks_with d-)
 type_line e17 "把 $a 和 $b 这两个仓库里 greet.py 输出的 hello 都改成 hi，各自运行 python3 greet.py 验证"
-check 'a daily task is recorded' wait_for 300 more_tasks d- 0
-t=$(newest_task)
+check 'a daily task is recorded' wait_for 300 has_new_task d- "$before"
+t=$(new_task d- "$before")
 check 'the task works on both repositories' wait_for 900 bash -c "jq -e --arg a '$ra' --arg b '$rb' '([.project.root] + [.more[]?.project.root] | sort) == ([\$a, \$b] | sort)' '$t'"
 check 'both are changed in place' jq -e '.worktree == null and .direct.dir == .project.root and (.more | length) == 1 and .more[0].worktree == null and .more[0].direct.dir == .more[0].project.root' "$t"
 check 'the log holds one placement per repository' log_has "$t" 'map(select(.type == "workspace" and .mode == "direct")) | length == 2'

@@ -14,7 +14,7 @@ import { canonical, displayName, isAvailable, sameModel } from './model'
 import { ruleById } from './rules'
 import { decideSpawn, judgeCtx, ROUTE_ORIGIN, type SpawnDecision } from './spawn'
 import type { Ctx } from './state'
-import { EFFORTS, type Effort, type TaskRecord } from './types'
+import { EFFORTS, type Effort, type RelayRequest, type TaskRecord } from './types'
 
 export interface RouteRequest {
   description: string
@@ -100,10 +100,33 @@ export async function modelRoute(ctx: Ctx, task: TaskRecord, args: Record<string
   if (chosen.action === 'deny') return `Not started: ${chosen.reason}${rec !== undefined ? ` (${note})` : ''}`
 
   const now = await ctx.io.now()
-  const line = await relay(ctx, {
-    id: newId('r', now), taskId: task.id, createdAt: now, kind: 'spawn', role: chosen.agent.role,
-    args: { prompt: chosen.rewrite.prompt, description: chosen.rewrite.description, model: chosen.rewrite.model, ...(chosen.rewrite.cwd !== undefined ? { cwd: chosen.rewrite.cwd } : {}) },
-    agent: chosen.agent,
-  })
-  return `${line}\n${chosen.notice}\nRouting: ${note}.`
+  const agent = chosen.agent
+  const spawn = { prompt: chosen.rewrite.prompt, description: chosen.rewrite.description, model: chosen.rewrite.model, ...(chosen.rewrite.cwd !== undefined ? { cwd: chosen.rewrite.cwd } : {}) }
+  const request: RelayRequest = { id: newId('r', now), taskId: task.id, createdAt: now, kind: 'spawn', role: agent.role, args: spawn, agent }
+  // model_route is served inside this plugin's tool.call hook, and the engine passes a plugin's hook by
+  // for everything raised beneath that hook's own call: a subagent started here would make every tool
+  // call without this plugin's tool.call hook (debug log: `tool.call skipped: re-entry`), so without
+  // its write range, file-conflict check and band. The PostToolBatch hook starts it instead
+  // (startRouted), once the calls of this request have returned and before the model's next request.
+  const callId = typeof args['tool_use_id'] === 'string' ? args['tool_use_id'] : undefined
+  if (callId === undefined) throw new Error('model_route: the call has no tool_use_id to start its subagent by')
+  ctx.st.routed.set(callId, request)
+  return `${chosen.notice}\nRouting: ${note}.\nThe subagent is started right after this call; a note with the results of this request says how that went.`
+}
+
+// For the PostToolBatch hook: starts the subagent a model_route call routed, through the relay, and
+// answers the note the architect reads with the call's result; null for any other call.
+export async function startRouted(ctx: Ctx, toolUseId: string): Promise<string | null> {
+  const request = ctx.st.routed.get(toolUseId)
+  if (request === undefined) return null
+  ctx.st.routed.delete(toolUseId)
+  return `[magpie-tasks] ${await relay(ctx, request)}`
+}
+
+// A model_route call whose subagent was not started by the time the architect's next request goes
+// out: PostToolBatch did not run for it. The requests left, removed.
+export function unstartedRoutes(ctx: Ctx): RelayRequest[] {
+  const left = [...ctx.st.routed.values()]
+  ctx.st.routed.clear()
+  return left
 }

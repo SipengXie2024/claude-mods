@@ -6,7 +6,7 @@ import type { EngineInterface, ModelCompleteResult } from 'claude-code'
 import { ask, type JevAnswer, type JevConfig, type JevMessage, type JevQuestion } from './jev'
 import type { Io } from './io'
 import { jevChoices, ruleById, type Rules } from './rules'
-import type { Blocker, JevJudgment } from './types'
+import type { Blocker, Decision, JevJudgment } from './types'
 
 export const QUESTION_SET = 'rules-q.v5'
 export interface JudgeCtx { io: Io; jev: JevConfig; complete: EngineInterface['model']['complete']; evaluatorModel: string; rules: Rules }
@@ -50,6 +50,14 @@ export const CONFLICT_CHOICE = {
     { value: 'separate', description: 'Give the paused agent its own separate copy of the worktree (单独副本)' },
     { value: 'wait', description: 'Let the paused agent wait until the earlier agent has finished (等待前一方)' },
     { value: 'unclear', description: 'The reply picks neither, or cannot be read as a choice between them' },
+  ],
+}
+export const APPROVE_CHOICE = {
+  instructions: 'How does the person answer the question in the previous message: approve what it proposes (go on, apply, accept), reject it, or neither?',
+  choices: [
+    { value: 'approve', description: 'Approves, agrees, or asks to go on (继续, 整合, 接受, 同意)' },
+    { value: 'reject', description: 'Rejects or declines (不整合, 不接受, 不同意, 暂停)' },
+    { value: 'unclear', description: 'Neither, or cannot be read as a yes or no' },
   ],
 }
 // A predicate's yes: Jev's probability at or above this. Not calibrated [NEEDS-EVIDENCE].
@@ -274,6 +282,39 @@ export async function choose(c: JudgeCtx, instructions: string, choices: { value
 }
 
 // Section 6.2: route by the chosen rule only when Jev picked one with enough confidence.
+// The person's words as the answer to a long task's decision: a Telegram reply to its question, or a
+// message typed in the architect's window. Model choices are left to the architect, who reads the words.
+export type LongAnswer = 'separate' | 'wait' | 'approve' | 'reject' | 'unclear'
+export async function readLongAnswer(c: JudgeCtx, decision: Pick<Decision, 'kind' | 'question' | 'options'>, text: string): Promise<LongAnswer> {
+  const input = [{ role: 'assistant' as const, content: `${decision.question}\n${decision.options.join(' / ')}` }, { role: 'user' as const, content: text }]
+  switch (decision.kind) {
+    case 'file-conflict':
+      return (await choose(c, CONFLICT_CHOICE.instructions, CONFLICT_CHOICE.choices, input)).choice as LongAnswer
+    case 'integration-conflict':
+    case 'fix-confirm':
+    case 'no-progress':
+    case 'interrupted':
+      return (await choose(c, APPROVE_CHOICE.instructions, APPROVE_CHOICE.choices, input)).choice as LongAnswer
+    case 'model-unavailable':
+    case 'model-change-confirm':
+    case 'route-confirm':
+      return 'unclear'
+  }
+}
+
+// The option of a decision the person's words pick, as its label, or 'unclear': words typed in the
+// architect's window while a model-unavailable question is open, whose options say what to do
+// (等待, 改用 <model>). Words that are exactly an option need no judgment.
+export const OPTION_QUESTION = 'Which option of the question in the previous message do the person\'s words pick?'
+export async function readOptionLabel(c: JudgeCtx, decision: Pick<Decision, 'question' | 'options'>, text: string): Promise<string> {
+  const said = text.trim()
+  const exact = decision.options.find(o => o === said)
+  if (exact !== undefined) return exact
+  const input = [{ role: 'assistant' as const, content: `${decision.question}\n${decision.options.join(' / ')}` }, { role: 'user' as const, content: text }]
+  const choices = [...decision.options.map(o => ({ value: o, description: `The person picks “${o}”` })), { value: 'unclear', description: 'The words pick none of the options, or are about something else' }]
+  return (await choose(c, OPTION_QUESTION, choices, input)).choice
+}
+
 export function decideRule(j: JevJudgment, rules: Rules): { ruleId: string } | { none: string } {
   const threshold = rules.thresholds.ruleConfidence
   const by = j.provider === 'jev' ? 'Jev' : 'the substitute evaluator'

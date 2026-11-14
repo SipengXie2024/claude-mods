@@ -3,7 +3,7 @@ import { afterAll, beforeAll, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { fnv1a64, newId } from '../src/io'
+import { newId } from '../src/io'
 import { Registry } from '../src/registry'
 import type { AgentRecord, Claim, Options, TaskRecord } from '../src/types'
 import { nodeIo } from './node-io'
@@ -25,7 +25,7 @@ function options(stateDir: string): Options {
     launcher: 'claude-magpie',
     claudeBin: 'claude',
     telegramStateDir: join(process.env.HOME!, '.claude/channels/telegram-live'),
-    telegramChatId: '',
+    telegramChatId: '', telegramAfterMinutes: 10,
     timezone: 'Asia/Shanghai',
     ratingHour: 21,
   }
@@ -135,26 +135,31 @@ test('20 concurrent updates from separate sessions all land', async () => {
   expect(types.filter(x => x === 'feedback')).toHaveLength(20)
 }, 60_000)
 
-test('a claim is taken once and expired claims are removed', async () => {
+test('a claim is taken once, by the task it is for, and expired claims are removed', async () => {
   const dir = join(root, 'claims')
   const opts = options(dir)
   const now = Date.now()
-  const message = '检查 greet.py 并只回复 ok\n\n[magpie-tasks architect task=l-20261109-abc123 worktree=/tmp/wt]'
-  const launch: Claim = { id: newId('c', now), kind: 'launch', taskId: 'l-20261109-abc123', cwd: '/tmp/proj', createdAt: now, expiresAt: now + 600_000, promptHash: fnv1a64(message) }
+  const launch: Claim = { id: newId('c', now), kind: 'launch', taskId: 'l-20261109-abc123', cwd: '/tmp/proj', createdAt: now, expiresAt: now + 600_000 }
+  const sibling: Claim = { id: newId('c', now), kind: 'launch', taskId: 'l-20261109-xyz789', cwd: '/tmp/proj', createdAt: now + 1, expiresAt: now + 600_000 }
   const expired: Claim = { id: newId('c', now), kind: 'takeover', taskId: 'l-20261109-def456', cwd: '/tmp/proj', createdAt: now - 200_000, expiresAt: now - 80_000, fromSessionId: 'old-session' }
   const writer = new Registry(nodeIo(), opts, 'writer')
   await writer.putClaim(launch)
+  await writer.putClaim(sibling)
   await writer.putClaim(expired)
-  expect(readdirSync(join(dir, 'claims')).sort()).toEqual([`${expired.id}.json`, `${launch.id}.json`].sort())
+  expect(readdirSync(join(dir, 'claims')).sort()).toEqual([`${expired.id}.json`, `${launch.id}.json`, `${sibling.id}.json`].sort())
 
   // The expired claim matches but is not handed out; it is removed.
   expect(await writer.takeClaim(c => c.kind === 'takeover', now)).toBeUndefined()
-  expect(readdirSync(join(dir, 'claims'))).toEqual([`${launch.id}.json`])
+  expect(readdirSync(join(dir, 'claims')).sort()).toEqual([`${launch.id}.json`, `${sibling.id}.json`].sort())
 
-  const hash = fnv1a64(message)
+  // The way session.ts takes a launch claim: the task its first prompt names, in its own directory.
+  const claimFor = (taskId: string, cwd: string) => (c: Claim) => c.kind === 'launch' && c.taskId === taskId && c.cwd === cwd
+  expect(await writer.takeClaim(claimFor('l-20261109-abc123', '/tmp/elsewhere'), Date.now())).toBeUndefined()
   const taken = await Promise.all(['bg-1', 'bg-2', 'bg-3'].map(s =>
-    new Registry(nodeIo(), opts, s).takeClaim(c => c.kind === 'launch' && c.cwd === '/tmp/proj' && c.promptHash === hash, Date.now())))
+    new Registry(nodeIo(), opts, s).takeClaim(claimFor('l-20261109-abc123', '/tmp/proj'), Date.now())))
   expect(taken.filter(c => c !== undefined)).toEqual([launch])
+  expect(readdirSync(join(dir, 'claims'))).toEqual([`${sibling.id}.json`])
+  expect(await writer.takeClaim(claimFor('l-20261109-xyz789', '/tmp/proj'), Date.now())).toEqual(sibling)
   expect(readdirSync(join(dir, 'claims'))).toEqual([])
 
   expect(await new Registry(nodeIo(), options(join(root, 'no-claims')), 'x').takeClaim(() => true, now)).toBeUndefined()

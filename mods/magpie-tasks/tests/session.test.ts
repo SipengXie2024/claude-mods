@@ -6,8 +6,10 @@
 import { expect, test } from 'claude-code/testing'
 import type { SettingsReadInput } from 'claude-code'
 import { parseRules } from '../src/rules'
+import { architectMarkTask } from '../src/launch'
 import { architectFirstMessage, askText, bgIsolationAnswer, isOwner, optionModels, roleRule, type RoleFacts } from '../src/session'
 import type { TaskRecord } from '../src/types'
+import { bgFirstPromptRead, bgFirstPromptSent } from './data/bg-first-prompts'
 import { routingRules } from './data/jev-rules'
 
 const GATEWAY = 'http://127.0.0.1:3425'
@@ -61,7 +63,7 @@ test('merged settings with Magpie\'s flag layer get worktree.bgIsolation none; o
 
 test('the dialog offers exactly the four architect candidates, the recommendation first', () => {
   const sol = rules.architect.candidates.find(c => c.model === 'codex/gpt-6.1-sol')!
-  const { question, options } = askText({ recommendation: { model: sol.model, reason: `Jev 判断这项长期任务符合「${sol.when}」。`, limits: sol.limits }, root: '/tmp/mt/proj', workspace: '直接修改：/tmp/mt/proj（不是 Git 仓库，没有差异记录）', trusted: false }, rules)
+  const { question, options } = askText({ recommendation: { model: sol.model, reason: `Jev 判断这项长期任务符合「${sol.when}」。`, limits: sol.limits }, root: '/tmp/mt/proj', workspace: '直接修改：/tmp/mt/proj（不是 Git 仓库，没有差异记录）', trusted: false, handoff: false }, rules)
   expect(options).toEqual(['Sol 6.1（推荐）', 'Opus 5.5', 'Mythos 5.2', 'Astra'])
   expect(optionModels(sol.model, rules)).toEqual(['codex/gpt-6.1-sol', 'claude/claude-opus-5-5', 'claude/claude-mythos-5-2', 'codex/gpt-6-astra'])
   expect(question).toContain(sol.limits)
@@ -70,10 +72,14 @@ test('the dialog offers exactly the four architect candidates, the recommendatio
   expect(question).not.toContain('建立 Git 仓库')
   expect(question).toContain('Claude Code 还没有把 /tmp/mt/proj 记为受信任的目录，后台会话不能在那里启动。确认即表示你信任这个目录')
   expect(question.split('\n').at(-1)).toContain('不需要登记的临时操作请使用普通 claude')
-  const repo = askText({ recommendation: { model: 'claude/claude-opus-5-5', reason: 'r', limits: 'l' }, root: '/home/ubuntu/sipeng/claude-mods', workspace: '直接修改：/home/ubuntu/sipeng/claude-mods', trusted: true }, rules)
+  expect(question.split('\n').at(-1)).toContain('当前窗口随即关闭')
+  const repo = askText({ recommendation: { model: 'claude/claude-opus-5-5', reason: 'r', limits: 'l' }, root: '/home/ubuntu/sipeng/claude-mods', workspace: '直接修改：/home/ubuntu/sipeng/claude-mods', trusted: true, handoff: true }, rules)
   expect(repo.options).toEqual(['Opus 5.5（推荐）', 'Mythos 5.2', 'Astra', 'Sol 6.1'])
   expect(repo.question).not.toContain('Git 仓库')
   expect(repo.question).not.toContain('受信任')
+  // Under the launcher's hand-over the window goes on with the background session.
+  expect(repo.question.split('\n').at(-1)).toContain('这个窗口随即切换到那个会话')
+  expect(repo.question).not.toContain('随即关闭')
   expect(() => optionModels('claude/claude-haiku-5-5', rules)).toThrow('not an architect candidate')
 })
 
@@ -89,4 +95,26 @@ test('the architect\'s first message carries the task marker on its own line aft
   expect(direct.split('\n')[2]).toBe('[magpie-tasks architect task=l-20261109-a1b2c3 direct=/tmp/mt/proj]')
   expect(direct).toContain('work directly in the project directory /tmp/mt/proj')
   expect(direct).not.toContain('worktree')
+})
+
+test('a background session names its task by the marker line, which the engine leaves intact while it escapes the paste tags of a pasted request', () => {
+  // tests/data/bg-first-prompts.ts: one message as passed to `claude-magpie --bg` and the text the
+  // background session's prompt.submit hook read (Claude Code 2.1.322): no hash of the sent message
+  // can match the text read.
+  expect(bgFirstPromptSent).toContain('<pasted_content id="d2bf">')
+  expect(bgFirstPromptRead).toContain('<\\pasted_content id="d2bf">')
+  expect(bgFirstPromptRead).not.toBe(bgFirstPromptSent)
+  expect(architectMarkTask(bgFirstPromptSent)).toBe('l-20261112-a1b2c3')
+  expect(architectMarkTask(bgFirstPromptRead)).toBe('l-20261112-a1b2c3')
+})
+
+test('architectMarkTask reads the marker architectFirstMessage writes, the last one when the request quotes others, and none from a prompt the person typed', () => {
+  const workspaces = [{ mode: 'direct' as const, path: '/tmp/mt/proj' }, { mode: 'worktree' as const, path: '/tmp/mt/wt/d-20261109-a1b2c3' }, null]
+  for (const workspace of workspaces) expect(architectMarkTask(architectFirstMessage('检查 greet.py 并只回复 ok', 'd-20261109-a1b2c3', workspace))).toBe('d-20261109-a1b2c3')
+  const quoted = '看一下这段输出：\n[magpie-tasks architect task=l-20261108-zzzzzz direct=/tmp/old]\nYou are the architect of this long task'
+  expect(architectMarkTask(architectFirstMessage(quoted, 'l-20261109-a1b2c3', workspaces[0]!))).toBe('l-20261109-a1b2c3')
+  expect(architectMarkTask('检查 greet.py 并只回复 ok')).toBeNull()
+  expect(architectMarkTask('[magpie-tasks takeover task=l-20261109-a1b2c3 claim=c-20261109-abc123]')).toBeNull()
+  expect(architectMarkTask('[magpie-tasks architect task=../x direct=/tmp]')).toBeNull()
+  expect(architectMarkTask('[magpie-tasks architect task=a/../x direct=/tmp]')).toBeNull()
 })
