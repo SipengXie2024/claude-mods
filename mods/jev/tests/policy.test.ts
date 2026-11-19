@@ -163,7 +163,7 @@ test('ablations switch off exactly one rule each and are recorded in the policy 
   try {
     setDeepThresholds({ yes: 0.88, no: 0.3 });
     assert.deepEqual([...ABLATABLE], ['r1', 'dissat']);
-    assert.equal(policyVersion(), 'policy.v17');
+    assert.equal(policyVersion(), 'policy.v18');
     assert.equal(taskEffort(deepResearch, ALL).effort, 'xhigh');
 
     setAblations(['r1']);
@@ -171,11 +171,11 @@ test('ablations switch off exactly one rule each and are recorded in the policy 
     // r2, r4 and stuck no longer exist: they are ignored like any unknown name
     setAblations(['r2', 'r4', 'stuck']);
     assert.deepEqual(getAblations(), []);
-    assert.equal(policyVersion(), 'policy.v17');
+    assert.equal(policyVersion(), 'policy.v18');
 
     setAblations(['dissat', 'bogus', 'r1']);
     assert.deepEqual(getAblations(), ['r1', 'dissat']);
-    assert.equal(policyVersion(), 'policy.v17-ablate:r1,dissat');
+    assert.equal(policyVersion(), 'policy.v18-ablate:r1,dissat');
   } finally {
     setAblations([]);
     setDeepThresholds({ yes: 0.5, no: 0.3 });
@@ -333,7 +333,7 @@ test('follow-up: shadow mode and the dissat ablation record the signal but never
     assert.equal(shadow.effort, 'medium');
     assert.deepEqual(shadow.followUp, { p: 0.99, threshold: 0.98, yes: true, prevMax: 'max', streak: 1, hiLosses: 1, advisor: false, shadow: true });
     setAblations(['dissat']);
-    assert.equal(policyVersion(), 'policy.v17-ablate:dissat');
+    assert.equal(policyVersion(), 'policy.v18-ablate:dissat');
     const ablated = followUpEffort(fu());
     assert.equal(ablated.effort, 'medium');
     assert.equal(ablated.followUp.shadow, true);
@@ -364,6 +364,98 @@ test('task: Gemini 4 Argon follows its own three-level table and never starts ab
     for (const [taskType, base, deep] of starts) {
       assert.equal(taskEffort(profile({ taskType }), ALL, model).effort, base, `${model} ${taskType}`);
       assert.equal(taskEffort(profile({ taskType, typeConfidence: 0.9, deep: 0.99 }), ALL, model).effort, deep, `${model} deep ${taskType}`);
+    }
+  }
+});
+
+test('model scale: GPT-6.2 Astra and Sol and Gemini 4 Carbon, Neon and Hydrogen read their own tables', () => {
+  const cases = [
+    [['gpt-6.2-astra', 'codex/gpt-6.2-astra', 'gpt-6.2-astra-900k', 'codex/gpt-6.2-astra[1m]'], 'astra-6.2'],
+    [['gpt-6.2-sol', 'codex/gpt-6.2-sol', 'codex/gpt-6.2-sol[1m]'], 'sol-6.2'],
+    [['codex/gpt-6.1-sol'], 'sol-6.1'],
+    [['hakimi/gemini-4-argon', 'antigravity/gemini-4-argon-trial'], 'argon'],
+    [['hakimi/gemini-4-carbon', 'antigravity/gemini-4-carbon', 'gemini-4-carbon[1m]'], 'carbon'],
+    [['hakimi/gemini-4-neon', 'antigravity/gemini-4-neon', 'gemini-4-neon[1m]'], 'neon'],
+    [['hakimi/gemini-4-hydrogen', 'antigravity/gemini-4-hydrogen', 'gemini-4-hydrogen[1m]'], 'hydrogen'],
+  ] as const;
+  for (const [models, scale] of cases) for (const m of models) assert.equal(modelScale(m), scale, m);
+});
+
+const ALL_KINDS: TaskType[] = ['chat', 'operate', 'explain', 'write', 'design', 'code', 'research'];
+
+/** Each kind's start and deep start on a model, checked through taskEffort with the full range. */
+function checkStarts(model: string, starts: Record<TaskType, [Effort, Effort]>): void {
+  for (const taskType of ALL_KINDS) {
+    const [base, deep] = starts[taskType];
+    assert.equal(taskEffort(profile({ taskType }), ALL, model).effort, base, `${model} ${taskType}`);
+    assert.equal(taskEffort(profile({ taskType, typeConfidence: 0.9, deep: 0.99 }), ALL, model).effort, deep, `${model} deep ${taskType}`);
+  }
+}
+
+test('task: GPT-6.2 Astra starts code at medium and prose at high, research at high; deep code and prose at xhigh, deep research at max', () => {
+  for (const model of ['codex/gpt-6.2-astra', 'gpt-6.2-astra-900k[1m]']) {
+    checkStarts(model, {
+      chat: ['low', 'low'], operate: ['low', 'high'], explain: ['high', 'xhigh'], write: ['high', 'xhigh'],
+      design: ['high', 'xhigh'], code: ['medium', 'xhigh'], research: ['high', 'max'],
+    });
+  }
+});
+
+test('task: GPT-6.2 Sol starts operations at medium (its low falls far behind on Terminal-Bench), otherwise as 6.2 Astra', () => {
+  for (const model of ['codex/gpt-6.2-sol', 'gpt-6.2-sol[1m]']) {
+    checkStarts(model, {
+      chat: ['low', 'low'], operate: ['medium', 'high'], explain: ['high', 'xhigh'], write: ['high', 'xhigh'],
+      design: ['high', 'xhigh'], code: ['medium', 'xhigh'], research: ['high', 'max'],
+    });
+  }
+});
+
+test('task: Gemini 4 Carbon starts code and prose at medium, research at high, and never starts above high', () => {
+  for (const model of ['hakimi/gemini-4-carbon', 'antigravity/gemini-4-carbon']) {
+    checkStarts(model, {
+      chat: ['low', 'low'], operate: ['low', 'high'], explain: ['medium', 'high'], write: ['medium', 'high'],
+      design: ['medium', 'high'], code: ['medium', 'high'], research: ['high', 'high'],
+    });
+  }
+});
+
+test('task: Gemini 4 Neon starts operations, code and prose at medium; deep research at xhigh, its top level', () => {
+  for (const model of ['hakimi/gemini-4-neon', 'antigravity/gemini-4-neon']) {
+    checkStarts(model, {
+      chat: ['low', 'low'], operate: ['medium', 'high'], explain: ['medium', 'high'], write: ['medium', 'high'],
+      design: ['medium', 'high'], code: ['medium', 'high'], research: ['high', 'xhigh'],
+    });
+  }
+});
+
+test('task: Gemini 4 Hydrogen starts operations at high (its low and medium fail at the terminal), deep code and research at xhigh', () => {
+  for (const model of ['hakimi/gemini-4-hydrogen', 'antigravity/gemini-4-hydrogen']) {
+    checkStarts(model, {
+      chat: ['low', 'low'], operate: ['high', 'high'], explain: ['medium', 'high'], write: ['medium', 'high'],
+      design: ['medium', 'high'], code: ['medium', 'xhigh'], research: ['high', 'xhigh'],
+    });
+  }
+  assert.equal(TYPE_PREFS.hydrogen.operate.floor, 'medium');
+  assert.equal(TYPE_PREFS.hydrogen.code.floor, 'medium');
+});
+
+test('task: a Gemini model never starts above the levels it offers (Argon and Carbon high, Neon and Hydrogen xhigh)', () => {
+  const top = [['hakimi/gemini-4-argon', 'high'], ['hakimi/gemini-4-carbon', 'high'], ['hakimi/gemini-4-neon', 'xhigh'], ['hakimi/gemini-4-hydrogen', 'xhigh']] as const;
+  for (const [model, highest] of top) {
+    for (const taskType of ALL_KINDS) {
+      for (const [typeConfidence, deep] of [[0.9, 0], [0.9, 0.99], [0.1, 0], [0.1, 0.99]]) {
+        const effort = taskEffort(profile({ taskType, typeConfidence, deep }), ALL, model).effort;
+        assert.ok(rank(effort) <= rank(highest), `${model} ${taskType} conf ${typeConfidence} deep ${deep}: ${effort}`);
+      }
+    }
+  }
+});
+
+test('every model table orders floor ≤ start ≤ deep start for every kind', () => {
+  for (const [scale, kinds] of Object.entries(TYPE_PREFS)) {
+    for (const taskType of ALL_KINDS) {
+      const { floor, base, deep } = kinds[taskType as TaskType];
+      assert.ok(rank(floor) <= rank(base) && rank(base) <= rank(deep), `${scale} ${taskType}: ${floor} / ${base} / ${deep}`);
     }
   }
 });

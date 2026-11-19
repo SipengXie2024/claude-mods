@@ -1,0 +1,40 @@
+# https://artificialanalysis.ai/models/comparisons/gemini-4-neon-vs-gemini-4-neon-high-vs-gemini-4-neon-medium-vs-gemini-4-neon-low-vs-gemini-4-carbon
+# Fetched 2026-11-19 via curl; table cells extracted with BeautifulSoup
+ | Gemini 4 Neon (xhigh) | Gemini 4 Carbon (high) | Gemini 4 Neon (high) | Gemini 4 Carbon (medium) | Gemini 4 Neon (medium) | Gemini 4 Carbon (low) | Gemini 4 Neon (low)
+Intelligence
+Intelligence Index | 61 | 60 | 60 | 58 | 55 | 54 | 44
+Finance & Accounting | 65 | 63 | 63 | 60 | 60 | 56 | 55
+Strategy & Ops | 64 | 61 | 62 | 58 | 59 | 53 | 55
+Legal | 64 | 62 | 63 | 59 | 60 | 54 | 55
+Healthcare & Medical | -- | 57 | -- | -- | -- | -- | --
+Engineering | 67 | 65 | 65 | 64 | 61 | 60 | 52
+Economics | 62 | 60 | 61 | 58 | 57 | 55 | 51
+AA-Briefcase v1.1 | 1700 | 1611 | 1632 | 1602 | 1518 | 1567 | 1297
+AutomationBench-AA | 79.3% | 77.8% | 79.2% | 77.6% | 77.8% | 63.5% | 76.0%
+Terminal-Bench 4.0 | 63.6% | 65.2% | 61.6% | 60.6% | 54.5% | 62.6% | 32.8%
+FrontierCode-AA 2.0 | 44.4% | 40.6% | 43.3% | 39.5% | 36.9% | 29.6% | 26.9%
+AA-Omniscience v1.1 | 55 | 54 | 54 | 47 | 51 | 39 | 49
+GDP.pdf | 28.0% | 28.4% | 33.4% | 29.6% | 32.8% | 28.6% | 31.4%
+HLE-Diamond | 71.3% | 69.1% | 68.4% | 67.4% | 63.6% | 61.9% | 54.2%
+CritPt v2 (Hard Subset) | 60.5% | 69.0% | 59.0% | 69.0% | 61.5% | 65.0% | 62.0%
+Terminal-Bench-Science 0.1 | 70.0% | 64.8% | 65.7% | 62.4% | 54.8% | 61.9% | 27.1%
+Cost
+Cost per Task USD | $6.44 | $7.76 | $3.74 | $6.59 | $1.90 | $7.19 | $0.75
+Input Price USD/1M Tokens | $3.00 | $4.00 | $3.00 | $4.00 | $3.00 | $4.00 | $3.00
+Output Price USD/1M Tokens | $15.00 | $20.00 | $15.00 | $20.00 | $15.00 | $20.00 | $15.00
+Cache Hit Price USD/1M Tokens | $0.15 | $0.20 | $0.15 | $0.20 | $0.15 | $0.20 | $0.15
+Cache Write Price USD/1M Tokens | $3.00 | $4.00 | $3.00 | $4.00 | $3.00 | $4.00 | $3.00
+Performance
+Time per Task Minutes | 21.5 | 37.2 | 14.8 | 29.6 | 8.3 | 30.4 | 3.7
+Output Speed tok/s | 110 | 55 | 101 | 58 | 101 | 47 | 97
+Time to First Answer Token s | 56.51 | 73.04 | 40.64 | 32.23 | 20.14 | 9.00 | 13.93
+Time to First Token s | 56.51 | 73.04 | 40.64 | 32.23 | 20.14 | 9.00 | 13.93
+End-to-End Time Mean of Single-Request Workloads (s) | 166.46 | 181.16 | 81.29 | 91.42 | 74.51 | 61.98 | 32.85
+Features
+Context Window | 1M | 1M | 1M | 1M | 1M | 1M | 1M
+Creator | Google | Google | Google | Google | Google | Google | Google
+License | Proprietary | Proprietary | Proprietary | Proprietary | Proprietary | Proprietary | Proprietary
+Input Modality | Supports: text, image, speech, and video | Supports: text, image, speech, and video | Supports: text, image, speech, and video | Supports: text, image, speech, and video | Supports: text, image, speech, and video | Supports: text, image, speech, and video | Supports: text, image, speech, and video
+Output Modality | Supports: text | Supports: text | Supports: text | Supports: text | Supports: text | Supports: text | Supports: text
+Providers |  |  |  |  |  |  | 
+---

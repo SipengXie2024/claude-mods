@@ -210,8 +210,15 @@ export function noteStartSource(ctx: Ctx, source: SessionState['startSource']): 
 // Background sessions start only in a trusted directory (src/trust.ts).
 const UNTRUSTED = (root: string) => `Claude Code 还没有把 ${root} 记为受信任的目录，后台会话不能在那里启动。确认即表示你信任这个目录，插件会在 Claude Code 的配置中记下这一点。`
 
-const CANCELLED = 'magpie-tasks: 已取消；消息已放回输入框，再次发送会重新询问；临时操作请使用普通 claude'
-const UNRECOGNIZED = 'magpie-tasks: 没有识别出选择；消息已放回输入框，再次发送会重新询问；临时操作请使用普通 claude'
+const CANCELLED = 'magpie-tasks: 已取消；消息已放回输入框，再次发送会重新询问'
+const UNRECOGNIZED = 'magpie-tasks: 没有识别出选择；消息已放回输入框，再次发送会重新询问'
+
+// The architect dialog's options besides the models. $.ui.ask takes 2 to 4 options, so a page shows
+// at most three models, or two and OTHER_ARCHITECT when more are left.
+export const NO_ARCHITECT = '不用架构师（普通会话）'
+export const OTHER_ARCHITECT = '选择其他架构师模型'
+const NO_ARCHITECT_LINE = `选择「${NO_ARCHITECT}」时，这个窗口按普通会话运行这条消息，不登记长期任务，之后的消息也不再询问。`
+const OTHER_ARCHITECT_LINE = `「${OTHER_ARCHITECT}」列出其余候选。`
 
 export async function onFirstPrompt(ctx: Ctx, e: PromptSubmitInput, next: Next<'prompt.submit'>): Promise<PromptResult> {
   if (e.origin.kind !== 'composer' || e.command !== undefined || ctx.st.firstPromptSeen) return next(e)
@@ -231,22 +238,69 @@ export function optionModels(recommended: string, rules: Rules): string[] {
   return [recommended, ...others]
 }
 
-export function askText(a: { recommendation: { model: string; reason: string; limits: string }; root: string; workspace: string; trusted: boolean; handoff: boolean }, rules: Rules): { question: string; options: string[] } {
-  const models = optionModels(a.recommendation.model, rules)
-  const name = (m: string) => displayName(m, rules)
-  const options = models.map((m, i) => (i === 0 ? `${name(m)}（推荐）` : name(m)))
+// One page of the architect dialog for `models` (the ones not offered on an earlier page): all of
+// them when three or fewer are left, else the first two and OTHER_ARCHITECT, which leads to a page
+// for `rest`; NO_ARCHITECT last. `options[i]` names `models[i]` for every model on the page.
+export interface ArchitectPage { models: string[]; options: string[]; rest: string[] }
+
+export function architectPage(models: string[], rules: Rules, recommended: boolean): ArchitectPage {
+  if (models.length === 0) throw new Error('architectPage: no models left')
+  const shown = models.length <= 3 ? models : models.slice(0, 2)
+  const rest = models.slice(shown.length)
+  const names = shown.map((m, i) => (recommended && i === 0 ? `${displayName(m, rules)}（推荐）` : displayName(m, rules)))
+  return { models: shown, options: [...names, ...(rest.length > 0 ? [OTHER_ARCHITECT] : []), NO_ARCHITECT], rest }
+}
+
+export function askText(a: { recommendation: { model: string; reason: string; limits: string }; root: string; workspace: string; trusted: boolean; handoff: boolean }, rules: Rules): { question: string; page: ArchitectPage } {
+  const page = architectPage(optionModels(a.recommendation.model, rules), rules, true)
   const lines = [
-    `用哪个模型担任这个长期任务的架构师？推荐 ${name(a.recommendation.model)}。`,
+    `用哪个模型担任这个长期任务的架构师？推荐 ${displayName(a.recommendation.model, rules)}。`,
     `推荐理由：${a.recommendation.reason}`,
     `证据的限制：${a.recommendation.limits}`,
     `项目根目录：${a.root}`,
     a.workspace,
   ]
   if (!a.trusted) lines.push(UNTRUSTED(a.root))
-  lines.push(a.handoff
-    ? '确认后这条消息交给后台的架构师会话，这个窗口随即切换到那个会话，继续显示它的工作；离开窗口后任务仍在后台运行，用 claude attach 重新打开。不需要登记的临时操作请使用普通 claude。'
-    : '确认后这条消息交给后台的架构师会话，当前窗口随即关闭，之后用 claude attach 重新打开。不需要登记的临时操作请使用普通 claude。')
-  return { question: lines.join('\n'), options }
+  const handoff = a.handoff
+    ? '选择一个模型后，这条消息交给后台的架构师会话，这个窗口随即切换到那个会话，继续显示它的工作；离开窗口后任务仍在后台运行，用 claude attach 重新打开。'
+    : '选择一个模型后，这条消息交给后台的架构师会话，当前窗口随即关闭，之后用 claude attach 重新打开。'
+  lines.push(`${handoff}${page.rest.length > 0 ? OTHER_ARCHITECT_LINE : ''}${NO_ARCHITECT_LINE}`)
+  return { question: lines.join('\n'), page }
+}
+
+// The question of a page after OTHER_ARCHITECT: when each model on it suits, from the rules file.
+export function otherArchitectText(page: ArchitectPage, rules: Rules): string {
+  const when = (m: string) => {
+    const c = rules.architect.candidates.find(x => x.model === m)
+    if (c === undefined) throw new Error(`${m} is not an architect candidate`)
+    return `${c.name}：${c.when}`
+  }
+  return ['其余的架构师候选，各自适合的长期任务：', ...page.models.map(when), `${page.rest.length > 0 ? OTHER_ARCHITECT_LINE : ''}${NO_ARCHITECT_LINE}`].join('\n')
+}
+
+// Asks the architect dialog page by page. The chosen model with the option text, 'none' for
+// NO_ARCHITECT, or the drop the first message gets (the dialog dismissed, or an answer that is no
+// option of its page).
+export async function chooseArchitect(ask: (question: string, options: string[]) => Promise<string>, first: { question: string; page: ArchitectPage }, rules: Rules): Promise<{ model: string; answer: string } | 'none' | { drop: string }> {
+  let { question, page } = first
+  for (;;) {
+    let answer: string
+    try {
+      answer = await ask(question, page.options)
+    } catch {
+      // $.ui.ask rejects when the person dismisses the dialog.
+      return { drop: CANCELLED }
+    }
+    if (answer === NO_ARCHITECT) return 'none'
+    if (answer === OTHER_ARCHITECT && page.rest.length > 0) {
+      page = architectPage(page.rest, rules, false)
+      question = otherArchitectText(page, rules)
+      continue
+    }
+    const picked = page.options.indexOf(answer)
+    if (picked < 0 || picked >= page.models.length) return { drop: UNRECOGNIZED }
+    return { model: page.models[picked]!, answer }
+  }
 }
 
 // The architect's first message: the request, the task marker line, and its standing instructions.
@@ -276,18 +330,14 @@ async function newLongTask(ctx: Ctx, e: PromptSubmitInput, next: Next<'prompt.su
   const trusted = await projectTrusted(io, root)
   const preview = await previewPlacement(io, reg, opts, taskId, root)
   const handoff = await handoffFile(ctx)
-  const { question, options } = askText({ recommendation: rec, root, workspace: placementLine(preview), trusted, handoff: handoff !== null }, rules)
-  const models = optionModels(rec.model, rules)
-  let answer: string
-  try {
-    answer = await ctx.host.ui.ask(question, { options, header: '长期任务' })
-  } catch {
-    // $.ui.ask rejects when the person dismisses the dialog.
-    return { drop: CANCELLED }
+  const first = askText({ recommendation: rec, root, workspace: placementLine(preview), trusted, handoff: handoff !== null }, rules)
+  const choice = await chooseArchitect((question, options) => ctx.host.ui.ask(question, { options, header: '长期任务' }), first, rules)
+  if (choice === 'none') {
+    notice(ctx, 'magpie-tasks: 本会话按普通会话运行，不登记为长期任务')
+    return unmanaged(ctx, e, next)
   }
-  const picked = options.indexOf(answer)
-  if (picked < 0) return { drop: UNRECOGNIZED }
-  const model = models[picked]!
+  if ('drop' in choice) return choice
+  const { model, answer } = choice
   const now = await io.now()
   const task = await reg.create({
     id: taskId,
@@ -375,7 +425,7 @@ async function takeover(ctx: Ctx, e: PromptSubmitInput, next: Next<'prompt.submi
   try {
     answer = await ctx.host.ui.ask(lines.join('\n'), { options, header: '接管会话' })
   } catch {
-    return { drop: 'magpie-tasks: 已取消；消息已放回输入框，再次发送会重新询问' }
+    return { drop: CANCELLED }
   }
   if (answer === '不接管') {
     const at = await io.now()
@@ -386,7 +436,7 @@ async function takeover(ctx: Ctx, e: PromptSubmitInput, next: Next<'prompt.submi
     })
     return unmanaged(ctx, e, next)
   }
-  if (answer !== '接管') return { drop: 'magpie-tasks: 没有识别出选择；消息已放回输入框，再次发送会重新询问' }
+  if (answer !== '接管') return { drop: UNRECOGNIZED }
   const now = await io.now()
   const task = await reg.create({
     id: taskId,

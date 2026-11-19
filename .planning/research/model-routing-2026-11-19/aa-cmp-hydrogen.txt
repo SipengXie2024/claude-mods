@@ -1,0 +1,40 @@
+# https://artificialanalysis.ai/models/comparisons/gemini-4-hydrogen-vs-gemini-4-hydrogen-high-vs-gemini-4-hydrogen-medium-vs-gemini-4-hydrogen-low-vs-claude-sonnet-5-5
+# Fetched 2026-11-19 via curl; table cells extracted with BeautifulSoup
+ | Claude Sonnet 5.5 (max) | Gemini 4 Hydrogen (xhigh) | Gemini 4 Hydrogen (high) | Claude Sonnet 5.5 (xhigh) | Claude Sonnet 5.5 (high) | Gemini 4 Hydrogen (medium) | Claude Sonnet 5.5 (medium) | Gemini 4 Hydrogen (low) | Claude Sonnet 5.5 (low)
+Intelligence
+Intelligence Index | 55 | 54 | 51 | 50 | 42 | 41 | 31 | 27 | 26
+Finance & Accounting | 56 | 58 | 56 | 49 | 44 | 51 | 41 | 41 | 36
+Strategy & Ops | 58 | 58 | 55 | 54 | 51 | 52 | 47 | 42 | 42
+Legal | 52 | 57 | 55 | 47 | 44 | 51 | 39 | 42 | 37
+Healthcare & Medical | 54 | 53 | -- | 47 | 44 | -- | 40 | -- | 37
+Engineering | 58 | 60 | 57 | 54 | 46 | 49 | 37 | 36 | 33
+Economics | 54 | 55 | 53 | 48 | 45 | 48 | 39 | 38 | 35
+AA-Briefcase v1.1 | 1815 | 1568 | 1497 | 1739 | 1634 | 1296 | 1438 | 947 | 1268
+AutomationBench-AA | 71.8% | 76.1% | 74.4% | 65.5% | 59.4% | 72.0% | 54.9% | 60.5% | 49.4%
+Terminal-Bench 4.0 | 63.6% | 53.5% | 54.0% | 57.1% | 43.9% | 29.3% | 29.8% | 6.6% | 20.7%
+FrontierCode-AA 2.0 | 41.7% | 39.0% | 36.3% | 35.6% | 25.7% | 31.5% | 11.0% | 9.3% | 7.1%
+AA-Omniscience v1.1 | 30 | 46 | 44 | 21 | 19 | 42 | 19 | 36 | 20
+GDP.pdf | 25.8% | 27.6% | 30.0% | 24.6% | 25.2% | 32.8% | 20.2% | 28.2% | 16.0%
+HLE-Diamond | 53.3% | 58.8% | 54.9% | 44.1% | 33.8% | 47.7% | 23.8% | 32.2% | 20.6%
+CritPt v2 (Hard Subset) | 59.0% | 66.0% | 61.5% | 57.5% | 51.5% | 61.0% | 33.5% | 48.0% | 26.0%
+Terminal-Bench-Science 0.1 | 53.3% | 49.5% | 41.4% | 52.4% | 34.3% | 15.2% | 16.2% | 2.4% | 10.5%
+Cost
+Cost per Task USD | $10.02 | $3.16 | $1.87 | $4.09 | $1.64 | $0.80 | $0.78 | $0.29 | $0.51
+Input Price USD/1M Tokens | $2.00 | $1.50 | $1.50 | $2.00 | $2.00 | $1.50 | $2.00 | $1.50 | $2.00
+Output Price USD/1M Tokens | $10.00 | $7.50 | $7.50 | $10.00 | $10.00 | $7.50 | $10.00 | $7.50 | $10.00
+Cache Hit Price USD/1M Tokens | $0.10 | $0.075 | $0.075 | $0.10 | $0.10 | $0.075 | $0.10 | $0.075 | $0.10
+Cache Write Price USD/1M Tokens | $2.50 | -- | -- | $2.50 | $2.50 | -- | $2.50 | -- | $2.50
+Performance
+Time per Task Minutes | 32.6 | 15.2 | 8.6 | 14.3 | 7.2 | 4.2 | 3.7 | 1.5 | 2.6
+Output Speed tok/s | 146 | 169 | 165 | 142 | 136 | 157 | 137 | 157 | 135
+Time to First Answer Token s | 264.32 | 45.70 | 19.43 | 25.96 | 9.37 | 14.22 | 4.97 | 6.37 | 2.32
+Time to First Token s | 264.32 | 45.70 | 19.43 | 25.96 | 9.37 | 14.22 | 4.97 | 6.37 | 2.32
+End-to-End Time Mean of Single-Request Workloads (s) | 488.37 | 108.89 | 45.32 | 74.28 | 43.94 | 35.96 | 33.15 | 22.07 | 26.27
+Features
+Context Window | 1M | 1M | 1M | 1M | 1M | 1M | 1M | 1M | 1M
+Creator | Anthropic | Google | Google | Anthropic | Anthropic | Google | Anthropic | Google | Anthropic
+License | Proprietary | Proprietary | Proprietary | Proprietary | Proprietary | Proprietary | Proprietary | Proprietary | Proprietary
+Input Modality | Supports: text and image | Supports: text, image, speech, and video | Supports: text, image, speech, and video | Supports: text and image | Supports: text and image | Supports: text, image, speech, and video | Supports: text and image | Supports: text, image, speech, and video | Supports: text and image
+Output Modality | Supports: text | Supports: text | Supports: text | Supports: text | Supports: text | Supports: text | Supports: text | Supports: text | Supports: text
+Providers |  |  |  |  |  |  |  |  | 
+---

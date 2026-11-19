@@ -23,9 +23,13 @@ const available = (id: string) => isAvailable(id, cat)
 
 const OPUS = 'claude/claude-opus-5-5'
 const MYTHOS = 'claude/claude-mythos-5-2'
-const ARGON = 'hakimi/gemini-4-argon-medium'
+const ARGON = 'hakimi/gemini-4-argon'
 const SOL = 'codex/gpt-6.1-sol'
 const ASTRA = 'codex/gpt-6-astra'
+const ASTRA62 = 'codex/gpt-6.2-astra'
+const SOL62 = 'codex/gpt-6.2-sol'
+const NEON = 'hakimi/gemini-4-neon'
+const CARBON = 'hakimi/gemini-4-carbon'
 
 // Section 2 of the routing table: each `| \`id\` | condition | role | model / effort | acceptance | evidence |` row.
 function tableRows(): Map<string, { section: string; cells: string[] }> {
@@ -55,7 +59,7 @@ function tableModelIds(): Record<string, string> {
 test('the file holds the 19 rules, each once', () => {
   expect(rules.rules.map(r => r.id).sort()).toEqual([...RULE_IDS].sort())
   expect(rules.rules).toHaveLength(19)
-  expect(rules.version).toBe('routing-rules.v8')
+  expect(rules.version).toBe('routing-rules.v10')
 })
 
 test('condition, acceptance and evidence are the routing table columns word for word, in the same section', () => {
@@ -137,10 +141,18 @@ test('parseRules refuses a missing, duplicated or unknown rule, a bad effort and
   expect(variant(j => { delete j['acceptance'] })).toThrow('acceptance')
   // A model whose ID names its level runs at that level: the file pairs no other effort with it.
   const sub = (j: Record<string, unknown>, id: string) => (j['substitutes'] as { id: string; options: Record<string, unknown>[] }[]).find(s => s.id === id)!
-  expect(variant(j => { sub(j, 'document-alt').options[0]!['efforts'] = ['medium', 'high'] })).toThrow('substitute document-alt.options[0].efforts: hakimi/gemini-4-carbon-medium runs at medium, the level its ID names, not high')
-  expect(variant(j => { drawn(j)[1]!['effort'] = 'xhigh' })).toThrow('ambiguous.candidates[1].effort: hakimi/gemini-4-carbon-high runs at high')
-  expect(variant(j => { j.rules.find(r => r['id'] === 'explain-write')!['raiseOrder'] = ['high', 'xhigh'] })).toThrow('rule explain-write: hakimi/gemini-4-argon-high runs at high, the level its ID names, not xhigh')
-  expect(variant(j => { (j['reviewSecond'] as Record<string, unknown>)['effort'] = 'high' })).toThrow('reviewSecond.effort: hakimi/gemini-4-argon-medium runs at medium')
+  const FLASH_MEDIUM = 'hakimi/gemini-3.8-flash-medium'
+  const FLASH_HIGH = 'hakimi/gemini-3.8-flash-high'
+  const withFlash = (j: Record<string, unknown>) => Object.assign(j['models'] as Record<string, unknown>, { [FLASH_MEDIUM]: { name: 'Flash medium' }, [FLASH_HIGH]: { name: 'Flash high' } })
+  expect(variant(j => { withFlash(j); sub(j, 'document-alt').options[0] = { model: FLASH_MEDIUM, efforts: ['medium', 'high'] } })).toThrow(`substitute document-alt.options[0].efforts: ${FLASH_MEDIUM} runs at medium, the level its ID names, not high`)
+  expect(variant(j => { withFlash(j); drawn(j)[1] = { model: FLASH_HIGH, effort: 'xhigh' } })).toThrow(`ambiguous.candidates[1].effort: ${FLASH_HIGH} runs at high`)
+  expect(variant(j => { withFlash(j); Object.assign(j.rules.find(r => r['id'] === 'explain-write')!, { model: FLASH_HIGH, raiseOrder: ['high', 'xhigh'] }) })).toThrow(`rule explain-write: ${FLASH_HIGH} runs at high, the level its ID names, not xhigh`)
+  expect(variant(j => { withFlash(j); (j['reviewSecond'] as { order: string[] }).order[2] = FLASH_MEDIUM; (j['reviewSecond'] as Record<string, unknown>)['effort'] = 'high' })).toThrow(`reviewSecond.effort: ${FLASH_MEDIUM} runs at medium`)
+  // "rule" efforts need a rule in forRules on the option's model: math-alt's Sol 6.2 has none, while
+  // Astra 6.2 in ops-alt has science-compute once that rule is in forRules.
+  expect(variant(j => { sub(j, 'math-alt').options[0]!['efforts'] = 'rule' })).toThrow('substitute math-alt.options[0]: "rule" needs a rule in forRules whose model is codex/gpt-6.2-sol')
+  expect(variant(j => { sub(j, 'ops-alt').options[0]!['efforts'] = 'rule' })).toThrow('substitute ops-alt.options[0]: "rule" needs a rule in forRules whose model is codex/gpt-6.2-astra')
+  expect(variant(j => { Object.assign(sub(j, 'ops-alt'), { forRules: ['machine-ops', 'science-compute'] }).options[0]!['efforts'] = 'rule' })).not.toThrow()
   expect(() => parseRules('not an object', { deepYes: 0.85 })).toThrow('routing rules: file')
 })
 
@@ -166,7 +178,7 @@ test('jevChoices: the 15 Jev-option rules in file order, then none', () => {
 })
 
 test('ruleById throws for an unknown rule', () => {
-  expect(ruleById(rules, 'lean').model).toBe(OPUS)
+  expect(ruleById(rules, 'lean').model).toBe(ASTRA62)
   expect(() => ruleById(rules, 'none')).toThrow('no rule "none"')
 })
 
@@ -178,9 +190,12 @@ test('raise stops at max; startEffort and raiseOnRule follow each rule\'s deep e
   expect(raise('low', 0)).toBe('low')
   expect(() => raise('low', -1)).toThrow()
   expect(startEffort(ruleById(rules, 'code-change'), false)).toBe('high')
-  // Opus 5.5 and Mythos 5.2 start at high when deep too (table section 2.4).
+  // Opus 5.5 and Mythos 5.2 start at high when deep too (table section 2.4); Astra 6.2 science at xhigh.
   expect(startEffort(ruleById(rules, 'code-change'), true)).toBe('high')
-  expect(startEffort(ruleById(rules, 'science-compute'), true)).toBe('high')
+  expect(startEffort(ruleById(rules, 'science-compute'), false)).toBe('xhigh')
+  expect(startEffort(ruleById(rules, 'science-compute'), true)).toBe('xhigh')
+  expect(startEffort(ruleById(rules, 'math'), false)).toBe('max')
+  expect(startEffort(ruleById(rules, 'lean'), false)).toBe('max')
   expect(startEffort(ruleById(rules, 'design-advice'), true)).toBe('high')
   expect(startEffort(ruleById(rules, 'document-analysis'), true)).toBe('high')
   expect(startEffort(ruleById(rules, 'computer-use'), true)).toBe('high')
@@ -197,7 +212,11 @@ test('raise stops at max; startEffort and raiseOnRule follow each rule\'s deep e
   expect(ruleModel(ruleById(rules, 'design-advice'), { deep: true, hard: true })).toBe(MYTHOS)
   expect(startEffort(ruleById(rules, 'review-second'), false)).toBe('medium')
   expect(() => startEffort(ruleById(rules, 'architect'), false)).toThrow('no start effort')
-  expect(raiseOnRule(ruleById(rules, 'science-compute'), 'high')).toBe('max')
+  expect(raiseOnRule(ruleById(rules, 'science-compute'), 'xhigh')).toBe('max')
+  expect(raiseOnRule(ruleById(rules, 'science-compute'), 'max')).toBe('max')
+  // Neon's document work stays at high: GDP.pdf falls at xhigh.
+  expect(ruleModel(ruleById(rules, 'document-analysis'), { deep: true, hard: true })).toBe(NEON)
+  expect(raiseOnRule(ruleById(rules, 'document-analysis'), 'high')).toBe('high')
   expect(raiseOnRule(ruleById(rules, 'code-change'), 'high')).toBe('xhigh')
   expect(raiseOnRule(ruleById(rules, 'code-change'), 'medium')).toBe('high')
   expect(raiseOnRule(ruleById(rules, 'math'), 'max')).toBe('max')
@@ -267,20 +286,49 @@ test('substituteAllowed follows table 4.4', () => {
   expect(sub('code-change', MYTHOS, 'xhigh')).toBe('rule:code-change')
   expect(sub('code-change', MYTHOS, 'medium')).toBeNull()
   expect(sub('code-read', OPUS, 'xhigh')).toBe('rule:code-read')
-  // repo-alt: Astra at xhigh or max only.
-  expect(sub('code-change', ASTRA, 'xhigh')).toBe('repo-alt')
-  expect(sub('code-change', ASTRA, 'max')).toBe('repo-alt')
-  expect(sub('code-change', ASTRA, 'high')).toBeNull()
-  expect(sub('code-change', ASTRA, 'medium')).toBeNull()
-  // math-extra: Sol 6 at any effort.
+  // repo-alt: Astra 6.2 at xhigh or max, Neon at xhigh, Carbon at medium; GPT-6 Astra no longer.
+  expect(sub('code-change', ASTRA62, 'xhigh')).toBe('repo-alt')
+  expect(sub('code-change', ASTRA62, 'max')).toBe('repo-alt')
+  expect(sub('code-change', ASTRA62, 'high')).toBeNull()
+  expect(sub('code-change', NEON, 'xhigh')).toBe('repo-alt')
+  expect(sub('code-change', NEON, 'high')).toBeNull()
+  expect(sub('code-change', CARBON, 'medium')).toBe('repo-alt')
+  expect(sub('code-change', ASTRA, 'xhigh')).toBeNull()
+  // The rules on Astra 6.2 take it at their raise order: science xhigh and max, math and lean max.
+  expect(sub('science-compute', ASTRA62, 'xhigh')).toBe('rule:science-compute')
+  expect(sub('science-compute', ASTRA62, 'high')).toBeNull()
+  expect(sub('math', ASTRA62, 'max')).toBe('rule:math')
+  expect(sub('lean', ASTRA62, 'xhigh')).toBeNull()
+  // science-alt: Mythos 5.2 at high or max (no xhigh), Neon at xhigh, Carbon at high.
+  expect(sub('science-compute', MYTHOS, 'high')).toBe('science-alt')
+  expect(sub('science-compute', MYTHOS, 'max')).toBe('science-alt')
+  expect(sub('science-compute', MYTHOS, 'xhigh')).toBeNull()
+  expect(sub('science-compute', NEON, 'xhigh')).toBe('science-alt')
+  expect(sub('science-compute', CARBON, 'high')).toBe('science-alt')
+  expect(sub('science-compute', SOL, 'max')).toBeNull()
+  // math-alt covers math and lean: Sol 6.2 at max, Carbon at high.
+  for (const rule of ['math', 'lean']) {
+    expect(sub(rule, SOL62, 'max')).toBe('math-alt')
+    expect(sub(rule, SOL62, 'high')).toBeNull()
+    expect(sub(rule, CARBON, 'high')).toBe('math-alt')
+  }
+  // math-extra: Sol 6.1 at max, Sol 6 at any effort; neither for lean or science.
+  expect(sub('math', SOL, 'max')).toBe('math-extra')
+  expect(sub('math', SOL, 'high')).toBeNull()
   for (const e of ['low', 'medium', 'high', 'xhigh', 'max'] as const) expect(sub('math', 'codex/gpt-6-sol', e)).toBe('math-extra')
   expect(sub('science-compute', 'codex/gpt-6-sol', 'high')).toBeNull()
-  // science-math-alt: Sol 6.1 at the math rule's effort, Astra at high or max.
-  expect(sub('science-compute', SOL, 'max')).toBe('science-math-alt')
-  expect(sub('science-compute', SOL, 'high')).toBeNull()
-  expect(sub('math', ASTRA, 'high')).toBe('science-math-alt')
-  expect(sub('math', ASTRA, 'max')).toBe('science-math-alt')
-  expect(sub('math', ASTRA, 'xhigh')).toBeNull()
+  expect(sub('lean', SOL, 'max')).toBeNull()
+  // lean-alt: Opus 5.5 at high.
+  expect(sub('lean', OPUS, 'high')).toBe('lean-alt')
+  expect(sub('lean', OPUS, 'max')).toBeNull()
+  // ops-alt: Astra 6.2 at xhigh, Carbon at high. document-alt: Sol 6.1 high, Sol 6.2 max, Carbon medium.
+  expect(sub('machine-ops', ASTRA62, 'xhigh')).toBe('ops-alt')
+  expect(sub('machine-ops', ASTRA62, 'max')).toBeNull()
+  expect(sub('machine-ops', CARBON, 'high')).toBe('ops-alt')
+  expect(sub('document-analysis', SOL, 'high')).toBe('document-alt')
+  expect(sub('document-analysis', SOL62, 'max')).toBe('document-alt')
+  expect(sub('document-analysis', CARBON, 'medium')).toBe('document-alt')
+  expect(sub('document-analysis', SOL, 'max')).toBeNull()
   // review: its own Opus 5.5 (the alias counts) at its levels; review-alt's Sol 6.1 at medium.
   expect(sub('review', 'opus', 'medium')).toBe('rule:review')
   expect(sub('review', SOL, 'medium')).toBe('review-alt')
@@ -288,25 +336,36 @@ test('substituteAllowed follows table 4.4', () => {
   // auto: false candidates are never automatic.
   expect(sub('explain-write', MYTHOS, 'high')).toBeNull()
   expect(sub('code-read', MYTHOS, 'high')).toBeNull()
-  // assessment-alt: Opus 5.5 at xhigh.
-  expect(sub('route-assessment', OPUS, 'xhigh')).toBe('assessment-alt')
+  // assessment-alt: Astra 6.2 and Neon at xhigh; Carbon and Opus 5.5 no longer stand in.
+  expect(sub('route-assessment', 'codex/gpt-6.2-astra', 'xhigh')).toBe('assessment-alt')
+  expect(sub('route-assessment', 'hakimi/gemini-4-neon', 'xhigh')).toBe('assessment-alt')
+  expect(sub('route-assessment', 'codex/gpt-6.2-astra', 'high')).toBeNull()
+  expect(sub('route-assessment', ASTRA, 'xhigh')).toBeNull()
+  expect(sub('route-assessment', 'hakimi/gemini-4-carbon', 'high')).toBeNull()
+  expect(sub('route-assessment', OPUS, 'xhigh')).toBeNull()
   expect(sub('explain-write', 'claude/claude-haiku-5-5', 'low')).toBeNull()
 })
 
 test('substituteEffort: the takeover effort of section 4.4', () => {
   const byId = (id: string) => rules.substitutes.find(s => s.id === id)!
-  expect(substituteEffort(rules, byId('repo-alt'), ASTRA, 'code-change', 'xhigh')).toBe('xhigh')
-  expect(substituteEffort(rules, byId('repo-alt'), ASTRA, 'code-change', 'max')).toBe('max')
-  expect(substituteEffort(rules, byId('repo-alt'), ASTRA, 'code-change', 'high')).toBe('xhigh')
+  expect(substituteEffort(rules, byId('repo-alt'), ASTRA62, 'code-change', 'xhigh')).toBe('xhigh')
+  expect(substituteEffort(rules, byId('repo-alt'), ASTRA62, 'code-change', 'max')).toBe('max')
+  expect(substituteEffort(rules, byId('repo-alt'), ASTRA62, 'code-change', 'high')).toBe('xhigh')
+  expect(substituteEffort(rules, byId('repo-alt'), CARBON, 'code-change', 'xhigh')).toBe('medium')
   expect(substituteEffort(rules, byId('math-extra'), 'codex/gpt-6-sol', 'math', 'max')).toBeNull()
-  expect(substituteEffort(rules, byId('science-math-alt'), SOL, 'science-compute', 'high')).toBe('max')
-  expect(substituteEffort(rules, byId('science-math-alt'), ASTRA, 'math', 'max')).toBe('max')
+  expect(substituteEffort(rules, byId('math-extra'), SOL, 'math', 'max')).toBe('max')
+  // Mythos 5.2 takes science from Astra 6.2 xhigh at max, the lowest of its levels not below xhigh.
+  expect(substituteEffort(rules, byId('science-alt'), MYTHOS, 'science-compute', 'xhigh')).toBe('max')
+  expect(substituteEffort(rules, byId('science-alt'), MYTHOS, 'science-compute', 'high')).toBe('high')
+  expect(substituteEffort(rules, byId('math-alt'), SOL62, 'lean', 'max')).toBe('max')
+  expect(substituteEffort(rules, byId('lean-alt'), OPUS, 'lean', 'max')).toBe('high')
   expect(substituteEffort(rules, byId('review-alt'), SOL, 'review', 'medium')).toBe('medium')
   expect(substituteEffort(rules, byId('review-alt'), SOL, 'review', 'high')).toBe('medium')
-  expect(() => substituteEffort(rules, byId('repo-alt'), ASTRA, 'review', 'medium')).toThrow('does not cover rule review')
+  expect(() => substituteEffort(rules, byId('repo-alt'), ASTRA62, 'review', 'medium')).toThrow('does not cover rule review')
+  expect(() => substituteEffort(rules, byId('lean-alt'), OPUS, 'math', 'max')).toThrow('does not cover rule math')
 })
 
-test('architect candidates: Opus 5.5 (default), Mythos 5.2, Astra and Sol 6.1', () => {
-  expect(rules.architect.candidates.map(c => [c.model, c.name])).toEqual([[OPUS, 'Opus 5.5'], [MYTHOS, 'Mythos 5.2'], [ASTRA, 'Astra'], [SOL, 'Sol 6.1']])
+test('architect candidates: Opus 5.5 (default), Mythos 5.2, Astra 6.2 and Neon', () => {
+  expect(rules.architect.candidates.map(c => [c.model, c.name])).toEqual([[OPUS, 'Opus 5.5'], [MYTHOS, 'Mythos 5.2'], [ASTRA62, 'Astra 6.2'], [NEON, 'Neon']])
   expect(rules.architect.default).toBe(OPUS)
 })

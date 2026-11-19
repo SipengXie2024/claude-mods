@@ -100,7 +100,7 @@ export const TOOL_SPECS: Record<ToolName, { description: string; inputSchema: Re
       type: 'object',
       properties: {
         worker: string('The tg-router worker name of the daily task (or its task ID).'),
-        model: string('The confirmed architect model: Opus 5.5, Astra or Sol 6.1 (name or Magpie model ID).'),
+        model: string('The confirmed architect model: Opus 5.5, Mythos 5.2, Astra 6.2 or Neon (name or Magpie model ID).'),
         user_confirmation: string('The person\'s words confirming the model, verbatim.'),
       },
       required: ['worker', 'model', 'user_confirmation'],

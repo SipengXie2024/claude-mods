@@ -11,7 +11,7 @@ import { EffortRouter, type FollowUpAsk } from '../src/router'
 import type { EffortDecision, TaskProfile } from '../src/types'
 
 /**
- * Jev effort routing per prompt (policy.v17). `prompt.submit` decides a
+ * Jev effort routing per prompt (policy.v18). `prompt.submit` decides a
  * human prompt's start level: the task level from Jev (or heuristics), the
  * follow-up fault raise, a short acknowledgement's floor, the carry-over of a
  * check that kept failing, and exploration. Jev reads the conversation as

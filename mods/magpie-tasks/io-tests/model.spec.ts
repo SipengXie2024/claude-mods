@@ -63,8 +63,10 @@ test('sameModel ignores aliases and the 1M variant', () => {
 })
 
 test('a model ID that ends in a level names that level; its levels are one model, its providers one model only for a review', () => {
-  // Magpie lists every level of a model behind sub2api's Antigravity gateway as a model of its own.
-  for (const level of ['low', 'medium', 'high'] as const) expect(cat.picker).toContain(`hakimi/gemini-4-carbon-${level}`)
+  // sub2api's Antigravity gateway takes the Gemini 4 models by their bare IDs and picks the level from
+  // the request's effort; Magpie lists each once.
+  for (const id of ['hakimi/gemini-4-argon', 'hakimi/gemini-4-carbon', 'hakimi/gemini-4-neon', 'hakimi/gemini-4-hydrogen']) expect(isAvailable(id, cat)).toBe(true)
+  expect(isAvailable('hakimi/gemini-4-carbon-high', cat)).toBe(false)
   expect(nameLevel('hakimi/gemini-4-carbon-medium')).toBe('medium')
   expect(nameLevel('hakimi/claude-opus-5-5-high')).toBe('high')
   expect(nameLevel('claude/claude-opus-5-5[1m]')).toBeNull()

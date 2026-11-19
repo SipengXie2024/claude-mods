@@ -4,31 +4,42 @@ const ALIAS = /^(opus|sonnet|haiku|fable|mythos)(\[1m\])?$/i
 
 const title = (family: string) => family[0]!.toUpperCase() + family.slice(1).toLowerCase()
 
-export type OpenAIModelScale = 'astra' | 'sol-6.1'
+export type OpenAIModelScale = 'astra' | 'astra-6.2' | 'sol-6.1' | 'sol-6.2'
 
 /** Magpie 使用 provider/model 标识；Hermes 的 Astra 标识还带有上下文长度。 */
 export function openAIModelScale(model: string | null): OpenAIModelScale | null {
   const id = model?.split('/').at(-1) ?? ''
   if (/^gpt-6-astra(?:-900k)?(?:\[1m\])?$/i.test(id)) return 'astra'
+  if (/^gpt-6\.2-astra(?:-900k)?(?:\[1m\])?$/i.test(id)) return 'astra-6.2'
   if (/^gpt-6\.1-sol(?:\[1m\])?$/i.test(id)) return 'sol-6.1'
+  if (/^gpt-6\.2-sol(?:\[1m\])?$/i.test(id)) return 'sol-6.2'
   return null
 }
 
-/** Gemini 4 Argon under Magpie's Antigravity provider (`antigravity/gemini-4-argon`). */
-export function isArgon(model: string | null): boolean {
-  return /(?:^|\/)gemini-4-argon(?:-trial)?(?:\[1m\])?$/i.test(model ?? '')
+export type GeminiModelScale = 'argon' | 'carbon' | 'neon' | 'hydrogen'
+
+/**
+ * Gemini 4 under Magpie's `hakimi` (sub2api) or `antigravity` provider, by its bare ID
+ * (`hakimi/gemini-4-carbon`, `antigravity/gemini-4-argon-trial`). Argon and Carbon offer
+ * low / medium / high; Neon and Hydrogen add xhigh. A higher request runs at the top level.
+ */
+export function geminiModelScale(model: string | null): GeminiModelScale | null {
+  const id = /(?:^|\/)gemini-4-(argon(?:-trial)?|carbon|neon|hydrogen)(?:\[1m\])?$/i.exec(model ?? '')
+  if (!id) return null
+  const name = id[1]!.toLowerCase()
+  return name === 'argon-trial' ? 'argon' : (name as GeminiModelScale)
 }
 
 /**
  * A model whose ID ends in a reasoning level (`hakimi/gemini-4-argon-high`, `hakimi/claude-opus-5-5-medium`)
- * runs at that level whatever effort the request carries: sub2api's Antigravity gateway sets the level
- * from the model name, so Magpie lists each level as its own model.
+ * runs at that level whatever effort the request carries: the Antigravity upstream takes the level from
+ * the model name. The bare ID (`hakimi/gemini-4-carbon`) is the one whose level the request's effort picks.
  */
 const LEVEL_IN_NAME = /-(?:minimal|low|medium|high|xhigh|max)(?:\[1m\])?$/i
 
 /** jev/ 网关自行设置推理强度，避免重复判断覆盖它的设置；名字里带档位的模型没有可选的强度。 */
 export function isRoutedModel(model: string): boolean {
-  return !/^jev\//i.test(model) && !LEVEL_IN_NAME.test(model) && (/opus|mythos/i.test(model) || openAIModelScale(model) !== null || isArgon(model))
+  return !/^jev\//i.test(model) && !LEVEL_IN_NAME.test(model) && (/opus|mythos/i.test(model) || openAIModelScale(model) !== null || geminiModelScale(model) !== null)
 }
 
 /**

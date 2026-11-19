@@ -230,7 +230,7 @@ describe('task routing', () => {
     expect(sent(w)).toEqual(['high', 'high', 'high', 'high', 'high'])
     expect(journal(w).map((r) => r.event)).toEqual(['prompt', 'step', 'check', 'check', 'check'])
     expect(rows(w, 'check').map((r) => r.outcome)).toEqual(['first-failure', 'repeat-failure', 'pass'])
-    expect(rows(w, 'step')[0]).toMatchObject({ model: OPUS, sessionEffort: 'high', effort: 'high', policy: 'policy.v17' })
+    expect(rows(w, 'step')[0]).toMatchObject({ model: OPUS, sessionEffort: 'high', effort: 'high', policy: 'policy.v18' })
     // Jev is asked once, for the task: no step questions.
     expect(w.asks.map((a) => a.questions)).toEqual([['task_type', 'deep']])
     expect(w.status).toEqual([])
@@ -1087,7 +1087,7 @@ describe('subagents', () => {
   test('a subagent routes its own brief, never asks the follow-up question, and on Opus keeps its level', async ($, on) => {
     const w = world(on, { agentRows: { 'agent-7': [{ role: 'user', text: 'Investigate why the parser crashes on empty input' }] } })
     await step($, 0, 'xhigh', { agentId: 'agent-7' })
-    await $.tool.call({ tool: 'Bash', command: 'npm test', agentId: 'agent-7' })
+    await $.tool.call({ tool: 'Bash', command: 'npm test', agentId: 'agent-7' } as any)
     await step($, 1, 'xhigh', { agentId: 'agent-7' })
     expect(w.steps).toEqual([{ index: 0, effort: 'high', agentId: 'agent-7' }, { index: 1, effort: 'high', agentId: 'agent-7' }])
     expect(w.asks.map((a) => a.questions[0])).toEqual(['task_type'])
@@ -1358,7 +1358,7 @@ describe('outcome rows', () => {
     expect(rows(w, 'outcome')).toEqual([{
       at: 1_000, session: 'sess-1', agent: 'main', event: 'outcome', turnId: 'turn-1', prompt: 1, model: OPUS, effort: 'high', trail: ['high'],
       reason: 'answer', durationMs: 42_000, jevWaitMs: 0, outputTokens: 900, inputTokens: 10, cacheReadTokens: 5_000, cacheCreationTokens: 300,
-      checks: { run: 2, passed: 1, failed: 1 }, raisesPassed: 0, carry: 0, unfinished: false, policy: 'policy.v17',
+      checks: { run: 2, passed: 1, failed: 1 }, raisesPassed: 0, carry: 0, unfinished: false, policy: 'policy.v18',
     }])
   })
 })

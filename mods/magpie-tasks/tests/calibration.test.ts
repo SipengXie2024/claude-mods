@@ -301,30 +301,27 @@ test('work on rule borders: per drawn model its tasks, last scores, raises and m
     selection: { kind: 'ambiguous', reason: 'Jev hangs between rule math (0.47) and rule explain-write (0.20), whose models differ' }, ...over,
   })
   const scored = (score: number) => [{ at: NOW - DAY, score: 2, raw: '2', invited: true }, { at: NOW - DAY / 2, score, raw: `${score}`, invited: false }].slice(score === 2 ? 1 : 0)
-  const [mythos, carbon, opus, astra] = rules.ambiguous.candidates
+  const [mythos, astra, neon] = rules.ambiguous.candidates
   const tasks = [
     task('d-20261101-aaaaaa', { agents: { a1: drawn(mythos!.model, mythos!.effort) }, ratings: scored(5) }),
     task('d-20261102-bbbbbb', { agents: { a1: drawn(mythos!.model, mythos!.effort) }, ratings: scored(4) }),
-    task('d-20261103-cccccc', { agents: { a1: drawn(opus!.model, opus!.effort, { efforts: [{ at: NOW - 3 * DAY, from: null, to: 'xhigh', reason: 'rule' }, { at: NOW - 2 * DAY, from: 'xhigh', to: 'max', reason: 'acceptance-failed' }] }) }, ratings: scored(2) }),
-    task('d-20261104-dddddd', { agents: { a1: drawn(astra!.model, astra!.effort) } }),
+    task('d-20261103-cccccc', { agents: { a1: drawn(astra!.model, astra!.effort, { efforts: [{ at: NOW - 3 * DAY, from: null, to: 'xhigh', reason: 'rule' }, { at: NOW - 2 * DAY, from: 'xhigh', to: 'max', reason: 'acceptance-failed' }] }) }, ratings: scored(2) }),
+    task('d-20261104-dddddd', { agents: { a1: drawn(neon!.model, neon!.effort) } }),
     task('d-20261105-eeeeee', { agents: { a1: agent('a1') }, ratings: scored(3) }),
-    task('d-20261106-gggggg', { agents: { a1: drawn(carbon!.model, carbon!.effort) }, ratings: scored(3) }),
   ]
   const stats = borderStats(tasks, rules)
   expect(stats.map(s => [s.model, s.effort, s.taskIds.length, s.scores, s.raised.length, s.changed.length])).toEqual([
     ['claude/claude-mythos-5-2', 'high', 2, [5, 4], 0, 0],
-    ['hakimi/gemini-4-carbon-high', 'high', 1, [3], 0, 0],
-    ['claude/claude-opus-5-5', 'xhigh', 1, [2], 1, 0],
-    ['codex/gpt-6-astra', 'max', 1, [], 0, 0],
+    ['codex/gpt-6.2-astra', 'xhigh', 1, [2], 1, 0],
+    ['hakimi/gemini-4-neon', 'xhigh', 1, [], 0, 0],
   ])
   expect(borderReady(stats)).toBe(false)
-  expect(borderKey(stats)).toBe('border:claude/claude-mythos-5-2=2,hakimi/gemini-4-carbon-high=1,claude/claude-opus-5-5=1,codex/gpt-6-astra=0')
+  expect(borderKey(stats)).toBe('border:claude/claude-mythos-5-2=2,codex/gpt-6.2-astra=1,hakimi/gemini-4-neon=0')
   const text = reminderText([], [], tasks, rules, { findings: [], stats: [] }, stats)
   expect(text).toContain('规则拿不准、随机分配的任务（累计）：')
   expect(text).toContain('· Mythos 5.2 · high：2 个任务，评分 2 个，平均 4.5，提高强度 0，换模型 0')
-  expect(text).toContain('· Carbon high · high：1 个任务，评分 1 个，平均 3.0，提高强度 0，换模型 0')
-  expect(text).toContain('· Opus 5.5 · xhigh：1 个任务，评分 1 个，平均 2.0，提高强度 1，换模型 0')
-  expect(text).toContain('· Astra · max：1 个任务，评分 0 个，提高强度 0，换模型 0')
+  expect(text).toContain('· Astra 6.2 · xhigh：1 个任务，评分 1 个，平均 2.0，提高强度 1，换模型 0')
+  expect(text).toContain('· Neon · xhigh：1 个任务，评分 0 个，提高强度 0，换模型 0')
   // Three scored tasks per drawn model make the comparison ready.
   const more = rules.ambiguous.candidates.flatMap((c, i) => [0, 1, 2].map(k => task(`d-2026111${i}-${'abc'[k]!.repeat(6)}`, { agents: { a1: drawn(c.model, c.effort) }, ratings: scored(4) })))
   const ready = borderStats(more, rules)
@@ -332,6 +329,6 @@ test('work on rule borders: per drawn model its tasks, last scores, raises and m
   expect(reminderText([], [], more, rules, { findings: [], stats: [] }, ready)).toContain('（累计；每个模型都已有至少 3 个评过分的任务，可以比较）')
   // The invitation picks such a task first, under the current rules only.
   expect(ratingFirst(tasks[3]!, rules)).toBe(true)
-  expect(ratingFirst(task('d-20261106-ffffff', { agents: { a1: drawn(astra!.model, astra!.effort, { rulesVersion: 'routing-rules.v5' }) } }), rules)).toBe(false)
+  expect(ratingFirst(task('d-20261106-ffffff', { agents: { a1: drawn(neon!.model, neon!.effort, { rulesVersion: 'routing-rules.v5' }) } }), rules)).toBe(false)
   expect(ratingFirst(tasks[4]!, rules)).toBe(false)
 })

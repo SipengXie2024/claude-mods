@@ -13,7 +13,7 @@
 3. 启动脚本：`examples/claude-telegram/claude-telegram` 与 `/home/ubuntu/.local/bin/claude-telegram` 改为通过 `claude-magpie` 启动，设置 `MAGPIE_TASKS_ROLE=router`，以 Opus 5.5 运行 Router。
 4. `.claude-plugin/marketplace.json` 增加 magpie-tasks；根目录 `README.md` 与 `examples/claude-telegram/README.md` 更新说明。
 
-`mods/subagent-opus` 不需要修改。它在父模型为 Fable 或 Mythos、且委派没有指定模型（或指定了 Fable、Mythos）时把子代理模型改为 `opus`。magpie-tasks 管理的会话中，架构师只能是 Opus 5.5、Astra 或 Sol 6.1，Router 是 Opus 5.5，接管已有会话也只接受这三种模型（第 9.4 节），所以主对话的委派不满足这个条件；满足条件的是 Fable 5.1 子代理（`long-autonomous` 候选或用户指定）再委派的嵌套子代理。安装后 subagent-opus 位于外层，magpie-tasks 在内层收到的是改写后的 `model: 'opus'`，第 9.6 节第 6 步把这种情况当作没有指定模型，交给路由规则。同一字段以最内层的 magpie-tasks 为准（第 9.15 节）。端到端场景 E6 检查这两点。
+`mods/subagent-opus` 不需要修改。它在父模型为 Fable 或 Mythos、且委派没有指定模型（或指定了 Fable、Mythos）时把子代理模型改为 `opus`。magpie-tasks 管理的会话中，架构师只能是 Opus 5.5、Mythos 5.2、Astra 或 Neon high，Router 是 Opus 5.5，接管已有会话也只接受这四种模型（第 9.4 节），所以主对话的委派不满足这个条件；满足条件的是 Fable 5.1 子代理（`long-autonomous` 候选或用户指定）再委派的嵌套子代理。安装后 subagent-opus 位于外层，magpie-tasks 在内层收到的是改写后的 `model: 'opus'`，第 9.6 节第 6 步把这种情况当作没有指定模型，交给路由规则。同一字段以最内层的 magpie-tasks 为准（第 9.15 节）。端到端场景 E6 检查这两点。
 
 `mods/jev` 不在本计划中修改。JEV 对 magpie-tasks 的配合由 JEV 的 Jev 上下文改造（`/tmp/jev-dev`，由该改造的负责人合入仓库）提供，magpie-tasks 依赖其中两项已经实现的行为（第 10.2 节）：委派说明第一行匹配 `^\[magpie-tasks task=` 的子代理，JEV 每次运行写一条 `skip` 记录、不改写强度；插件 `magpie-tasks` 提交、以 `[magpie-tasks spawn ` 开头的中转消息，JEV 直接放行，不写判断记录。改造的其余内容（只用 OpenAI 上的 Jev、按 Claude Code 上下文重建对话、删除截断和滚动摘要、子代理失败升级、重新校准门槛）属于 JEV 自己的实现计划。端到端场景以合入了该改造的 JEV 运行。
 
@@ -31,7 +31,7 @@
 | 6 | `CLAUDE_JOB_DIR` 已设置（其他后台会话） | `bg-unclaimed` | 第一次 `prompt.submit` 时按启动认领（第 9.3 节）决定架构师、报告认领失败或普通会话 |
 | 7 | 其余交互式会话 | `candidate` | 第一条消息进入长期任务流程（第 9.2 节）或接管流程（第 9.4 节） |
 
-`unmanaged` 与 `inactive` 一样不做任何处理。`unmanaged` 只有三个来源：用户自己用 `claude-magpie --bg` 或 `/bg` 启动、没有认领记录的后台会话；用户拒绝接管的已有会话（第 9.4 节）；模型不在架构师候选中的已有会话。每个交互式 `claude-magpie` 新窗口都进入长期任务流程（findings“model routing implementation interview”的 Window scope 决定）；不需要登记的临时操作使用普通 `claude`。
+`unmanaged` 与 `inactive` 一样不做任何处理。`unmanaged` 有四个来源：用户自己用 `claude-magpie --bg` 或 `/bg` 启动、没有认领记录的后台会话；新窗口在架构师确认对话中选择「不用架构师（普通会话）」的会话（第 9.2 节）；用户拒绝接管的已有会话（第 9.4 节）；模型不在架构师候选中的已有会话。每个交互式 `claude-magpie` 新窗口的第一条消息进入长期任务确认流程，用户可选择架构师模型或选择「不用架构师（普通会话）」直接按普通会话运行。
 
 **后台会话不进入原生工作副本。** `claude --bg` 启动的后台会话在 Git 仓库中第一次编辑文件之前，会被 Claude Code 移入 `.claude/worktrees/` 下的原生工作副本，移入之前不能对共享目录使用 Edit、Write 和 NotebookEdit（官方 agent-view 文档 “How file edits are isolated” 一节，`/tmp/magpie-background-agent-view-w4z2940o/source.md:589-611`）。架构师由 `claude-magpie --bg` 或 `claude --bg --resume` 启动，如果被移入原生工作副本，就不能在项目主目录写 `.planning/findings.md`、`CONTEXT.md` 与 `.planning/plan-*.md`；移入后会话的工作目录也随之改变，context-memory 按工作目录划分的项目范围和第 9.5 节按 `projectRoot` 判断的写入范围都会失效，而被 Git 忽略的 `.planning/` 不在原生工作副本中。文档给出的关闭方法是设置 `worktree.bgIsolation: "none"`。magpie-tasks 注册 `settings.read` 钩子提供这个设置：读取合并后的设置（`e.source` 为空）时，若 `flag` 层的 `env.ANTHROPIC_BASE_URL` 等于 `opts.gatewayUrl`（claude-magpie 的 `--settings` 写入的网关地址），在 `next(e)` 的结果上设置 `worktree.bgIsolation = 'none'`，否则原样返回；读取单个来源时原样返回。类型说明规定引擎自己合并设置时也经过这些钩子，钩子的回答对所有读取者生效，且回答只能由 `layers` 与 `next(e)` 的结果决定，所以判断只依据 `flag` 层，不读会话角色或环境变量。后果：所有 claude-magpie 后台会话（包括用户自己启动的 `claude-magpie --bg`）都直接编辑启动目录，与在项目设置中写入 `worktree.bgIsolation: "none"` 的效果相同，不再自行建立原生工作副本；普通 `claude` 的后台会话没有 Magpie 的 `flag` 层，不受影响。接管流程用 `/bg` 转入后台，文档说明这种会话本来就不移入原生工作副本。这一机制是未验证行为 U9（第 11 节），由场景 E5 判定。
 
@@ -805,10 +805,12 @@ export class Registry {
 
 1. 取项目根：`git -C <cwd> rev-parse --show-toplevel`。是仓库时项目根为输出路径；不是仓库时项目根为 `cwd`。
 2. `recommendArchitect(firstMessage)`（第 6.2 节）。
-3. `$.ui.ask(question, { options, header: '长期任务' })`。选项为纯文字：推荐模型排第一并标“（推荐）”，然后是另外三个候选。问题文字包含：推荐理由、证据与限制（来自 `architect.candidates`）、项目根路径、任务将在哪里修改（`previewPlacement` 的结果，第 9.9 节：`直接修改：<目录>`，不是 Git 仓库时注明没有差异记录；已有任务在直接修改时为 `工作副本：<worktreeDir>/<taskId>`，并写出那些任务的标题），项目根不受信任时（`trust.projectTrusted` 为假，见第 6 步）加一句“Claude Code 还没有把 `<项目根>` 记为受信任的目录，后台会话不能在那里启动。确认即表示你信任这个目录，插件会在 Claude Code 的配置中记下这一点”，最后一句说明确认后窗口怎样继续（有交接文件时：窗口随即切换到后台的架构师会话，离开后任务仍在后台运行；没有时：当前窗口随即关闭，之后用 `claude attach` 重新打开），以及不需要登记的临时操作请使用普通 `claude`。确认对话会一直挂起消息，直到用户回答（实测 23 秒，超过钩子时限也有效）。
-4. 回答处理（与选项文字逐字比较）：
-   - Esc（`$.ui.ask` 拒绝）：返回 `{ drop: 'magpie-tasks: 已取消；消息已放回输入框，再次发送会重新询问；临时操作请使用普通 claude' }`，下一条消息重新询问。
-   - 无法识别的自由文字：同上，理由写“没有识别出选择”。
+3. `$.ui.ask(question, { options, header: '长期任务' })`，选项为纯文字，每一页 2 到 4 个（`$.ui.ask` 的限制）。候选按推荐模型在前、其余按 `architect.candidates` 的顺序排列；剩下的候选不超过三个时一页列完，否则这一页列前两个和“选择其他架构师模型”。每一页最后一项都是“不用架构师（普通会话）”。第一页的推荐模型标“（推荐）”：现在的四个候选中，第一页是推荐模型、下一个候选、“选择其他架构师模型”和“不用架构师（普通会话）”，按 Enter 选中推荐模型。第一页的问题文字包含：推荐理由、证据与限制（来自 `architect.candidates`）、项目根路径、任务将在哪里修改（`previewPlacement` 的结果，第 9.9 节：`直接修改：<目录>`，不是 Git 仓库时注明没有差异记录；已有任务在直接修改时为 `工作副本：<worktreeDir>/<taskId>`，并写出那些任务的标题），项目根不受信任时（`trust.projectTrusted` 为假，见第 6 步）加一句“Claude Code 还没有把 `<项目根>` 记为受信任的目录，后台会话不能在那里启动。确认即表示你信任这个目录，插件会在 Claude Code 的配置中记下这一点”，最后一句说明选择模型后窗口怎样继续（有交接文件时：窗口随即切换到后台的架构师会话，离开后任务仍在后台运行；没有时：当前窗口随即关闭，之后用 `claude attach` 重新打开），“选择其他架构师模型”列出其余候选，以及选择“不用架构师（普通会话）”时这个窗口按普通会话运行这条消息、不登记长期任务、之后的消息也不再询问。选“选择其他架构师模型”后，下一页（同样的 `header`）的问题文字逐个列出这一页候选的 `when`，供用户比较。确认对话会一直挂起消息，直到用户回答（实测 23 秒，超过钩子时限也有效）。
+4. 回答处理（与这一页的选项文字逐字比较）：
+   - Esc（任何一页的 `$.ui.ask` 拒绝）：返回 `{ drop: 'magpie-tasks: 已取消；消息已放回输入框，再次发送会重新询问' }`，下一条消息重新询问。
+   - 无法识别的自由文字，或这一页没有的选项：同上，理由写“没有识别出选择”。
+   - “选择其他架构师模型”：询问下一页。
+   - “不用架构师（普通会话）”：不登记任务、不改信任设置、不建工作副本、不启动后台会话、不写交接文件、不结束前台会话；`$.ui.notice('magpie-tasks: 本会话按普通会话运行，不登记为长期任务')`，`st.role = 'unmanaged'`，`st.firstPromptSeen = true`，`next(e)`：这条消息交给当前窗口的模型。
    - 某个模型：继续。
 5. 登记：`reg.create`（`kind: 'long'`，`state: 'starting'`，`title` 取第一条消息的前 30 个字，`architect` 写入推荐、判断与用户选择，`telegram: { chatId: defaultChat() }`）。
 6. 项目准备：项目根不受信任时先 `trust.trustProject(root)`：在全局配置（`<CLAUDE_CONFIG_DIR>/.claude.json`，没有 `CLAUDE_CONFIG_DIR` 时为 `~/.claude.json`）中把 `projects[<项目根>].hasTrustDialogAccepted` 设为 `true`，其余字段不变；新内容写到同目录的临时文件，`chmod --reference` 后改名覆盖，再读回确认标记还在。`claude --bg` 拒绝在不受信任的 Git 仓库中启动（“Workspace not trusted”，带不带 `--dangerously-skip-permissions` 都一样），而以 `--dangerously-skip-permissions` 运行的窗口从不显示信任对话，Claude Code 也没有设置信任的命令；用户在确认对话中的回答即视为信任这个目录（findings“workspace trust blocks background architects”）。然后 `placeTask`（第 9.9 节）确定任务的工作目录。插件从不在项目中建立 Git 仓库。
@@ -839,7 +841,7 @@ export class Registry {
 触发：`candidate` 角色，`classic.SessionStart` 的 `source === 'resume'`，本会话 ID 不在登记表中，第一条输入的消息。
 
 0. 本会话 ID 在 `state/declined.json` 中（用户此前拒绝过接管）：`st.role = 'unmanaged'`，`next(e)`，不再询问。设计规定只在第一次恢复时确认一次（findings“model routing implementation interview”）。
-1. 当前模型 `await $.session.model()` 规范化后不是四个架构师候选之一：`$.ui.notice('当前模型 <名称> 不在架构师候选（Opus 5.5、Mythos 5.2、Astra、Sol 6.1）中，这个会话不登记为长期任务')`，`st.role = 'unmanaged'`，`next(e)`。
+1. 当前模型 `await $.session.model()` 规范化后不是四个架构师候选之一：`$.ui.notice('当前模型 <名称> 不在架构师候选（Opus 5.5、Mythos 5.2、Astra 6.2、Neon）中，这个会话不登记为长期任务')`，`st.role = 'unmanaged'`，`next(e)`。
 2. `$.ui.ask`：问题说明接管的后果（登记为长期任务、沿用当前模型与对话历史、接入 Telegram、启用架构师工具限制、本轮结束后转入后台；有交接文件时写明窗口随即切换到后台会话），包含与第 9.2 节相同的项目、Git 与信任信息，并说明选择不接管后这个会话以后恢复时不再询问；选项 `接管`、`不接管`。
 3. `不接管`：会话 ID 在 `declined` 锁内写入 `state/declined.json`，`unmanaged`，`next(e)`。Esc 或无法识别：`drop` 并下次重新询问（没有作出回答，不算拒绝）。
 4. `接管`：登记任务（`architect.source: 'takeover'`，`owner.sessionId` 为当前 ID），项目根不受信任时 `trust.trustProject(root)`（第 9.2 节第 6 步），按需 `git init`，创建工作副本，`st.role = 'architect'`，注册架构师工具，加上每轮上下文后 `next(e)`，并设置 `st.pendingBg = true`。

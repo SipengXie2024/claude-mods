@@ -1,11 +1,11 @@
 import { clampEffort, fromRank, maxEffort, minEffort, rank, shift, type Effort } from './effort';
-import { isArgon, openAIModelScale, type OpenAIModelScale } from './model';
+import { geminiModelScale, openAIModelScale, type GeminiModelScale, type OpenAIModelScale } from './model';
 import type { TaskType } from './questions';
 import type { FollowUpRecord, TaskProfile } from './types';
 
 /**
  * Pure mapping from evidence and Jev signals to an effort level
- * (policy.v17, 2026-11-10).
+ * (policy.v18, 2026-11-19).
  *
  * The start comes from the task kind, read from a table per model: a level
  * name is not the same amount of thinking on every model, and Opus 5.5
@@ -32,7 +32,7 @@ export interface Bounds {
 }
 
 /** Version of this policy, recorded on every decision for provenance. */
-export const POLICY_VERSION = 'policy.v17';
+export const POLICY_VERSION = 'policy.v18';
 
 /**
  * Rules an A/B run can switch off to measure them:
@@ -76,15 +76,17 @@ export interface TypePrefs {
  * Which table a model follows: Opus, Sonnet and Haiku 5.5 default to medium;
  * Mythos and Fable 5.2 (one model, two safeguard settings) have their own;
  * other Mythos, Fable and earlier Opus models default to high.
- * GPT-6 Astra 和 GPT-6.1 Sol 分别使用各自的任务表。
+ * GPT-6 Astra、GPT-6.2 Astra、GPT-6.1 Sol、GPT-6.2 Sol 与 Gemini 4 Argon、
+ * Carbon、Neon、Hydrogen 分别使用各自的任务表。
  */
-export type ModelScale = 'medium-default' | 'high-default' | 'fable-5.2' | 'argon' | OpenAIModelScale;
+export type ModelScale = 'medium-default' | 'high-default' | 'fable-5.2' | OpenAIModelScale | GeminiModelScale;
 
 export function modelScale(model: string | null): ModelScale {
   const openAI = openAIModelScale(model);
   if (openAI !== null) return openAI;
   if (model !== null && /claude-(fable|mythos)-5-2(?:\[1m\])?$/i.test(model)) return 'fable-5.2';
-  if (isArgon(model)) return 'argon';
+  const gemini = geminiModelScale(model);
+  if (gemini !== null) return gemini;
   return model !== null && /claude-(opus|sonnet|haiku)-5-5|^(opus|sonnet|haiku)(\[1m\])?$/i.test(model) ? 'medium-default' : 'high-default';
 }
 
@@ -135,6 +137,23 @@ export function modelScale(model: string | null): ModelScale {
  * Astra 和 Sol 的困难研究从 max 开始：Terminal-Bench Science 的 xhigh/max
  * 分别为 55/63 和 50/58。Sol 的解释、写作、设计从 high 开始，复杂任务用
  * xhigh；AA-Briefcase 的 medium/high/xhigh 为 1360/1469/1503。
+ *
+ * GPT-6.2 Astra / Sol 与 Gemini 4 Carbon / Neon / Hydrogen 的表依据
+ * Artificial Analysis v5.0.1 的逐档测量（2026-11-19）。6.2 Astra 的
+ * FrontierCode 2.0 从 low 到 medium 提升最大（32.7 / 46.6 / 47.1 / 49.0 /
+ * 45.4），代码从 medium 起步、深入时 xhigh；AA-Briefcase 在 high 跳到 1570
+ * （medium 1408，high 每题 6.1 分钟），解释、写作、设计从 high 起步；研究一直
+ * 升到 max（HLE-Diamond 72.2），深入研究用 max；操作 low 起步、深入时 high。
+ * 6.2 Sol 同样处理，只是操作从 medium 起步：Terminal-Bench 4.0 在 low 只有
+ * 37.9，medium 为 56.1。Carbon 只有 low / medium / high，任何任务都不超过 high；
+ * 它的 Terminal-Bench 4.0 在 low 已有 62.6，操作 low 起步。Neon 最高到 xhigh：
+ * 操作 medium 起步（Terminal-Bench 4.0 low 32.8、medium 54.5）；文档类任务
+ * GDP.pdf 在 high 最高（33.4），medium 每题 8.3 分钟而 high 14.8 分钟，所以解释、
+ * 写作、设计 medium 起步、深入时 high；代码 medium 起步、深入时 high
+ * （FrontierCode 43.3，xhigh 44.4 留给失败后的提升）；深入研究 xhigh。
+ * Hydrogen 最高到 xhigh：low 档的操作和编程很弱（Terminal-Bench 4.0 6.6 /
+ * 29.3 / 54.0，FrontierCode 9.3 / 31.5 / 36.3 / 39.0），操作从 high 起步、
+ * 最低 medium，代码 medium 起步、深入时 xhigh，深入研究 xhigh。
  * 任务类型与评测的对应属于策略推断，来源与限制记录在 ../BENCHMARKS.md。
  */
 export const TYPE_PREFS: Record<ModelScale, Record<TaskType, TypePrefs>> = {
@@ -174,6 +193,33 @@ export const TYPE_PREFS: Record<ModelScale, Record<TaskType, TypePrefs>> = {
     code: { floor: 'low', base: 'medium', deep: 'high' },
     research: { floor: 'medium', base: 'high', deep: 'high' },
   },
+  carbon: {
+    chat: { floor: 'low', base: 'low', deep: 'low' },
+    operate: { floor: 'low', base: 'low', deep: 'high' },
+    explain: { floor: 'low', base: 'medium', deep: 'high' },
+    write: { floor: 'low', base: 'medium', deep: 'high' },
+    design: { floor: 'low', base: 'medium', deep: 'high' },
+    code: { floor: 'low', base: 'medium', deep: 'high' },
+    research: { floor: 'medium', base: 'high', deep: 'high' },
+  },
+  neon: {
+    chat: { floor: 'low', base: 'low', deep: 'low' },
+    operate: { floor: 'low', base: 'medium', deep: 'high' },
+    explain: { floor: 'low', base: 'medium', deep: 'high' },
+    write: { floor: 'low', base: 'medium', deep: 'high' },
+    design: { floor: 'low', base: 'medium', deep: 'high' },
+    code: { floor: 'medium', base: 'medium', deep: 'high' },
+    research: { floor: 'medium', base: 'high', deep: 'xhigh' },
+  },
+  hydrogen: {
+    chat: { floor: 'low', base: 'low', deep: 'low' },
+    operate: { floor: 'medium', base: 'high', deep: 'high' },
+    explain: { floor: 'low', base: 'medium', deep: 'high' },
+    write: { floor: 'low', base: 'medium', deep: 'high' },
+    design: { floor: 'low', base: 'medium', deep: 'high' },
+    code: { floor: 'medium', base: 'medium', deep: 'xhigh' },
+    research: { floor: 'medium', base: 'high', deep: 'xhigh' },
+  },
   astra: {
     chat: { floor: 'low', base: 'low', deep: 'low' },
     operate: { floor: 'low', base: 'low', deep: 'medium' },
@@ -183,9 +229,27 @@ export const TYPE_PREFS: Record<ModelScale, Record<TaskType, TypePrefs>> = {
     code: { floor: 'medium', base: 'medium', deep: 'xhigh' },
     research: { floor: 'medium', base: 'high', deep: 'max' },
   },
+  'astra-6.2': {
+    chat: { floor: 'low', base: 'low', deep: 'low' },
+    operate: { floor: 'low', base: 'low', deep: 'high' },
+    explain: { floor: 'low', base: 'high', deep: 'xhigh' },
+    write: { floor: 'low', base: 'high', deep: 'xhigh' },
+    design: { floor: 'low', base: 'high', deep: 'xhigh' },
+    code: { floor: 'medium', base: 'medium', deep: 'xhigh' },
+    research: { floor: 'medium', base: 'high', deep: 'max' },
+  },
   'sol-6.1': {
     chat: { floor: 'low', base: 'low', deep: 'low' },
     operate: { floor: 'low', base: 'low', deep: 'medium' },
+    explain: { floor: 'low', base: 'high', deep: 'xhigh' },
+    write: { floor: 'low', base: 'high', deep: 'xhigh' },
+    design: { floor: 'low', base: 'high', deep: 'xhigh' },
+    code: { floor: 'medium', base: 'medium', deep: 'xhigh' },
+    research: { floor: 'medium', base: 'high', deep: 'max' },
+  },
+  'sol-6.2': {
+    chat: { floor: 'low', base: 'low', deep: 'low' },
+    operate: { floor: 'low', base: 'medium', deep: 'high' },
     explain: { floor: 'low', base: 'high', deep: 'xhigh' },
     write: { floor: 'low', base: 'high', deep: 'xhigh' },
     design: { floor: 'low', base: 'high', deep: 'xhigh' },

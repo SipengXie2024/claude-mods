@@ -312,7 +312,7 @@ export function startEffort(rule: Rule, deep: boolean): Effort {
 }
 
 // The next level of the rule's raiseOrder above `current`; `current` itself at the top. Levels the
-// order skips are ones the evidence shows no better than the level below (Mythos 5.2 science: xhigh).
+// order skips are ones the evidence shows no better than the level below (Neon documents: xhigh, max).
 export function raiseOnRule(rule: Rule, current: Effort): Effort {
   if (rule.raiseOrder === null) throw new Error(`routing rules: rule ${rule.id} has no raise order`)
   return rule.raiseOrder.find(e => EFFORTS.indexOf(e) > EFFORTS.indexOf(current)) ?? current
@@ -332,8 +332,7 @@ export function reviewSecondTarget(rules: Rules, originals: string[], available:
   return { none: `no model is left for an independent second review: candidates ${candidates.join(', ')}; excluded as reviewed models: ${originals.join(', ')}${gone}` }
 }
 
-// Efforts of the forRules rules whose model is `model`: what a "rule" option allows (section 4.4:
-// Astra takes science-compute's efforts, Sol 6.1 math's).
+// Efforts of the forRules rules whose model is `model`: what a "rule" option allows (section 4.4).
 function ruleEfforts(rules: Rule[], forRules: string[], model: string): Effort[] {
   const out = new Set<Effort>()
   for (const r of rules) if (forRules.includes(r.id) && r.model === model && r.effort !== null) out.add(r.effort)
