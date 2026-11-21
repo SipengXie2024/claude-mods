@@ -5,7 +5,8 @@ description: Check a change to the magpie-tasks plugin end to end - typecheck, u
 
 # Verify magpie-tasks
 
-Run from the repository root (or the task worktree root). `.claude-plugin/types/` and
+Run from the repository root (or the task worktree root). `command` bypasses a shell alias
+that puts options before `plugin` (`claude plugin test` refuses to run then). `.claude-plugin/types/` and
 `io-tests/node_modules/` are git-ignored: in a fresh worktree copy the types from the main checkout
 before the first `tsc` run, or `tsc` finds no `noEmit` setting and writes `.js` files next to every
 `.ts` file.
@@ -15,8 +16,8 @@ cp -r ~/sipeng/claude-mods/mods/magpie-tasks/.claude-plugin/types mods/magpie-ta
 (cd mods/magpie-tasks/io-tests && bun install)
 bunx tsc -p mods/magpie-tasks/tsconfig.json
 bunx tsc -p mods/magpie-tasks/io-tests/tsconfig.json
-claude plugin validate mods/magpie-tasks
-claude plugin test mods/magpie-tasks
+command claude plugin validate mods/magpie-tasks
+command claude plugin test mods/magpie-tasks
 bun test mods/magpie-tasks/io-tests
 ```
 

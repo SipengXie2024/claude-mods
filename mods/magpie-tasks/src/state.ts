@@ -13,12 +13,13 @@ type E = EngineInterface
 // `$.noun.method` call at its call site. Each closure below is such a call site.
 export interface Host {
   session: { id: E['session']['id']; model: E['session']['model']; messages: E['session']['messages']; append: E['session']['append']; send: E['session']['send'] }
-  ui: { log: E['ui']['log']; ask: E['ui']['ask']; toast: E['ui']['toast']; notify: E['ui']['notify'] }
+  ui: { log: E['ui']['log']; ask: E['ui']['ask']; toast: E['ui']['toast']; notify: E['ui']['notify']; invalidate: E['ui']['invalidate'] }
   model: { complete: E['model']['complete'] }
   agent: { spawn: E['agent']['spawn']; list: E['agent']['list'] }
   prompt: { submit: E['prompt']['submit'] }
-  command: { run: E['command']['run'] }
-  clock: { after: E['clock']['after'] }
+  command: { run: E['command']['run']; list: E['command']['list'] }
+  clock: { after: E['clock']['after']; every: E['clock']['every'] }
+  settings: { read: E['settings']['read'] }
   tool: { register: E['tool']['register'] }
   plugin: { root: string }
 }
@@ -41,12 +42,14 @@ export function hostEngine($: EngineInterface): Host {
       ask: (question, options) => $.ui.ask(question, options),
       toast: (text, options) => $.ui.toast(text, options),
       notify: (text, options) => $.ui.notify(text, options),
+      invalidate: event => $.ui.invalidate(event),
     },
     model: { complete: (request, options) => $.model.complete(request, options) },
     agent: { spawn: args => $.agent.spawn(args), list: () => $.agent.list() },
     prompt: { submit: args => $.prompt.submit(args) },
-    command: { run: args => $.command.run(args) },
-    clock: { after: (ms, fn) => $.clock.after(ms, fn) },
+    command: { run: args => $.command.run(args), list: () => $.command.list() },
+    clock: { after: (ms, fn) => $.clock.after(ms, fn), every: (ms, fn) => $.clock.every(ms, fn) },
+    settings: { read: (args => $.settings.read(args as never)) as E['settings']['read'] },
     tool: { register: spec => $.tool.register(spec) },
     plugin: { root: $.plugin.root },
   }

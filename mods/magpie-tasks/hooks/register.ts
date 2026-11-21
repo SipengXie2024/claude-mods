@@ -16,12 +16,12 @@ import { Registry } from '../src/registry'
 import { onRouterPrompt, onSessionSend, routerTool } from '../src/router'
 import { startRouted, unstartedRoutes } from '../src/route'
 import { loadRules, type Rules } from '../src/rules'
-import { bgIsolationAnswer, detectRole, loadRouter, onClaimPrompt, onFirstPrompt, onTakeoverTurnEnd } from '../src/session'
+import { bgIsolationAnswer, detectRole, loadRouter, onClaimPrompt, onFirstPrompt, onTakeoverTurnEnd, sessionIdOf } from '../src/session'
 import { onAgentSpawn, onTurnStart, onTurnStep, turnRule } from '../src/spawn'
 import { ctxFor, freshState, type Ctx } from '../src/state'
 import { clip, defaultChat, send } from '../src/telegram'
 import { registerTools, toolOwner, type ArchitectToolName, type RouterToolName } from '../src/tools'
-import type { Options, SessionState, TaskRecord } from '../src/types'
+import type { Options, Role, SessionState, TaskRecord } from '../src/types'
 import { onAgentError, onStopFailure } from '../src/unavailable'
 
 const TICK_MS = 15 * 60_000
@@ -215,8 +215,95 @@ export const register: Register = (on, options) => {
     return r.deny !== undefined ? r : { value: bgIsolationAnswer(e, r.value, gatewayUrl) }
   })
 
+  // What happens once per process whatever conversation it runs: the band timer, startup recovery,
+  // the Router's timer and the tools each role registers. A conversation switch decides the role again
+  // and sets up only what the new role still lacks.
+  let bandTimer = false
+  let routerTimer = false
+  const toolsOf = new Set<Role>()
+
+  // Decides the role of the conversation st.sessionId names and sets that role up. Returns false when
+  // the plugin turned itself off (install order).
+  async function adopt(c: Ctx, isInteractive: boolean): Promise<boolean> {
+    const { io, host } = c
+    const role = await detectRole(c, { cwd: st.cwd, isInteractive })
+    await io.log(`role ${role} (session ${st.sessionId}, cwd ${st.cwd})`)
+    if (!bandTimer) {
+      bandTimer = true
+      host.clock.every(BAND_MS, () => { if (bandsRunning()) host.ui.invalidate('ui.render') })
+    }
+    if (role === 'candidate' || role === 'router') {
+      const problem = installOrderProblem((await host.settings.read({ source: 'user' }))['enabledPlugins'])
+      if (problem !== null) {
+        st.role = 'inactive'
+        loaded = null
+        host.ui.log(problem)
+        await io.log(`role inactive: ${problem}`)
+        return false
+      }
+      // A Router's own subagents from before a restart are routed and gated again when a reply resumes them.
+      if (role === 'router') await io.log(`router: ${await loadRouter(c)} subagents of earlier runs of this session loaded`)
+      // Startup recovery runs behind the session; the candidate's exit and /bg wait for it. A Router then
+      // recovers the daily tasks its restart cut off; both sweep what finished tasks still hold.
+      if (st.recovery === null) {
+        st.recovery = recover(c).then(
+          res => io.log(`recovery: resumed ${res.resumed.join(',') || '-'}; waiting ${res.waiting.join(',') || '-'}; reported ${res.reported.join(',') || '-'}`),
+          (err: unknown) => reportFlowError(c, null, errorLine(err), 'startup recovery'),
+        ).then(async () => {
+          if (role === 'router') {
+            await recoverRouter(c).then(
+              res => io.log(`router recovery: checks rerun ${res.rerun.join(',') || '-'}; integrated ${res.integrated.join(',') || '-'}; asked ${res.asked.join(',') || '-'}`),
+              (err: unknown) => reportFlowError(c, null, errorLine(err), 'Router restart recovery'),
+            )
+          }
+          await sweep(c)
+        })
+      }
+    }
+    if (role === 'candidate') {
+      // U1: the command the first-message flow runs to end the foreground session is listed here.
+      await io.log(`commands: ${(await host.command.list()).map(x => x.name).join(' ')}`)
+    }
+    if ((role === 'router' || role === 'architect') && !toolsOf.has(role)) {
+      toolsOf.add(role)
+      await registerTools(c, role)
+    }
+    if (role === 'router' && !routerTimer) {
+      routerTimer = true
+      let ticking = false
+      host.clock.every(TICK_MS, () => {
+        if (ticking) return
+        ticking = true
+        void tick(c)
+          .catch((err: unknown) => reportFlowError(c, null, errorLine(err), 'rating and calibration timer'))
+          .then(() => sweep(c))
+          .finally(() => { ticking = false })
+      })
+    }
+    if (role === 'architect') resumeQuestions(c)
+    return true
+  }
+
+  // An in-window /resume goes on in this process under the resumed session's ID and fires no
+  // session.start (SessionEndInput in the engine's types); `$.session.id()` still answers the
+  // earlier ID inside this hook, the transcript path already names the new one. What this process
+  // kept about the earlier conversation is dropped and the new one gets its own role, so a resumed
+  // session is looked up (declined takeovers, owned tasks) under its own ID.
   on('classic.SessionStart', async ($, e, next) => {
     st.startSource = e.source
+    // Before session.start, and in a process the plugin leaves alone, there is nothing to switch.
+    if (e.source !== 'resume' || st.sessionId === '' || loaded === null) return next(e)
+    const id = sessionIdOf(e.transcript_path)
+    if (id === st.sessionId) return next(e)
+    const { startSource, recovery, debugOffset } = st
+    Object.assign(st, freshState(), { sessionId: id, cwd: e.cwd, startSource, recovery, debugOffset })
+    await hostIo($).log(`session switched to ${id} (${e.source})`)
+    await adopt(ctxOf($, st, loaded), true)
+    return next(e)
+  }).catch(async ($, e, next) => {
+    const line = errorLine(next.error)
+    $.ui.log(`magpie-tasks 出错：切换到会话 ${st.sessionId} 后没有重新判定它的角色：${line}`)
+    await hostIo($).log(`session switch: ${line}`).catch(() => undefined)
     return next(e)
   })
 
@@ -236,56 +323,7 @@ export const register: Register = (on, options) => {
     }
     const rules = await loadRules(io, $.plugin.root)
     loaded = { opts, rules, catalog: withRuleModels(catalogFrom(await $.settings.read({ source: 'flag' })), Object.keys(rules.models)) }
-    const c = ctxOf($, st, loaded)
-    const role = await detectRole(c, e)
-    await io.log(`role ${role} (session ${st.sessionId}, cwd ${st.cwd})`)
-    $.clock.every(BAND_MS, () => { if (bandsRunning()) $.ui.invalidate('ui.render') })
-    if (role === 'candidate' || role === 'router') {
-      const problem = installOrderProblem((await $.settings.read({ source: 'user' }))['enabledPlugins'])
-      if (problem !== null) {
-        st.role = 'inactive'
-        loaded = null
-        $.ui.log(problem)
-        await io.log(`role inactive: ${problem}`)
-        return r
-      }
-      // A Router's own subagents from before a restart are routed and gated again when a reply resumes them.
-      if (role === 'router') await io.log(`router: ${await loadRouter(c)} subagents of earlier runs of this session loaded`)
-      // Startup recovery runs behind the session; the candidate's exit and /bg wait for it. A Router then
-      // recovers the daily tasks its restart cut off; both sweep what finished tasks still hold.
-      st.recovery = recover(c).then(
-        res => io.log(`recovery: resumed ${res.resumed.join(',') || '-'}; waiting ${res.waiting.join(',') || '-'}; reported ${res.reported.join(',') || '-'}`),
-        (err: unknown) => reportFlowError(c, null, errorLine(err), 'startup recovery'),
-      ).then(async () => {
-        if (role === 'router') {
-          await recoverRouter(c).then(
-            res => io.log(`router recovery: checks rerun ${res.rerun.join(',') || '-'}; integrated ${res.integrated.join(',') || '-'}; asked ${res.asked.join(',') || '-'}`),
-            (err: unknown) => reportFlowError(c, null, errorLine(err), 'Router restart recovery'),
-          )
-        }
-        await sweep(c)
-      })
-    }
-    if (role === 'candidate') {
-      // U1: the command the first-message flow runs to end the foreground session is listed here.
-      await io.log(`commands: ${(await $.command.list()).map(x => x.name).join(' ')}`)
-    }
-    if (role === 'router') {
-      await registerTools(c, 'router')
-      let ticking = false
-      $.clock.every(TICK_MS, () => {
-        if (ticking) return
-        ticking = true
-        void tick(c)
-          .catch((err: unknown) => reportFlowError(c, null, errorLine(err), 'rating and calibration timer'))
-          .then(() => sweep(c))
-          .finally(() => { ticking = false })
-      })
-    }
-    if (role === 'architect') {
-      await registerTools(c, 'architect')
-      resumeQuestions(c)
-    }
+    await adopt(ctxOf($, st, loaded), e.isInteractive)
     return r
   })
 

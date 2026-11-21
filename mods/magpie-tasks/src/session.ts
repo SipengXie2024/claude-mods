@@ -107,18 +107,17 @@ export function roleRule(f: RoleFacts): 'inactive' | 'router' | 'architect' | 't
   return 'candidate'
 }
 
-// Decides this session's role and records it, the session ID and the directory in st; for an
+// Decides the role of the session st.sessionId names and records it and the directory in st; for an
 // architect (a resumed one, or the /bg copy of a takeover that claimed its task) loads the task's state.
-export async function detectRole(ctx: Ctx, e: SessionStartInput): Promise<Role> {
+export async function detectRole(ctx: Ctx, e: Pick<SessionStartInput, 'cwd' | 'isInteractive'>): Promise<Role> {
   const role = await roleOf(ctx, e)
   ctx.st.role = role
   return role
 }
 
-async function roleOf(ctx: Ctx, e: SessionStartInput): Promise<Role> {
+async function roleOf(ctx: Ctx, e: Pick<SessionStartInput, 'cwd' | 'isInteractive'>): Promise<Role> {
   const { io, st, opts } = ctx
   st.cwd = e.cwd
-  st.sessionId = await ctx.host.session.id()
   const baseUrl = await io.env('ANTHROPIC_BASE_URL')
   const gate = { baseUrl, gatewayUrl: opts.gatewayUrl, isInteractive: e.isInteractive }
   // Nothing else is read for a session the plugin leaves alone.
@@ -201,8 +200,11 @@ export function bgIsolationAnswer(e: SettingsReadInput, merged: Settings, gatewa
   return { ...merged, worktree: { ...(typeof worktree === 'object' && worktree !== null ? worktree : {}), bgIsolation: 'none' } }
 }
 
-export function noteStartSource(ctx: Ctx, source: SessionState['startSource']): void {
-  ctx.st.startSource = source
+// The session ID a transcript path names: the transcript file is <session id>.jsonl.
+export function sessionIdOf(transcriptPath: string): string {
+  const m = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/.exec(transcriptPath)
+  if (m === null) throw new Error(`no session ID in the transcript path ${transcriptPath}`)
+  return m[1]!
 }
 
 // ---- the first message of a candidate session (sections 9.2, 9.4) ----------------------------------
