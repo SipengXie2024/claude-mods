@@ -1,0 +1,8 @@
+{
+  "name": "insight-box",
+  "version": "0.1.0",
+  "description": "Draws the \"★ 思路\" block of an assistant reply as a closed, colored, rounded box in the transcript.",
+  "author": {
+    "name": "sipeng"
+  }
+}
