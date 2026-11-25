@@ -1,7 +1,7 @@
 {
   "name": "magpie-subagent-model",
-  "version": "0.1.0",
-  "description": "Under claude-magpie only, allow Agent subagents to target any Magpie model ID via a [model <id>] line in the prompt, leaving native Claude Code untouched.",
+  "version": "0.2.0",
+  "description": "Under claude-magpie only, inject the task-to-model routing table into the system prompt and route Agent subagents via [model <id>] and [effort <level>] lines in the prompt.",
   "author": {
     "name": "sipeng"
   },

@@ -1,0 +1,22 @@
+{
+  "name": "magpie-heads-up",
+  "version": "0.1.0",
+  "description": "Under claude-magpie only, run a side observer via $.model.fork that surfaces Heads up / You should know notes above the prompt.",
+  "author": {
+    "name": "sipeng"
+  },
+  "userConfig": {
+    "gatewayUrl": {
+      "type": "string",
+      "title": "Magpie gateway URL",
+      "description": "ANTHROPIC_BASE_URL value identifying a claude-magpie session.",
+      "default": "http://127.0.0.1:3425"
+    },
+    "checkEvery": {
+      "type": "number",
+      "title": "Check every N steps",
+      "description": "Run a side check every N main-loop model steps (default 6, matching built-in You should know).",
+      "default": 6
+    }
+  }
+}
