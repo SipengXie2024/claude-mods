@@ -1,0 +1,16 @@
+{
+  "name": "magpie-subagent-model",
+  "version": "0.1.0",
+  "description": "Under claude-magpie only, allow Agent subagents to target any Magpie model ID via a [model <id>] line in the prompt, leaving native Claude Code untouched.",
+  "author": {
+    "name": "sipeng"
+  },
+  "userConfig": {
+    "gatewayUrl": {
+      "type": "string",
+      "title": "Magpie gateway URL",
+      "description": "ANTHROPIC_BASE_URL value identifying a claude-magpie session.",
+      "default": "http://127.0.0.1:3425"
+    }
+  }
+}

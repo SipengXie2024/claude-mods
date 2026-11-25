@@ -68,6 +68,16 @@
       "name": "insight-box",
       "source": "./mods/insight-box",
       "description": "Draws the \"★ 思路\" block of an assistant reply as a closed, colored, rounded box in the transcript."
+    },
+    {
+      "name": "magpie-model-hint",
+      "source": "./mods/magpie-model-hint",
+      "description": "Under claude-magpie on a non-Claude model, inject a system-prompt guide for delegating hard engineering, deep audits, and GPU/TPU kernel work to Claude Mythos 5.2, Mythos 5.1, or Fable."
+    },
+    {
+      "name": "magpie-subagent-model",
+      "source": "./mods/magpie-subagent-model",
+      "description": "Under claude-magpie only, allow Agent subagents to target any Magpie model ID via a [model <id>] line in the prompt, leaving native Claude Code untouched."
     }
   ]
 }

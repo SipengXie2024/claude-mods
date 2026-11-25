@@ -1,0 +1,16 @@
+{
+  "name": "magpie-model-hint",
+  "version": "0.1.0",
+  "description": "Under claude-magpie on a non-Claude model, inject a system-prompt guide for delegating hard engineering, deep audits, and GPU/TPU kernel work to Claude Mythos 5.2, Mythos 5.1, or Fable.",
+  "author": {
+    "name": "sipeng"
+  },
+  "userConfig": {
+    "gatewayUrl": {
+      "type": "string",
+      "title": "Magpie gateway URL",
+      "description": "ANTHROPIC_BASE_URL value identifying a claude-magpie session.",
+      "default": "http://127.0.0.1:3425"
+    }
+  }
+}
