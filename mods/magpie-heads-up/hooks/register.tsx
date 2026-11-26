@@ -8,10 +8,12 @@ import {
   buildDiscussDraft,
   buildExplainPrompt,
   buildProposePrompt,
+  isEffortLevel,
   isMagpieGateway,
   lineKey,
   looksToSkipAfter,
   parseProposal,
+  type EffortLevel,
   type OfferTag,
 } from '../src/protocol'
 
@@ -48,6 +50,7 @@ interface Runtime {
   inFlight: Set<string>
   explaining: Set<string>
   promptsSinceView: Map<string, number>
+  lastEffort: Map<string, EffortLevel>
 }
 
 const STORE_KEY = 'state'
@@ -108,6 +111,7 @@ async function runCheck(
   sid: string,
   turnId: string | undefined,
   force: boolean,
+  effort?: EffortLevel,
 ): Promise<'shown' | 'none' | 'deduped' | 'unparsable' | 'skipped' | 'error'> {
   if (rt.inFlight.has(sid)) return 'skipped'
   rt.inFlight.add(sid)
@@ -130,7 +134,11 @@ async function runCheck(
       await saveState($, st)
     }
 
-    const forkRes = await $.model.fork({ prompt: buildProposePrompt(st.seen, st.known) })
+    const effectiveEffort = effort ?? rt.lastEffort.get(sid)
+    const forkReq = effectiveEffort !== undefined
+      ? { prompt: buildProposePrompt(st.seen, st.known), effort: effectiveEffort }
+      : { prompt: buildProposePrompt(st.seen, st.known) }
+    const forkRes = await $.model.fork(forkReq)
     if (!forkRes.isAnswered) {
       $.ui.log(`magpie-heads-up: fork unanswered (${forkRes.reason})`, { to: 'debug' })
       return forkRes.reason === 'nothing-to-fork' || forkRes.reason === 'empty-reply' ? 'none' : 'error'
@@ -235,7 +243,11 @@ async function openExplanation(
     await saveState($, fresh)
     $.ui.invalidate('ui.render')
 
-    const forkRes = await $.model.fork({ prompt: buildExplainPrompt(line) })
+    const effectiveEffort = rt.lastEffort.get(sid)
+    const forkReq = effectiveEffort !== undefined
+      ? { prompt: buildExplainPrompt(line), effort: effectiveEffort }
+      : { prompt: buildExplainPrompt(line) }
+    const forkRes = await $.model.fork(forkReq)
     const text = forkRes.isAnswered ? forkRes.text.trim() : ''
     const after = await loadState($)
     const rAfter = after.sessions.find(s => s.id === sid) ?? { id: sid }
@@ -293,6 +305,7 @@ export const register: Register = (on, options) => {
     inFlight: new Set<string>(),
     explaining: new Set<string>(),
     promptsSinceView: new Map<string, number>(),
+    lastEffort: new Map<string, EffortLevel>(),
   }
 
   on('session.start', async ($, e, next) => {
@@ -340,7 +353,7 @@ export const register: Register = (on, options) => {
     }
 
     if (arg === 'now' || arg === 'check') {
-      const outcome = await runCheck($, rt, sid, undefined, true)
+      const outcome = await runCheck($, rt, sid, undefined, true, rt.lastEffort.get(sid))
       if (outcome === 'shown') return { text: '已触发检查，发现一条提醒并显示在输入框上方。' }
       if (outcome === 'none') return { text: '已检查当前对话：暂无需要打断提醒的内容。' }
       if (outcome === 'skipped') return { text: '已有检查正在进行，请稍候。' }
@@ -351,6 +364,7 @@ export const register: Register = (on, options) => {
     const status = [
       `magpie-heads-up: ${st.enabled ? '已开启' : '已关闭'}`,
       `检查频率: 每 ${rt.checkEvery} 步`,
+      `旁路同步强度: ${rt.lastEffort.get(sid) ?? '沿用会话默认'}`,
       `已忽略退避: ${st.looksToSkip} 次（连续忽略 ${st.typedPastInARow} 条）`,
       `已记录话题: seen=${st.seen.length}, known=${st.known.length}`,
       `当前卡片: ${row?.view ? `${row.view.tag} · ${row.view.line}` : '无'}`,
@@ -374,9 +388,12 @@ export const register: Register = (on, options) => {
     if (e.agentId !== undefined) return yield* next(e)
 
     if (await isActive($, rt.gatewayUrl)) {
+      const sid = await $.session.id()
+      if (isEffortLevel(e.effort)) {
+        rt.lastEffort.set(sid, e.effort)
+      }
       const surfaces = await $.session.surfaces()
       if (surfaces.length > 0) {
-        const sid = await $.session.id()
         if (e.index === 0) {
           const count = rt.promptsSinceView.get(sid) ?? 0
           rt.promptsSinceView.delete(sid)
@@ -402,8 +419,10 @@ export const register: Register = (on, options) => {
             }
           }
         } else if (e.index > 0 && e.index % rt.checkEvery === 0) {
-          // Run the fork in the background so the main turn is never delayed.
-          void runCheck($, rt, sid, e.turnId, false)
+          // Run the fork in the background with the main thread's effective effort
+          // (already rewritten by jev) so per-effort caches (such as Astra) stay hot.
+          const stepEffort = isEffortLevel(e.effort) ? e.effort : rt.lastEffort.get(sid)
+          void runCheck($, rt, sid, e.turnId, false, stepEffort)
         }
       }
     }
@@ -505,6 +524,7 @@ export const register: Register = (on, options) => {
     rt.promptsSinceView.delete(e.sessionId)
     rt.inFlight.delete(e.sessionId)
     rt.explaining.delete(e.sessionId)
+    rt.lastEffort.delete(e.sessionId)
     return next(e)
   })
 }

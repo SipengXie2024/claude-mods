@@ -1,0 +1,8 @@
+{
+  "name": "magpie-code-mode",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "acorn": "^8.19.0"
+  }
+}

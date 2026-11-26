@@ -287,3 +287,44 @@ test('claude-magpie: turn.step triggers automatic check on step 6 and clears ign
   const cleared = await $.ui.render({ component: 'AbovePrompt', surface: 'terminal', props: ABOVE_MOUNT.props })
   expect(collectText(cleared)).toBe('jev-band')
 })
+
+test('claude-magpie: forks inherit the main thread effective effort across auto-check, explain, and /heads-up now', async ($, on) => {
+  mock.env(on, MAGPIE_ENV)
+  wireHost(on)
+  const seenEfforts: Array<string | undefined> = []
+  on('model.fork', (_: any, e: any) => {
+    seenEfforts.push(e.effort)
+    if (seenEfforts.length === 1) {
+      return { value: { isAnswered: true, text: 'learn: Astra 按思考强度分缓存。\ntag: Heads up' } }
+    }
+    if (seenEfforts.length === 2) {
+      return { value: { isAnswered: true, text: '**按档位缓存**\n需同步主线程档位。' } }
+    }
+    return { value: { isAnswered: true, text: 'learn: none' } }
+  })
+  on('turn.step', async function* (_: any, e: any) {
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn' }
+  })
+
+  await $.session.start({ cwd: '/tmp', isInteractive: true })
+
+  // Main turn runs at effort=max (e.g. rewritten by jev); subagent at low must not overwrite it.
+  for await (const _ of $.turn.step({ index: 0, turnId: 't1', model: 'codex/gpt-6.2-astra', effort: 'max' })) {}
+  for await (const _ of $.turn.step({ index: 0, turnId: 't1-sub', model: 'claude/claude-sonnet-5-5', effort: 'low', agentId: 'sub-1' })) {}
+  for await (const _ of $.turn.step({ index: 6, turnId: 't1', model: 'codex/gpt-6.2-astra', effort: 'max' })) {}
+  await new Promise(r => setTimeout(r, 20))
+
+  // Expand explanation (2nd fork) should also carry max.
+  const ui = await $.ui.mount(ABOVE_MOUNT)
+  await ui.press({ key: 'explain' })
+  await new Promise(r => setTimeout(r, 20))
+  await ui.unmount()
+
+  // Manual /heads-up now (3rd fork) should still carry max.
+  await $.command.run({ command: 'heads-up', args: 'now', origin: { kind: 'composer' } })
+  const statusRes = await $.command.run({ command: 'heads-up', args: 'status', origin: { kind: 'composer' } })
+
+  expect(seenEfforts).toEqual(['max', 'max', 'max'])
+  expect(statusRes.text).toContain('旁路同步强度: max')
+})
+

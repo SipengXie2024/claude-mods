@@ -25,4 +25,8 @@ tmux new-session -d -s "$SESS" -x 130 -y 40 "claude-magpie --model hakimi/gemini
 # Clean up when finished:
 tmux kill-session -t "$SESS"
 ```
-Remove temporary test entries if desired via `/heads-up clear` or clearing `~/.claude/plugins/store/magpie-heads-up_*.json`.
+
+4. Effort-sync cache hit check on `codex/gpt-6.2-astra` (where caches are keyed per effort level):
+Launch `claude-magpie --model codex/gpt-6.2-astra`, run one chat turn (JEV sets `low`), then `/heads-up now`, and verify in `~/.config/magpie/usage.jsonl` that the fork row carries `effort: "low"` (matching the main turn) and `cache_read > 0`.
+
+Remove temporary test entries if desired via `/heads-up clear` or restoring `~/.claude/plugins/store/magpie-heads-up_*.json`.

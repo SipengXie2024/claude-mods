@@ -1,0 +1,22 @@
+{
+  "name": "magpie-code-mode",
+  "version": "0.1.0",
+  "description": "Under claude-magpie only, port Claude Code's Code Mode (persistent JS REPL over built-in and MCP tools) with automatic hiding of fragmented file/shell/search/MCP tools.",
+  "author": {
+    "name": "sipeng"
+  },
+  "userConfig": {
+    "gatewayUrl": {
+      "type": "string",
+      "title": "Magpie gateway URL",
+      "description": "ANTHROPIC_BASE_URL value identifying a claude-magpie session.",
+      "default": "http://127.0.0.1:3425"
+    },
+    "defaultTimeoutMs": {
+      "type": "number",
+      "title": "Default script timeout (ms)",
+      "description": "Default maximum execution time per REPL script call (capped at 600000 ms).",
+      "default": 120000
+    }
+  }
+}

@@ -1,4 +1,11 @@
 export type OfferTag = 'Heads up' | 'You should know'
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+
+const EFFORT_LEVELS: ReadonlySet<string> = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
+
+export function isEffortLevel(value: unknown): value is EffortLevel {
+  return typeof value === 'string' && EFFORT_LEVELS.has(value)
+}
 
 export const DEFAULT_MAGPIE_GATEWAY = 'http://127.0.0.1:3425'
 export const DEFAULT_CHECK_EVERY = 6

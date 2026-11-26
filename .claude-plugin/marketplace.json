@@ -78,6 +78,11 @@
       "name": "magpie-heads-up",
       "source": "./mods/magpie-heads-up",
       "description": "Under claude-magpie only, run a side observer via $.model.fork that surfaces Heads up / You should know notes above the prompt."
+    },
+    {
+      "name": "magpie-code-mode",
+      "source": "./mods/magpie-code-mode",
+      "description": "Under claude-magpie only, port Claude Code's Code Mode (persistent JS REPL over built-in and MCP tools) with automatic hiding of fragmented file/shell/search/MCP tools."
     }
   ]
 }
